@@ -251,12 +251,13 @@ The table below lists the main types.
 | `OcinebSession`                | The band's refinement with the published controls (`OcinebConfig::refine`). `step` reports `Band`, `Align`, or `MinMode` |
 | `AutoNeb`                      | Insert on the worst gap, relax a local window, and climb. The full band runs only when `full_band` is set. `run` is one shot |
 | `AutoNebTuning`                | `n_simul`, `n_max`, local tolerance and step caps, `space_energy_ratio`, `climb`, `full_band`, `threads`, `record_samples`. Stored on `BandConfig` |
-| `BandConfig`                   | Tangent, spring, projection, climbing, cell, tolerances, method, optional AutoNEB tuning, `min_mode` refinement, `zoom`, `string`, `free_end` |
+| `BandConfig`                   | Tangent, spring, projection, climbing, cell, tolerances, method, optional AutoNEB tuning, `min_mode` refinement, `zoom`, `string`, `free_end`, optional `dynamic` (`DynamicNeb`, off unless set) |
 | `FreeEndConfig`, `FeaNebSession` | Free-end adaptive NEB of Zhang, Zhang, Ye, and Zheng (2016) and Zhu et al. (2007) on `BandConfig::free_end`. One terminal image (`FreeEndSide::First` or `FreeEndSide::Last`, default `Last`) moves on the target-energy level set with adaptive cut-and-remesh around the detected peak (`FreeEndReport`, `FeaNebReport`) |
 | `StringConfig`                 | Simplified string method of E, Ren, and Vanden-Eijnden (2007) on `BandConfig::string`. Non-exhaustive, off unless set. Evolves interior images under the full potential force and reparametrizes to equal arc length on `Reparametrization::NotAKnot` (default, `StringConfig::spline()`) or `Linear` (`StringConfig::linear()`), anchoring an armed climbing image |
 | `StringSession`                | Standalone simplified string session preserving per-image =ImageId=s and batched surface evaluations; target of `GrowingStringSession` hand-off |
 | `GrowingStringSession`         | Growing string method of Peters, Heyden, Bell, and Chakraborty (2004). Reactant and product fragments with frontier tangent constraints, configurable node-add criterion (`GrowingStringConfig`), separate fragment relaxation, join detection, and hand-off to `StringSession` |
 | `MinModeRefine`                | OCI-NEB refinement of the climbing image. Non-exhaustive. Trigger at any force, stability 1, start alignment 0.85, no alignment exit, retry under 0.5 of the starting force, refresh at 0.3 of the measured curvature or overlap 0.8 every 4 steps at most, budget 1000, Lanczos with twenty actions and relative tolerance 0.05 |
+| `DynamicNeb`                  | Dynamic NEB on `BandConfig::dynamic`. Non-exhaustive, off unless set. `fmax` 0.05 and `scale_fmax` 0 match ASE 3.29 `DyNEB`: an interior image whose largest per-atom projected force is strictly below `fmax * (1 + distance * scale_fmax)` keeps its last energy and force. `distance` is the Euclidean norm from the highest-energy image, with no minimum image. That image stays in the spring and the tangent and is evaluated again when the projected force exceeds the threshold. The highest-energy image is never given a zero force. |
 | `ZoomConfig`                   | The nudged elastic band (NEB) zoom, Zoom-NEB, on `BandConfig::zoom`. Non-exhaustive, off unless set. Recommended settings for a band that opts in are the defaults: `alpha` 0.5, `offset` 1, `stability` 5, cubic placement, and `after` 0. An `after` of 0 zooms once the largest per-image force, measured by the session's convergence norm, is below twice `force_tol`. The window always reaches both neighbours of the climbing image. The min-mode refinement waits for the zoom decision. Plain climbing image NEB (CI-NEB) on the 51 benchmark pairs of the 38-atom Lennard-Jones cluster (LJ38) converged 20 pairs with the zoom on and 21 without it. It used more force calls on 10 of the 17 pairs that converged both ways. With the default min-mode refinement on, one LJ38 pair ran to the 250000 call cap. On Müller-Brown at 13 images with FIRE and `max_move` 0.05, plain CI-NEB took 30593 force calls with the zoom and 31308 without it. With L-BFGS of memory 100 and climbing from half the first force, the zoom does not help on Müller-Brown: the band took 6503 force calls with it and 3280 without it. The zoom is an opt-in, not a general default. |
 | `BandSurface`                  | Host potential on a band (energies + gradients per image)                                                          |
 | `BandReport`                   | `status`, `max_force`, `ci_index`, `iteration`, `surface_rows`, `curvature` (refinement steps only), `saddle_index` (converged steps) |
@@ -515,6 +516,8 @@ From minor 63, 0 keeps the Rust default unless flag bit 0, `RGSADDLE_MINMODE_EXP
 The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 63 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
 `RGSADDLE_ABI_MINOR` is 64.
+`rgsaddle_band_set_dynamic` (minor 45) sets or clears `DynamicNeb` on a band.
+`rgsaddle_dyneb_mask` (minor 45) applies that mask to a projected band.
 From minor 24, `rgsaddle_sella_saddle_set_symmetrized_ritz` sets `SellaSaddleConfig::symmetrized_ritz` from 0 or 1.
 It returns `RGSADDLE_INVALID_PARAMETER` for any other value.
 `rgsaddle_sella_saddle_set_small_system_atom_ceiling` (minor 25) sets `SellaSaddleConfig::small_system_atom_ceiling` from 0 or 1.
@@ -588,7 +591,7 @@ The importable package is `rgsaddle`. `rgsaddle._core` is the nanobind extension
 | `rgsaddle.hyperplane_thermodynamic_integration` | Constrained hyperplane thermodynamic integration, BAR, MBAR, and PAFI profile estimation from hyperplane sample batches |
 | `rgsaddle.saddle_index` | Standalone point saddle-index certification on a callback surface, returning `SaddleIndex` (`certified`, `index`, `converged`, `curvatures`, `evaluations`, `total_evaluations`, `escapes`) |
 | `rgsaddle.reparametrize` | Equal-arc-length reparametrization of a path with `scheme`"linear"` or `"not-a-knot"` (`"spline"=) |
-| `rgsaddle._core` | Extension symbols: `ClaimSlot` (`__enter__`, `__exit__`), `MinMode` (`estimate`, `step`, `set_position`, `position`, `mode`, `saddle_index`, `set_saddle_check`), `SellaSaddle` (`step`, `position`), `version`, `project_band`, `halve_raised_energy`, `trust_update`, `RGSADDLE_FORCE_L2`, `RGSADDLE_FORCE_LINF`, `RGSADDLE_FORCE_MAX_ATOM`, `RGSADDLE_MINMODE_DIMER`, `RGSADDLE_MINMODE_LANCZOS`, `RGSADDLE_IRC_GS2`, `RGSADDLE_IRC_MOROKUMA`, `RGSADDLE_IRC_SELLA_SPHERE` |
+| `rgsaddle._core` | Extension symbols: `ClaimSlot` (`__enter__`, `__exit__`), `MinMode` (`estimate`, `step`, `set_position`, `position`, `mode`, `saddle_index`, `set_saddle_check`), `SellaSaddle` (`step`, `position`), `version`, `project_band`, `dyneb_mask`, `halve_raised_energy`, `trust_update`, `RGSADDLE_FORCE_L2`, `RGSADDLE_FORCE_LINF`, `RGSADDLE_FORCE_MAX_ATOM`, `RGSADDLE_MINMODE_DIMER`, `RGSADDLE_MINMODE_LANCZOS`, `RGSADDLE_IRC_GS2`, `RGSADDLE_IRC_MOROKUMA`, `RGSADDLE_IRC_SELLA_SPHERE` |
 | `rgsaddle.ase.NEB`, `MinModeAtoms`, `Sella`, `saddle_index` | ASE drop-in wrappers for nudged elastic band (`interpolate`, `get_positions`, `set_positions`, `get_potential_energy`, `get_forces`, `saddle_index`), minimum-mode effective forces (`get_forces`), order-1 Sella optimization (`attach`, `run`), and saddle-index certification |
 | `rgsaddle.connect` | Run-to-completion double-ended search. `surface(x)` is the one-image `(energy, gradient)` callback. `ConnectReport` holds `position`, `energy`, `force_norm`, `kind`, `hessian_index`, and `evaluations` |
 | `rgsaddle.lineb_solve` | Fixed-energy LI-NEB path and optional harmonic rate. `positions` is `(n_images, 3N)`, `atom_masses` one mass per atom, `molecular` selects coordinate expansion or molecule alignment, =beads=0= leaves `log_rate_over_reactant` as NaN. `LinebResult` holds `positions`, `action`, half periods, temperatures, call tallies, and the log rate |
@@ -598,6 +601,11 @@ The importable package is `rgsaddle`. `rgsaddle._core` is the nanobind extension
 | `rgsaddle.ase.SimplifiedString` | ASE `Optimizer` driver and `Optimizable` for the simplified string method over `list[Atoms]` (`attach`, `interpolate`, `get_positions`, `set_positions`, `get_potential_energy`, `get_forces`, `run`, `saddle_index`), with `FixAtoms` and optional climbing image |
 | `rgsaddle.ase.GrowingString` | ASE driver for the growing string method over `list[Atoms]` (`attach`, `run`, `saddle_index`), preserving image IDs and batched calculator evaluation |
 | `rgsaddle.ase.Point` | ASE `Optimizer` driver for one point preset (`attach`, `run`). `run(fmax, steps)` is ASE's own loop |
+| `rgsaddle.ase.NEB` | ASE's band call. `k` is a scalar or one value per spring. `method` is `improvedtangent`, `aseneb`, `eb`, or `dneb`. `spline`, `string`, `precon`, and the DyNEB keywords `dynamic_relaxation`, `fmax`, and `scale_fmax` raise `NotImplementedError`. `interpolate(method`'idpp')= and `idpp_interpolate` run `idpp_path` |
+| `rgsaddle.ase.SingleCalculatorNEB` | ASE's deprecated shared-calculator band. Constructing it warns with ASE's `FutureWarning` and is `NEB(allow_shared_calculator=True)` |
+| `rgsaddle.ase.DyNEB` | ASE 3.29 dynamic NEB. `dynamic_relaxation` (default true) leaves an image in place once its per-atom force is below `fmax`. `scale_fmax` scales that test by the distance from the highest-energy image. `dynamic_relaxation` false is the ordinary band |
+| `rgsaddle.idpp_path` | Image-dependent pair-potential path, endpoints included, shape `(n_images, 3N)`. `cell` is the 3x3 row-major lattice |
+| `rgsaddle.ase.DimerControl`, `MinModeAtoms`, `MinModeTranslate` | ASE's dimer. The mode and curvature come from `MinMode`. The trial step and conjugate gradient are ASE's. `order` other than 1 and a gauss displacement raise `NotImplementedError` |
 
 `SurfaceAdapter` keeps =get_forces(apply_constraint=False)= on `raw_forces`. The returned gradient is minus `get_forces()` after constraints. The adapter evaluates the given rows in order on the calling thread. `owners()` and `reentrant()` are what a driver uses to group. A second call while the first holds the adapter raises `RuntimeError`.
 
@@ -886,6 +894,8 @@ forces = search.get_forces()
 
 Above the well the curvature is positive, so the returned force lies along the mode and the perpendicular part is dropped. `tests/python/test_ase_dropin.py` checks that on this bowl. Once the curvature is negative the force along the mode is reflected and the perpendicular force stays, which is the translation Henkelman and Jónsson use to leave a minimum toward a saddle.
 
+ASE's own call is `MinModeAtoms(atoms, DimerControl(...))`, then `displace`, then `MinModeTranslate.run(fmax)`. The mode is this dimer. The trial step is ASE's. `tests/python/ase_upstream` runs that test from ASE 3.29.0.
+
 The stepper is an rgmin method on that effective force. FIRE is the default. L-BFGS takes one step per call because the reflected force is not the gradient of the energy the surface reports. `MinModeConfig.seed_curvature` scales only the first empty translation by \(1/|\lambda|\).
 
 Lanczos builds a Krylov subspace of finite-difference Hessian actions and stops on the residual. Set `kind="lanczos"` on the Python object, or `MinModeKind::Lanczos` on the Rust config. The same `get_forces` contract holds.
@@ -1149,11 +1159,12 @@ From C (ABI minor 60), `rgsaddle_band_set_refine` installs `RGSADDLE_REFINE_LBFG
 ## Free-end adaptive NEB
 
 `BandConfig::with_free_end(FreeEndConfig::default())` (`BandSession::set_free_end`, `FeaNebSession`, C `rgsaddle_band_set_free_end` at ABI minor 45, C++ `Band::set_free_end`, Python `Band.set_free_end`) implements the free-end adaptive nudged elastic band (FEA-NEB) of Jiayong Zhang, Hongwu Zhang, Hongfei Ye, and Yonggang Zheng, J. Chem. Phys. 145, 094104 (2016), doi:10.1063/1.4962019 [zhangFreeEndAdaptive2016], building on the free-end level-set endpoint formulation of Ting Zhu, Ju Li, Amit Samanta, Hyoung Gyu Kim, and Subra Suresh, Proc. Natl. Acad. Sci. U.S.A. 104, 3031 (2007), doi:10.1073/pnas.0611097104 [zhuInterfacialPlasticity2007]. Climbing on the final cut level reuses the climbing image, and with minimum-mode refinement left on, the off-path climb of Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026), doi:10.3389/fchem.2026.1807063 [goswamiEnhancedClimbingImage2026]. A nonzero endpoint gradient is required and the endpoint residual is reported.
-Fixed endpoints remain the default (`BandConfig::free_end` is `None`).
+Fixed endpoints remain the default (`BandConfig::free_end` is `None`). The free-end band is not combined with `BandConfig::dynamic`: `BandSession::new`, `BandSession::set_free_end`, and `BandSession::set_dynamic` return `SaddleError::Invalid` when both would be on.
+A free-end step asks the surface for the fixed terminal image once, and again only after a cut moves it to the window edge. The evaluation a step ends on is kept, so the next step starts from it instead of evaluating the band again, unless the host moved a row with `BandSession::set_positions` or called `BandSession::reset`. `FreeEndReport::surface_rows` counts the rows the surface saw.
 When enabled, one terminal image (`FreeEndSide::Last` by default, or `FreeEndSide::First`) takes Zhang et al. Eq. (7), the potential force perpendicular to the one-neighbour tangent, \(F^p_{\mathrm{end},\perp}`-\nabla E+(\nabla E\cdot\hat{\tau}_{\mathrm{end}})\hat{\tau}_{\mathrm{end}}\). That force does not include a spring. Net translation is removed, when the band drops it, before the force is projected onto the tangent hyperplane of \(E(x_{\mathrm{end}}) ` E_{\mathrm{target}}\). Each accepted endpoint geometry is then retracted onto that level set with `rgmin::Solver` and `rgmin::LevelSetConstraint`.
 The terminal image requires a finite, nonzero potential gradient and reports the signed residual \(E(x_{\mathrm{end}}) - E_{\mathrm{target}}\) in `FreeEndReport::target_energy_residual` and `BandSession::target_energy_residual`. `BandSession::evaluation` returns the energies, gradients, and projected interior forces at the positions that step reported.
 With `max_cuts > 0`, once the detected peak image holds its index for `stability` steps and the band force falls below the level threshold while rising above its neighbours by more than `energy_tol`, images outside the local window of `window_offset` images on each side of the peak are dropped. The band is remeshed at equal arc length along the window and, when the free terminal image lies outside that window, along the leg from the window to the free end, so the free end stays an endpoint and the spacing stays even. A window that would put the peak on an end, or that would remove no image, is not counted. A refused endpoint curvature pair is a stalled step and does not move the endpoint. `BandSession::step_free_end` and `FeaNebSession::step` run a latched minimum-mode refinement when climbing is on, the same way `BandSession::step` does.
-On a narrow barrier on a long tilted 2D path (`tests/free_end_neb.rs`), 7-image FEA-NEB with two cut-and-remesh refinements converges in 124 steps (2522 force evaluations, target-energy residual \(5.94 \times 10^{-8}\)) to the saddle \((0.820743, 0.205214)\) and barrier \(1.553678\), matching 21-image fixed-end CI-NEB (\((0.820788, 0.205196)\), barrier \(1.553678\), 1982 force evaluations) with three times fewer images.
+On a narrow barrier on a long tilted 2D path (`tests/free_end_neb.rs`), 7-image FEA-NEB with two cut-and-remesh refinements converges in 95 steps (1326 force evaluations, target-energy residual \(5.10 \times 10^{-8}\)) to the saddle \((0.820770, 0.205179)\) and barrier \(1.553678\), matching 21-image fixed-end CI-NEB (\((0.820788, 0.205196)\), barrier \(1.553678\), 1982 force evaluations) with three times fewer images.
 
 ## Fixed atoms
 
@@ -1217,7 +1228,9 @@ of `threads` workers that the session keeps.
 Each surface call is split into `min(threads, rows)` contiguous image
 blocks, one `BandSurface::eval` per block, and the answers are stored at
 their image indices once every block has finished.
-The force assembly stays on the calling thread.
+The tangent, spring, projection and optional preconditioned solve are
+also split by image on that pool.  Each worker writes only its image's
+fixed output slice, and errors are read back in image order.
 One thread is the default and leaves the band as it was; zero threads is
 refused.
 When the surface's answer for a row depends on that row alone, the band,
@@ -1235,6 +1248,12 @@ A band the session already holds does not go to the surface again: the
 accepted band and the band before it answer a repeated request, so a
 stepper that rejects a trial and returns to its start, as ODE12r does,
 makes no surface call for it.
+The assembled projected force is cached with that surface answer.  With
+the exponential metric its preconditioned driving force is cached too,
+so an ODE12r rejection does not repeat the per-image PCG solves.
+Metric neighbour construction uses linkcell's nearest-neighbour and
+cutoff walks, including minimum images in triclinic cells, rather than an
+all-pairs scan.
 The projected trust-region method (RTR) keeps the Hessian-vector
 products around its current base until the base, the climbing image or
 the force gate changes, so the step after a rejection reuses them.
@@ -1244,6 +1263,14 @@ Henkelman, Uberuaga and Jonsson, J. Chem. Phys. 113, 9901 (2000),
 doi:10.1063/1.1329672.
 
 ### Measured scaling
+The not-a-knot reparametrization solves the spline's tridiagonal
+second-moment equations in linear work per coordinate.  Its cost
+therefore grows as the number of images times the number of Cartesian
+coordinates, rather than cubically in the image count.
+`cargo bench --bench band_scaling` is a small regression smoke check for
+one preconditioned band step and a 64-image spline; campaign-scale timing
+belongs to BenchBot.
+
 `examples/band_scaling.rs` times a climbing-image band with FIRE on an
 adatom hop of an all-pairs Lennard-Jones cluster (the sites of a
 face-centred cubic lattice nearest the origin).
@@ -1369,6 +1396,13 @@ let report = connect(
 assert_eq!(report.kind, 's');
 assert!(report.position[0].abs() < 1e-3);
 ```
+
+## Dynamic NEB
+`BandConfig::dynamic` is off unless set. `DynamicNeb::default()` is ASE 3.29 `DyNEB`: `fmax` 0.05 and `scale_fmax` 0. `with_fmax` and `with_scale_fmax` change them. `fmax` is the largest per-atom Euclidean norm of the projected force, the optimizer's `fmax`, which is a different number from the band's `force_tol` (the largest absolute component).
+
+An interior image whose norm is strictly below `fmax * (1 + distance * scale_fmax)` is left where it is. `distance` is the Euclidean norm of the coordinate difference from the highest-energy image, with no minimum image. That image keeps the energy and the Cartesian force from the last time it was evaluated. The spring and the tangent still include it. The highest-energy image is never given a zero force. When a neighbour moves far enough that the projected force exceeds the threshold, the image is evaluated again.
+
+The climbing-image min-mode refinement is a separate phase and does not use this mask. The force the session reports is the projected force before that mask. The optimizer sees the masked force, and a step that leaves the band where it was stops when that masked force is under `force_tol`. An image whose force was not cleared stays free while its own convergence force is still above `force_tol`. An image the mask cleared stays pinned, so the reported force can remain above `force_tol` when the step stops. A solid-state band, the trust-region stepper, the simplified string method, and the free-end adaptive NEB refuse the option. `BandSession::set_dynamic` and `rgsaddle_band_set_dynamic` change it between steps. `rgsaddle_dyneb_mask` applies the same mask to a band the host has already projected. `rgsaddle.ase.DyNEB` is the ASE call; `rgsaddle.ase.NEB` still refuses `dynamic_relaxation`, `fmax`, and `scale_fmax`.
 
 # Grow a band with AutoNEB (`docs/orgmode/howto/autoneb.org`)
 
@@ -3821,7 +3855,6 @@ ABI minor 44 adds the growing string method of Peters, Heyden, Bell, and Chakrab
 `include/rgsaddle/session.hpp` wraps it as `rgsaddle::GrowingString`, and Python exposes `rgsaddle.GrowingString` and `rgsaddle.ase.GrowingString`.
 
 ABI minor 45 adds the free-end adaptive NEB of Zhang, Zhang, Ye, and Zheng, J. Chem. Phys. 145, 094104 (2016), doi:10.1063/1.4962019 [zhangFreeEndAdaptive2016]. It is a setter, not a band flag. `rgsaddle_band_set_free_end` enables, replaces, or clears it on a live `RgsaddleBand`: `side` is `RGSADDLE_FREE_END_FIRST` or `RGSADDLE_FREE_END_LAST`, `has_target_energy` selects `target_energy` or the endpoint's initial energy, and `max_cuts`, `cut_force`, `energy_tol`, `stability`, `window_offset`, and `cubic` are the adaptive window. `stability` and `window_offset` must be at least 1. `rgsaddle_band_free_end_residual` writes the signed residual \(E(x_{\mathrm{end}}) - E_{\mathrm{target}}\) from the last step, and `rgsaddle_band_free_end_cuts` returns how many windows were actually removed. `rgsaddle_band_evaluation` returns the energies, gradients, and projected interior forces at the positions that step reported. A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 45 before resolving these three symbols. `include/rgsaddle/session.hpp` wraps them as `Band::set_free_end`, `Band::free_end_residual`, and `Band::free_end_cuts`. The worked example is `tests/free_end_neb.rs`.
-
 ABI minor 47 adds `rgsaddle_lineb_solve_with_kappa` for a fixed endpoint coefficient. It takes the same arguments as `rgsaddle_lineb_solve` and one additional pointer. A positive finite value selects the fixed coefficient and a null pointer selects the normalized restraint.
 
 ABI minor 47 adds `RGSADDLE_LINEB_PROJECTED_VERLET` `(1u << 2)` to `rgsaddle_lineb_solve_options`. It selects the projected Verlet band integrator (`LinebConfig::with_projected_verlet`). A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 47 before setting that bit.
@@ -3840,6 +3873,13 @@ A NULL config selects the defaults, including `max_images` 32, so it requires `n
 A supplied `max_images` above `n_images` is `RGSADDLE_INVALID_PARAMETER`: the output buffer cannot grow, and the cap is not clamped.
 `bound_samples` is even. `length`, `lower`, and `upper` may be NULL.
 A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 64 before resolving these symbols.
+
+ABI minor 46 adds dynamic NEB.
+`rgsaddle_band_set_dynamic` takes 0 to clear it or 1 to set `fmax` and `scale_fmax`; any other flag returns `RGSADDLE_INVALID_PARAMETER` and leaves the band unchanged.
+A solid-state band, the trust-region stepper, the simplified string method, and the free-end adaptive NEB are refused.
+`rgsaddle_dyneb_mask` applies the same mask to a projected band the host already holds.
+While the option is on, an interior image that a neighbour pulls back over its threshold is requested alone: `RGSADDLE_REQ_ONE_IMAGE` is set, `image` is that image's band index, `n_images` is the band length, and `RGSADDLE_REQ_CLIMBING_IMAGE` is not set.
+A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 46 before resolving either symbol.
 
 # Use the headers from a meson project (`docs/orgmode/howto/meson.org`)
 
@@ -3994,22 +4034,24 @@ There is no global mutable state. The last-error string is thread-local. Arrays 
 The Rust sessions are the source of the mechanics. The Python classes in `rgsaddle.ase` follow the call shape of ASE's nudged elastic band, minimum-mode atoms, and Sella's `run(fmax, steps)`. Where the numbers differ, the difference is the one the tests lock in.
 
 ## From ASE's NEB
-`rgsaddle.ase.NEB(images, k=0.1, climb=False)` takes the same list of `Atoms` with calculators. `interpolate()` places the interior images on the straight line between the ends. `get_positions` and `get_forces` are the interior images only, and `ase.optimize.FIRE` drives them through `__ase_optimizable__`. `get_potential_energy` is the highest image energy.
+`rgsaddle.ase.NEB(images, k=0.1, climb=False)` takes the same list of `Atoms` with calculators. `k` is one spring or one constant per segment. `interpolate()` places the interior images on the straight line between the ends, and `interpolate(method='idpp')` then runs `idpp_path`. `mic` uses the minimum image for the straight line. `get_positions` and `get_forces` are the interior images only, and `ase.optimize` (`BFGS`, `FIRE`, `MDMin`) drives them through `__ase_optimizable__`. `get_potential_energy` is the highest interior energy.
 
 The spring constant defaults to 0.1, ASE's value. A `BandSession` still defaults to 5, eOn's value. Pass the number you mean.
 
-`method='improvedtangent'` and `method='aseneb'` build the same force. The tangent is a unit vector, so ASE's extra division by the tangent norm in the `aseneb` climbing step is 1. `eb` keeps the full spring. `dneb` adds the doubly nudged correction. `spline` and `string` are not this class; the exponential metric is `BandConfig.exp_precon` on the Rust session.
+`method='improvedtangent'` and `method='aseneb'` build the same force. The tangent is a unit vector, so ASE's extra division by the tangent norm in the `aseneb` climbing step is 1. `eb` keeps the full spring. `dneb` adds the doubly nudged correction. `spline` and `string` raise `NotImplementedError` naming the method. A `precon` does too. The exponential metric stays `BandConfig.exp_precon` on the Rust session.
 
 `climb=True` climbs on the call, with no arming delay. It does not climb when a higher endpoint slopes down into the band. ASE climbs the highest image anyway. That image then feels the reflected force and walks up a slope that has no saddle between it and the endpoint. `tests/python/test_ase_dropin.py` and `tests/api_input.rs` lock the refusal. A `BandSession` still waits until the band force drops before it arms the climb; the one-shot projection does not, because the caller already asked for it.
 
-`remove_rotation_and_translation=True` removes the mean Cartesian force. It does not rotate an image onto its neighbour. A Kabsch rotation would change the geometry the calculator evaluates, and the unit tangent already fixes the path direction.
+`remove_rotation_and_translation=True` on a free, non-periodic band moves each image onto the previous one with ASE's rigid fit before the force is built, and `interpolate` fits the product onto the reactant. A fixed atom is not rotated, and a periodic image is not rotated: the mean Cartesian force is removed instead, and a fixed atom keeps that mean. `parallel=True` on one rank evaluates on the calling thread. `world.size > 1` raises `NotImplementedError`.
 
 `FixAtoms` on the images is read into the band's fixed-atom mask, as `rgsaddle_band_set_fixed_atoms` takes it from C. The fixed atoms get zero force rows, keep the mean force even with `remove_rotation_and_translation=True`, and stay where the first image has them through `interpolate()`. Every image must fix the same atoms. Other constraints act through `get_forces()` as before.
 
-Image freezing (ASE's dynamic NEB) is not implemented.
+`dynamic_relaxation`, `fmax`, and `scale_fmax` on `NEB` raise `NotImplementedError`. `DyNEB` takes them: an image under `fmax` is left in place, `scale_fmax` loosens that test with the distance from the highest-energy image, and the default band is unchanged. A variable cell in a periodic direction raises `NotImplementedError` as well.
 
 ## From ASE's dimer and from Sella
 `rgsaddle.ase.MinModeAtoms(atoms, mode=...)` estimates a dimer or Lanczos mode and returns the effective force. Above the well the perpendicular force is dropped. Below it the force along the mode is reflected. An ASE optimizer can drive that object.
+
+`MinModeAtoms(atoms, control)` with a `DimerControl` is ASE's dimer call. `displace(method='vector')` applies a Cartesian displacement, `get_eigenmode`, `get_curvature`, and `get_barrier_energy` read the estimate, and `MinModeTranslate` takes the trial step and the conjugate-gradient direction from ASE while the mode comes from this dimer. `order` other than 1, an `eigenmode_method` other than `dimer`, a gauss displacement, and a communicator with `size > 1` raise `NotImplementedError` naming the option. The mode's sign follows the guess. Convergence wants the force below `fmax` and a negative curvature.
 
 `rgsaddle.ase.Sella(atoms, order=1)` is the saddle optimizer. `run(fmax, steps)` is ASE's loop. One step is the partitioned rational-function trust step, not a dimer translation. Masses come from `atoms.get_masses`.
 
@@ -4019,6 +4061,35 @@ The band tangents, springs, projections, and the climbing-image arm follow eOn's
 eOn's client reads a config file and a potential plugin. Here the host passes positions and a surface. There is no system name, species table, or potential key in the session. A solid-state band takes one cell per image and the Cauchy stress through `BandSurface::eval_cells`.
 
 Live Onsager-Machlup displacements are the atomic force over `2k`. A solid-state band has a cell block in the same vector, so that spring is refused at construction rather than applied as zeros.
+
+## ASE 3.29 tests
+`tests/python/ase_upstream` vendors ASE 3.29.0's NEB and dimer tests (LGPL-2.1-or-later) and substitutes `rgsaddle.ase.NEB`, `DyNEB`, `MinModeAtoms`, `DimerControl`, `MinModeTranslate`, `interpolate`, and `idpp_interpolate`. The Python CI job sets `RGSADDLE_REQUIRE_ASE=1`, so a missing ASE install fails collection. `ase/optimize/test/neb.py` is not vendored: it is a script with no pytest entry and no assertion.
+
+| Result | Test | Why |
+| --- | --- | --- |
+| passing | `test_neb` | Al(100)+Au, `FixAtoms`, BFGS, constrained and unconstrained forces |
+| passing | `test_idpp` | ethane methyl permutation through `idpp_path` |
+| passing | `test_interpolate_images` | linear placement, `mic`, constraints, cell and scaled coordinates |
+| passing | `test_COCu111`, `test_COCu111_2` | IDPP start, BFGS, shared calculator, trajectory |
+| passing | `test_neb_methods` `aseneb` and `improvedtangent`, precon `None` | Morse vacancy barrier |
+| passing | `test_deprecations`, `test_neb_default`, `test_raising_parallel_errors`, `test_no_shared_calc`, `test_init_checks`, `test_freeze_method` | constructor, shared calculator, image checks, frozen results |
+| passing | `test_dimer_method` | Pt hop with `DimerControl`, `displace`, and `MinModeTranslate` |
+| skipped | `test_autoneb.py` | drives ASE AutoNEB image insertion, not these drivers |
+| skipped | `test_dimer.py` | `FixBondLength` on a two-atom cluster, not the minimum-mode method |
+| skipped | `test_get_neb_method` | asserts ASE's private NEB method classes, not the public force |
+| skipped | `test_neb_optimizers` | drives ASE `NEBOptimizer` on a spline band with an Exp preconditioner |
+| skipped | `test_precon_initialisation`, `test_single_precon_initialisation`, `test_list_precon_initialisation`, `test_precon_assembly` | asserts ASE Exp preconditioner assembly, not the band force |
+| skipped | `test_spline_fit` | asserts ASE's cubic-spline fit object, not the band force |
+| skipped | `test_integrate_forces` | integrates forces on ASE's spline fit, not the band force |
+| skipped | `test_neb_methods` `spline` and `string`, and any precon | spline, string, and preconditioned NEB have no rgsaddle force |
+| skipped | `test_neb_tr` | FIRE step-count ratio follows ASE's partial BFGS IDPP path; the band force matches on one geometry and the barriers agree, but the aligned run is not faster by the factor 0.75 |
+| passing | `test_dynamic_neb` | Pt(111)+O, EMT, BFGS; dynamic and scaled DyNEB use fewer force calls than the plain band, and the barriers agree |
+| not supported | `method` `spline` and `string`, `precon` | no force equivalent; the name is in the `NotImplementedError` |
+| not supported | `parallel` with `world.size > 1` | no MPI image distribution |
+| not supported | `idpp` `mic` on a partially periodic cell | `idpp_path` wraps every axis |
+| not supported | `idpp_interpolate` `optimizer` other than `MDMin` or `BFGS`, and a custom `traj` or `log` | the path is `idpp_path` and it writes no trajectory |
+| not supported | gauss displacement, `order` other than 1, `eigenmode_method` other than `dimer` | the estimator is the dimer or Lanczos mode of order 1 |
+| not supported | variable cell in a periodic direction | the band cell is one lattice |
 
 # Step a point stencil (`docs/orgmode/howto/stencil.org`)
 
@@ -5104,6 +5175,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_band_set_fixed_atoms`. Purpose: Per-atom fixed mask shared by every image, ABI minor 39. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_band_set_zoom`. Purpose: Zoom-NEB, eOn's zoom_* keys. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_band_set_string`. Purpose: Select the simplified string method on the band, ABI minor 44. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_band_set_dynamic`. Purpose: Dynamic NEB (Lindgren, Kastlunger and Peterson, J. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_dyneb_mask`. Purpose: ASE 3.29 DyNEB mask, ABI minor 45. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_last_error`. Purpose: Diagnostic for the calling thread. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_stencil_config_new`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_stencil_config_set_f64`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
