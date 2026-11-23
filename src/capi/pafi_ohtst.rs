@@ -1,4 +1,5 @@
 use std::ffi::c_void;
+use std::mem::size_of;
 use std::slice;
 
 use ndarray::{Array1, ArrayView1};
@@ -12,9 +13,9 @@ use crate::ohtst::{
 use crate::pafi::{ArcPath, FreeEnergyProfile, HyperplaneAverage, PafiConfig, pafi_profile};
 
 use super::{
-    RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_INVALID_PARAMETER, RGSADDLE_NO_EVALUATION,
-    RGSADDLE_NULL_REPORT, RGSADDLE_NULL_SESSION, RGSADDLE_NULL_SURFACE, RGSADDLE_OK,
-    RgsaddleVersion, status_of,
+    RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_ABI_MISMATCH, RGSADDLE_INVALID_PARAMETER,
+    RGSADDLE_NO_EVALUATION, RGSADDLE_NULL_REPORT, RGSADDLE_NULL_SESSION, RGSADDLE_NULL_SURFACE,
+    RGSADDLE_OK, RGSADDLE_SHAPE, RgsaddleVersion, status_of,
 };
 
 /// The point-surface callback used by the PAFI and OH-TST C handles.
@@ -108,10 +109,15 @@ fn as_i64_saturated(value: usize) -> i64 {
     }
 }
 
-fn parse_pafi_config(config: &RgsaddlePafiConfig) -> Result<PafiConfig, SaddleError> {
+/// The PAFI config a C value asks for, or the status that refuses it.
+fn parse_pafi_config(config: &RgsaddlePafiConfig) -> Result<PafiConfig, i32> {
     if config.version.major != RGSADDLE_ABI_MAJOR {
-        return Err(SaddleError::Invalid("PAFI ABI major mismatch".into()));
+        return Err(RGSADDLE_ABI_MISMATCH);
     }
+    pafi_config_from(config).map_err(|err| status_of(&err))
+}
+
+fn pafi_config_from(config: &RgsaddlePafiConfig) -> Result<PafiConfig, SaddleError> {
     let thermalize = usize::try_from(config.thermalize)
         .map_err(|_| SaddleError::Invalid("PAFI thermalize".into()))?;
     let stride =
@@ -224,7 +230,7 @@ pub unsafe extern "C" fn rgsaddle_pafi_set_config(
     }
     let parsed = match parse_pafi_config(unsafe { &*config }) {
         Ok(config) => config,
-        Err(err) => return status_of(&err),
+        Err(code) => return code,
     };
     let session = unsafe { &mut *session };
     session.config = parsed;
@@ -411,12 +417,21 @@ pub struct RgsaddleOhtst {
     transmission: Option<TransmissionCoefficient>,
 }
 
+/// The OH-TST configs a C value asks for, or the status that refuses it.
 fn parse_ohtst_config(
     config: &RgsaddleOhtstConfig,
-) -> Result<(LangevinConfig, TransmissionConfig), SaddleError> {
+    n_dof: usize,
+) -> Result<(LangevinConfig, TransmissionConfig), i32> {
     if config.version.major != RGSADDLE_ABI_MAJOR {
-        return Err(SaddleError::Invalid("OH-TST ABI major mismatch".into()));
+        return Err(RGSADDLE_ABI_MISMATCH);
     }
+    ohtst_config_from(config, n_dof).map_err(|err| status_of(&err))
+}
+
+fn ohtst_config_from(
+    config: &RgsaddleOhtstConfig,
+    n_dof: usize,
+) -> Result<(LangevinConfig, TransmissionConfig), SaddleError> {
     let to_usize = |value: i64, name: &str| -> Result<usize, SaddleError> {
         usize::try_from(value).map_err(|_| SaddleError::Invalid(format!("OH-TST {name}")))
     };
@@ -479,12 +494,15 @@ pub unsafe extern "C" fn rgsaddle_ohtst_create(
     if config.is_null() || point.is_null() || normal.is_null() || n_dof < 1 {
         return std::ptr::null_mut();
     }
-    let cfg = unsafe { &*config };
-    let (sampler, shooting) = match parse_ohtst_config(cfg) {
+    let n = match usize::try_from(n_dof) {
         Ok(value) => value,
         Err(_) => return std::ptr::null_mut(),
     };
-    let n = match usize::try_from(n_dof) {
+    if n > isize::MAX as usize / size_of::<f64>() {
+        return std::ptr::null_mut();
+    }
+    let cfg = unsafe { &*config };
+    let (sampler, shooting) = match parse_ohtst_config(cfg, n) {
         Ok(value) => value,
         Err(_) => return std::ptr::null_mut(),
     };
@@ -518,11 +536,12 @@ pub unsafe extern "C" fn rgsaddle_ohtst_set_config(
     if config.is_null() {
         return RGSADDLE_INVALID_PARAMETER;
     }
-    let (sampler, shooting) = match parse_ohtst_config(unsafe { &*config }) {
-        Ok(value) => value,
-        Err(err) => return status_of(&err),
-    };
     let session = unsafe { &mut *session };
+    let (sampler, shooting) =
+        match parse_ohtst_config(unsafe { &*config }, session.plane.dim()) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
     session.sampler = sampler;
     session.shooting = shooting;
     session.transmission = None;
@@ -916,6 +935,124 @@ mod tests {
         );
         unsafe { rgsaddle_ohtst_free(tilt_session) };
         unsafe { rgsaddle_ohtst_free(session) };
+    }
+
+    fn pafi_config() -> RgsaddlePafiConfig {
+        RgsaddlePafiConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            thermal: 0.02,
+            mobility: 1.0,
+            time_step: 0.01,
+            thermalize: 5,
+            stride: 1,
+            samples: 8,
+            blocks: 2,
+            seed: 3,
+            fix_com: 0,
+            retain: 1,
+            target_error: 0.0,
+            max_rounds: 1,
+        }
+    }
+
+    fn ohtst_config() -> RgsaddleOhtstConfig {
+        RgsaddleOhtstConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            thermal: 0.5,
+            sample_time_step: 0.1,
+            sample_friction: 1.0,
+            sample_burn_in: 10,
+            sample_stride: 1,
+            sample_records: 16,
+            sample_blocks: 2,
+            sample_seed: 9,
+            sample_retain: 4,
+            sample_integrator: 0,
+            shooting_friction: 1.5,
+            shooting_time_step: 0.05,
+            shooting_steps: 20,
+            shooting_check_every: 5,
+            shooting_commit: 0,
+            shooting_shots: 8,
+            shooting_blocks: 2,
+            shooting_seed: 17,
+            counting: 0,
+        }
+    }
+
+    #[test]
+    fn set_config_refuses_another_major_and_a_null_session() {
+        let frames = [-1.0, 0.0, 1.0];
+        let good = pafi_config();
+        let mut other_major = pafi_config();
+        other_major.version.major = RGSADDLE_ABI_MAJOR + 1;
+        assert!(
+            unsafe {
+                rgsaddle_pafi_create(&other_major, 3, 1, frames.as_ptr(), std::ptr::null(), 0)
+            }
+            .is_null()
+        );
+        let pafi =
+            unsafe { rgsaddle_pafi_create(&good, 3, 1, frames.as_ptr(), std::ptr::null(), 0) };
+        assert!(!pafi.is_null());
+        assert_eq!(
+            unsafe { rgsaddle_pafi_set_config(pafi, &other_major) },
+            RGSADDLE_ABI_MISMATCH
+        );
+        assert_eq!(
+            unsafe { rgsaddle_pafi_set_config(pafi, &good) },
+            RGSADDLE_OK
+        );
+        assert_eq!(
+            unsafe { rgsaddle_pafi_set_config(pafi, std::ptr::null()) },
+            RGSADDLE_INVALID_PARAMETER
+        );
+        for config in [&good, &other_major] {
+            assert_eq!(
+                unsafe { rgsaddle_pafi_set_config(std::ptr::null_mut(), config) },
+                RGSADDLE_NULL_SESSION
+            );
+        }
+        unsafe { rgsaddle_pafi_free(pafi) };
+
+        let point = [0.0, 0.0];
+        let normal = [1.0, 0.0];
+        let good = ohtst_config();
+        let mut other_major = ohtst_config();
+        other_major.version.major = RGSADDLE_ABI_MAJOR + 1;
+        assert!(
+            unsafe { rgsaddle_ohtst_create(&other_major, 2, point.as_ptr(), normal.as_ptr()) }
+                .is_null()
+        );
+        let ohtst = unsafe { rgsaddle_ohtst_create(&good, 2, point.as_ptr(), normal.as_ptr()) };
+        assert!(!ohtst.is_null());
+        assert_eq!(
+            unsafe { rgsaddle_ohtst_set_config(ohtst, &other_major) },
+            RGSADDLE_ABI_MISMATCH
+        );
+        assert_eq!(
+            unsafe { rgsaddle_ohtst_set_config(ohtst, &good) },
+            RGSADDLE_OK
+        );
+        assert_eq!(
+            unsafe { rgsaddle_ohtst_set_config(ohtst, std::ptr::null()) },
+            RGSADDLE_INVALID_PARAMETER
+        );
+        for config in [&good, &other_major] {
+            assert_eq!(
+                unsafe { rgsaddle_ohtst_set_config(std::ptr::null_mut(), config) },
+                RGSADDLE_NULL_SESSION
+            );
+        }
+        unsafe { rgsaddle_ohtst_free(ohtst) };
     }
 
     #[test]
