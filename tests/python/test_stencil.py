@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import threading
 
 import numpy as np
 
+import rgsaddle
 from rgsaddle import Stencil
 
 
@@ -111,3 +113,37 @@ def test_dimer_stencil_keeps_the_documented_default_rotation_angle_stop() -> Non
     assert report_stock.evaluations == report_tight.evaluations
     assert np.allclose(stock.mode(), tight.mode(), atol=0.0, rtol=0.0)
     assert np.allclose(stock.positions(), tight.positions(), atol=0.0, rtol=0.0)
+
+
+def shallow_saddle(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    row = np.ascontiguousarray(x, dtype=np.float64)
+    v = row[0]
+    energy = np.array([-0.0025 * v[0] * v[0] + 5.0 * v[1] * v[1]], dtype=np.float64)
+    gradient = np.array([[-0.005 * v[0], 10.0 * v[1]]], dtype=np.float64)
+    return energy, gradient
+
+
+def test_art_defaults_match_rust_stencil_point() -> None:
+    x = np.array([0.4, 0.3], dtype=np.float64)
+    mode = np.array([1.0, 0.0], dtype=np.float64)
+    default_art = Stencil.point(x, preset="art", mode=mode)
+    explicit_art = Stencil.point(x, preset="art", mode=mode, art_threshold=-0.01, art_push=3)
+    for step_index in range(4):
+        rep_def = default_art.step(shallow_saddle)
+        rep_exp = explicit_art.step(shallow_saddle)
+        if step_index < 3:
+            assert np.isnan(rep_def.curvature)
+        else:
+            assert np.isfinite(rep_def.curvature)
+        assert rep_def.evaluations == rep_exp.evaluations
+        assert np.float64(rep_def.curvature).tobytes() == np.float64(rep_exp.curvature).tobytes()
+        pos_def = np.asarray(default_art.positions(), dtype=np.float64)
+        pos_exp = np.asarray(explicit_art.positions(), dtype=np.float64)
+        assert pos_def.tobytes() == pos_exp.tobytes()
+    assert np.asarray(default_art.positions(), dtype=np.float64)[0] > 1.0
+
+    doc = Stencil.point.__doc__ or ""
+    assert "art_threshold: float = -0.01" in doc
+    assert "art_push: int = 3" in doc
+    stub = (Path(rgsaddle.__file__).resolve().parent / "_core.pyi").read_text(encoding="utf-8")
+    assert "art_threshold: float = -0.01, art_push: int = 3" in stub

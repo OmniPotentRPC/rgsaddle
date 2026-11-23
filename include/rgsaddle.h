@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 65u
+#define RGSADDLE_ABI_MINOR 66u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1535,7 +1535,10 @@ rgsaddle_status_t rgsaddle_dyneb_mask(int64_t n_images, int64_t n_atoms,
  * The older band and min-mode sessions stay step-only.
  * Band presets (5 through 13) fail at rgsaddle_stencil_new with
  * rgsaddle_last_error(); the band builder is feat/band-methods-zoom.
- * ABI minor stays 16. These symbols are additive.
+ * ABI minor stays 16 for these additive symbols; from ABI minor 66,
+ * RGSADDLE_STENCIL_KEY_ART_THRESHOLD defaults to -0.01 and
+ * RGSADDLE_STENCIL_KEY_ART_PUSH defaults to 3, matching
+ * rgsaddle_artn_config_default.
  */
 typedef struct rgsaddle_stencil_config rgsaddle_stencil_config_t;
 typedef struct rgsaddle_stencil rgsaddle_stencil_t;
@@ -1590,6 +1593,11 @@ typedef struct {
 /** Diagnostic for the calling thread. Copy before the next stencil or LI-NEB call. */
 const char *rgsaddle_last_error(void);
 
+/**
+ * Allocate a point-stencil configuration with the Stencil::point defaults;
+ * from ABI minor 66, RGSADDLE_STENCIL_KEY_ART_THRESHOLD is -0.01 and
+ * RGSADDLE_STENCIL_KEY_ART_PUSH is 3 (rgsaddle_artn_config_default).
+ */
 rgsaddle_stencil_config_t *rgsaddle_stencil_config_new(int32_t preset);
 rgsaddle_status_t rgsaddle_stencil_config_set_f64(rgsaddle_stencil_config_t *config,
                                                   int32_t key, double value);

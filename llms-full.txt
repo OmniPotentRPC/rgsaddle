@@ -515,7 +515,7 @@ For config minors 5 through 62 this field is read as given, so 0 disables the an
 From minor 63, 0 keeps the Rust default unless flag bit 0, `RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL`, is set; then 0 disables it.
 The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 63 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
-`RGSADDLE_ABI_MINOR` is 65.
+`RGSADDLE_ABI_MINOR` is 66.
 `rgsaddle_band_set_dynamic` (minor 65) sets or clears `DynamicNeb` on a band.
 `rgsaddle_dyneb_mask` (minor 65) applies that mask to a projected band.
 From minor 24, `rgsaddle_sella_saddle_set_symmetrized_ritz` sets `SellaSaddleConfig::symmetrized_ritz` from 0 or 1.
@@ -533,6 +533,7 @@ From minor 41 a Lanczos session reads it too.
 From minor 46, -1 leaves the window off for an improved dimer with a positive `rotation_angle_tol`.
 `rgsaddle_minmode_set_rotation_stop_length` (minor 38) calls `MinModeSession::set_rotation_stop_length`; 0 turns the stop off and a negative or non-finite length returns `RGSADDLE_INVALID_PARAMETER`.
 From minor 43, `rgsaddle_artn_config_default` fills `rgsaddle_artn_config_t` with the published defaults and `rgsaddle_minmode_set_artn` enables them on a Lanczos session or disables them with NULL.
+From minor 66, `rgsaddle_stencil_config_new` uses those `eigenvalue_threshold` and `lanczos_start` defaults (-0.01 and 3) for `RGSADDLE_STENCIL_KEY_ART_THRESHOLD` and `RGSADDLE_STENCIL_KEY_ART_PUSH`.
 `rgsaddle_reparametrize` (minor 38) places a band at equal arc length with an `rgsaddle_reparametrization_t`, and band flag bit 4, `RGSADDLE_BAND_SPLINE_REPARAM`, puts the trust-region band on the not-a-knot spline.
 From minor 44, band flag bit 5, `RGSADDLE_BAND_STRING`, runs the simplified string method of E, Ren, and Vanden-Eijnden (2007) (with `RGSADDLE_BAND_SPLINE_REPARAM` for the not-a-knot spline, or the polyline without it), and `rgsaddle_band_set_string` enables or clears it on a live band.
 From minor 44, `rgsaddle_growing_string_config_default`, `rgsaddle_growing_string_create`, `rgsaddle_growing_string_step`, `rgsaddle_growing_string_n_images`, `rgsaddle_growing_string_nodes_added`, `rgsaddle_growing_string_phase`, `rgsaddle_growing_string_positions`, `rgsaddle_growing_string_ids`, `rgsaddle_growing_string_set_fixed_atoms`, `rgsaddle_growing_string_saddle_index`, and `rgsaddle_growing_string_free` expose the growing string method of Peters, Heyden, Bell, and Chakraborty (2004). The growing string `join_tol` uses -1.0 for no early join and treats zero as an inclusive zero-gap threshold.
@@ -3735,7 +3736,7 @@ CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --locked --features chemfiles
 
 > Stepping bands, minimum-mode sessions, Sella, IRC, and strings from C and C++
 
-`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 65. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
+`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 66. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
 
 A surface callback returns `rgsaddle_status_t` and receives one `rgsaddle_surface_request_t`. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES` report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -3789,6 +3790,7 @@ ABI minor 43 adds the opt-in ART nouveau controls.
 A NULL config disables the protocol.
 The setter rejects a dimer, nonzero reserved flags, negative counts and invalid floating-point controls without changing the session.
 Enabling or disabling restarts search history at the current position and mode; creating and stepping a session without this call is unchanged.
+From ABI minor 66, `rgsaddle_stencil_config_new` initializes `RGSADDLE_STENCIL_KEY_ART_THRESHOLD` to -0.01 and `RGSADDLE_STENCIL_KEY_ART_PUSH` to 3, matching `rgsaddle_artn_config_default`.
 
 From ABI minor 33 a band config with `RGSADDLE_SPRING_ONSAGER_MACHLUP` (spring 2) builds the Onsager-Machlup springs of Mandelli and Parrinello.
 At every evaluation each interior image gets the displacement `F / (2 spring_k)` of its current force, as eOn's `buildSpringStrategy` does.
@@ -4105,11 +4107,11 @@ let mut search = Stencil::point(x0)
 let report = search.step(&surface)?;
 ```
 
-ART pushes along the seed until the curvature falls under `art_threshold` (default 0), then climbs with Lanczos. Malek and Mousseau (2000), doi:10.1103/PhysRevE.62.7723. Eigen following builds a central-difference Hessian, calls `exact_eigh`, and makes the largest-magnitude component of the lowest mode positive. `build` rejects `Climb::Reflect` on a minimiser, a window on a point, a zero thread count, and ART without a mode solver.
+ART pushes along the seed with perpendicular relaxation, starts Lanczos after `art_push_steps` pushes (default 3; `art_push` in Python and `RGSADDLE_STENCIL_KEY_ART_PUSH` in C), and climbs with Lanczos once the lowest curvature falls under `art_threshold` (default -0.01), matching `ArtNConfig`. Malek and Mousseau (2000), doi:10.1103/PhysRevE.62.7723. Eigen following builds a central-difference Hessian, calls `exact_eigh`, and makes the largest-magnitude component of the lowest mode positive. `build` rejects `Climb::Reflect` on a minimiser, a window on a point, a zero thread count, and ART without a mode solver.
 
 `Stencil::band` checks the array and then returns `band presets stay on feat/band-methods-zoom`. Zoom, energy-weighted springs, and the band side of the builder are that branch. The chain, the mesh (remesh, insert, window), and the point controller are on this branch.
 
-From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only, and the ABI minor stays 16.
+From C, `rgsaddle_stencil_config_new` takes the preset discriminant and fills the `Stencil::point` defaults (from ABI minor 66, `RGSADDLE_STENCIL_KEY_ART_THRESHOLD` is -0.01 and `RGSADDLE_STENCIL_KEY_ART_PUSH` is 3). Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only, and these stencil symbols entered at ABI minor 16.
 
 From Python, `rgsaddle.Stencil.point(x, preset`"dimer")= takes a C-contiguous float64 vector. `step(surface)` releases the thread, and the surface callback re-attaches. `rgsaddle.ase.Point(atoms, preset`"dimer").run(fmax, steps)= is an ASE `Optimizer` whose `step` is one stencil step. A second thread that enters the same handle raises `RuntimeError`.
 
@@ -5178,7 +5180,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_band_set_dynamic`. Purpose: Dynamic NEB (Lindgren, Kastlunger and Peterson, J. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_dyneb_mask`. Purpose: ASE 3.29 DyNEB mask, ABI minor 65. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_last_error`. Purpose: Diagnostic for the calling thread. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_stencil_config_new`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_stencil_config_new`. Purpose: Allocate a point-stencil configuration with the Stencil::point defaults; from ABI minor 66, RGSADDLE_STENCIL_KEY_ART_THRESHOLD is -0.01 and RGSADDLE_STENCIL_KEY_ART_PUSH is 3 (rgsaddle_artn_config_default). Parameters: the declaration. Units: the caller's.
 - `rgsaddle_stencil_config_set_f64`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_stencil_config_set_i64`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_stencil_config_set_array`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
