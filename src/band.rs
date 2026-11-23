@@ -5133,6 +5133,32 @@ mod tests {
         }
     }
 
+    struct BacktrackingBand {
+        calls: AtomicUsize,
+    }
+
+    impl BandSurface for BacktrackingBand {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            let energy = match call {
+                0 => 1.0,
+                1 => 1.0 - f64::EPSILON,
+                _ => 2.0,
+            };
+            energies.fill(energy);
+            for i in 0..positions.nrows() {
+                gradients[(i, 0)] = 0.001;
+                gradients[(i, 1)] = -0.002;
+            }
+            Ok(())
+        }
+    }
+
     fn metric_view(session: &BandSession) -> Option<BandMetrics<'_>> {
         session.exp.as_ref().map(|exp| BandMetrics {
             per_image: exp.metrics.as_slice(),
@@ -5204,6 +5230,59 @@ mod tests {
         )
         .expect("cached finish");
         assert_eq!(session.state.pcg_solves.load(Ordering::Relaxed), finished);
+    }
+
+    #[test]
+    fn lbfgs_step_finishes_the_accepted_point_with_the_metric() {
+        let positions = Array2::from_shape_vec(
+            (3, 9),
+            vec![
+                0.0, 0.0, 0.0, 1.1, 0.0, 0.0, 0.0, 1.2, 0.1, 0.2, 0.1, 0.0, 1.2, 0.2, 0.0, 0.1,
+                1.3, 0.2, 0.4, 0.2, 0.0, 1.3, 0.4, 0.1, 0.2, 1.4, 0.3,
+            ],
+        )
+        .expect("positions");
+        let config = BandConfig::default()
+            .with_method(Method::lbfgs())
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_exp_precon(ExpBandPrecon::default().with_mu(1.0));
+        let mut session = BandSession::new(config, positions).expect("band");
+        session
+            .solver
+            .set_lbfgs_step(rgmin::LbfgsStep::Wolfe)
+            .expect("Wolfe L-BFGS");
+        session.solver.set_geometry_step(false);
+        session.solver.set_accept(Accept::None);
+        let surface = BacktrackingBand {
+            calls: AtomicUsize::new(0),
+        };
+        let before = session.interior_flat();
+        let report = session.step(&surface).expect("L-BFGS step");
+        assert_eq!(report.status, BandStatus::Running);
+        let calls = surface.calls.load(Ordering::Relaxed);
+        assert!(calls > 3, "the Wolfe search made {calls} surface calls");
+        let accepted = session.interior_flat();
+        assert_ne!(accepted, before);
+
+        let solves = session.state.pcg_solves.load(Ordering::Relaxed);
+        let _ = assemble_band_with(
+            &session.config,
+            &session.state,
+            &surface,
+            session.positions.row(0),
+            session.positions.row(2),
+            accepted.view(),
+            metric_view(&session),
+        )
+        .expect("accepted geometry is cached");
+        assert_eq!(
+            session.state.pcg_solves.load(Ordering::Relaxed),
+            solves,
+            "the off-last finish did not cache the accepted driving force"
+        );
     }
 
     #[test]
