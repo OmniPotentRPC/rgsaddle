@@ -971,6 +971,13 @@ class DyNEB(NEB):
             )
 
     def set_positions(self, positions: Any, adjust_positions: bool = True) -> None:
+        """Move interior images whose force is still at or above ``fmax``.
+
+        The band force is read once, on the coordinates this call
+        started with, and every free image is moved after that. A force
+        read inside the image loop would evaluate a band whose earlier
+        images had already moved.
+        """
         if not self.dynamic_relaxation:
             super().set_positions(positions, adjust_positions)
             return
@@ -984,15 +991,16 @@ class DyNEB(NEB):
         expect = (len(self.images) - 2) * natoms
         if len(array) != expect:
             raise ValueError(f"positions: expected {expect} atoms, got {len(array)}")
+        if len(self.images) < 3:
+            return
+        forces = np.asarray(self.get_forces(), dtype=np.float64).reshape((-1, 3))
         n1 = 0
-        for index, image in enumerate(self.images[1:-1]):
-            block = self.get_forces()[index * natoms : (index + 1) * natoms]
+        for image in self.images[1:-1]:
+            block = forces[n1 : n1 + natoms]
             image_fmax = float(np.sqrt((block**2).sum(axis=1)).max()) if block.size else 0.0
-            if image_fmax < self.fmax:
-                n1 += natoms
-            else:
+            if image_fmax >= self.fmax:
                 image.set_positions(array[n1 : n1 + natoms], apply_constraint=False)
-                n1 += natoms
+            n1 += natoms
 
     def get_forces(self) -> Float64:
         interior = super().get_forces()
