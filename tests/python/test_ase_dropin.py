@@ -12,6 +12,7 @@ if os.environ.get("RGSADDLE_REQUIRE_ASE") != "1":
     pytest.importorskip("ase")
 from ase import Atoms
 from ase.calculators.calculator import Calculator
+from ase.constraints import FixAtoms
 from ase.optimize import FIRE
 
 from rgsaddle.ase import MinModeAtoms, NEB, Sella
@@ -75,6 +76,18 @@ def test_interpolate_places_the_interior_on_the_segment() -> None:
     assert np.all(np.isfinite(listed.get_forces()))
     with pytest.raises(ValueError, match="springs"):
         NEB(images, k=[0.2])
+
+
+def test_neb_interpolate_follows_ase_constraint_modes() -> None:
+    images = _chain(Bowl, [-1.0, 0.5, 1.0])
+    images[1].set_constraint(FixAtoms([0]))
+    neb = NEB(images, method="improvedtangent")
+    with pytest.raises(RuntimeError, match="Constraints in image 1"):
+        neb.interpolate()
+    neb.interpolate(apply_constraint=True)
+    assert images[1].positions[0, 0] == 0.5
+    neb.interpolate(apply_constraint=False)
+    assert images[1].positions[0, 0] == 0.0
 
 
 def test_a_slope_into_the_band_does_not_climb() -> None:

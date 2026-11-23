@@ -13,7 +13,8 @@ raw force.
 from __future__ import annotations
 
 import warnings
-from typing import Any, Literal
+from collections.abc import Callable
+from typing import Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -452,7 +453,8 @@ def interpolate(
     if not use_scaled_coord and mic:
         from ase.geometry import find_mic
 
-        step = find_mic(step, images[0].get_cell(), images[0].pbc)[0]
+        typed_find_mic = cast(Callable[[Any, Any, Any], tuple[Float64, Any]], find_mic)
+        step = typed_find_mic(step, images[0].get_cell(), images[0].pbc)[0]
     step = step / (len(images) - 1.0)
     cell1 = None
     cell_step = None
@@ -708,7 +710,8 @@ class NEB:
     def freeze_results_on_image(atoms: Any, **results: Any) -> None:
         from ase.calculators.singlepoint import SinglePointCalculator
 
-        atoms.calc = SinglePointCalculator(atoms, **results)
+        make_calculator = cast(Callable[..., Any], SinglePointCalculator)
+        atoms.calc = make_calculator(atoms, **results)
 
     def _refuse_shared(self) -> None:
         if self.allow_shared_calculator:
@@ -748,7 +751,8 @@ class NEB:
             return
         from ase.build import minimize_rotation_and_translation
 
-        minimize_rotation_and_translation(self.images[0], self.images[-1])
+        align = cast(Callable[[Any, Any], None], minimize_rotation_and_translation)
+        align(self.images[0], self.images[-1])
 
     def _align(self) -> bool:
         """Align each image onto the previous one. True when that ran."""
@@ -756,8 +760,9 @@ class NEB:
             return False
         from ase.build import minimize_rotation_and_translation
 
+        align = cast(Callable[[Any, Any], None], minimize_rotation_and_translation)
         for index in range(1, len(self.images)):
-            minimize_rotation_and_translation(self.images[index - 1], self.images[index])
+            align(self.images[index - 1], self.images[index])
         return True
 
     def interpolate(self, method: str = "linear", mic: bool = False, apply_constraint: bool | None = None) -> None:
@@ -768,12 +773,7 @@ class NEB:
             raise ValueError("interpolation needs two endpoints and one interior image")
         if self.remove_rotation_and_translation:
             self._align_endpoints()
-        if apply_constraint is True:
-            interpolate(self.images, mic=mic, apply_constraint=True)
-        else:
-            interpolate(self.images, mic=mic, apply_constraint=False)
-            if apply_constraint is None:
-                _pin_fixed(self.images)
+        interpolate(self.images, mic=mic, apply_constraint=apply_constraint)
         if method == "idpp":
             _place_idpp(self.images, mic=mic)
 
@@ -1281,8 +1281,8 @@ class MinModeAtoms:
         if norm == 0.0:
             mode = np.zeros_like(mode)
             mode[0] = 1.0
-            return mode
-        return mode / norm
+            return np.array(mode, dtype=np.float64, copy=True)
+        return np.array(mode / norm, dtype=np.float64, copy=True)
 
     def _initialize_eigenmode(self) -> None:
         if self._have_mode:
@@ -1373,7 +1373,9 @@ class MinModeAtoms:
                 return raw
             if self._eigenmode is None:
                 self._estimate()
-            return _effective_force(raw, self._eigenmode.reshape(-1), self.curvature)
+            mode = self._eigenmode
+            assert mode is not None
+            return _effective_force(raw, mode.reshape(-1), self.curvature)
         current = np.asarray(self.atoms.get_positions(), dtype=np.float64)
         if (
             self._cache_pos is not None
@@ -1511,26 +1513,29 @@ class MinModeTranslate:
         self._cg_init = True
         self._direction_old: Float64 | None = None
         self._cg_direction: Float64 | None = None
-        self._driver = _Driver(dimeratoms, logfile=logfile, trajectory=trajectory)
+        self._driver = _Driver(cast(Any, dimeratoms), logfile=logfile, trajectory=trajectory)
 
     def __enter__(self) -> MinModeTranslate:
-        self._driver.__enter__()
+        enter: Callable[[], Any] = self._driver.__enter__
+        enter()
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> Any:
-        return self._driver.__exit__(exc_type, exc_value, traceback)
+        exit_driver: Callable[[object, object, object], Any] = self._driver.__exit__
+        return exit_driver(exc_type, exc_value, traceback)
 
     def run(self, fmax: float = 0.05, steps: int | None = None) -> bool:
+        run_driver: Callable[..., Any] = self._driver.run
         if steps is None:
-            return bool(self._driver.run(fmax=fmax))
-        return bool(self._driver.run(fmax=fmax, steps=steps))
+            return bool(run_driver(fmax=fmax))
+        return bool(run_driver(fmax=fmax, steps=steps))
 
     def _cg(self, direction: Float64) -> Float64:
         if self._cg_init or self._direction_old is None or self._cg_direction is None:
             self._cg_init = False
             self._direction_old = np.array(direction, dtype=np.float64, copy=True)
             self._cg_direction = np.array(direction, dtype=np.float64, copy=True)
-            return self._cg_direction.copy()
+            return np.array(self._cg_direction, dtype=np.float64, copy=True)
         old_norm = float(np.dot(self._direction_old.ravel(), self._direction_old.ravel()))
         beta = 0.0
         if old_norm != 0.0:
@@ -1541,7 +1546,7 @@ class MinModeTranslate:
             beta = 0.0
         self._cg_direction = direction + self._cg_direction * beta
         self._direction_old = np.array(direction, dtype=np.float64, copy=True)
-        return self._cg_direction.copy()
+        return np.array(self._cg_direction, dtype=np.float64, copy=True)
 
     def _step(self) -> None:
         atoms = self.dimeratoms
