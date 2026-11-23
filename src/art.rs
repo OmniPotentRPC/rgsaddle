@@ -284,9 +284,12 @@ impl ArtConfig {
     /// curvatures by `energy_scale / length_scale^2`. The FIRE time step
     /// [`MinModeConfig::time_step`] scales as length over the square root of
     /// energy, because the opening move from rest is the force times its
-    /// square. [`MinModeConfig::rotation_angle_tol`] is an angle in radians
-    /// and [`MinModeConfig::rotation_tol`] is taken as a dimensionless
-    /// rotation stop, so both keep their values.
+    /// square. [`MinModeConfig::rotation_angle_tol`] is an angle in radians,
+    /// so it keeps its value. [`MinModeConfig::rotation_tol`] is first the
+    /// relative change of the lowest Ritz value, which has no unit. The same
+    /// number is also compared with the Ritz residual, which is a curvature.
+    /// No single factor converts both readings, so it keeps its value as the
+    /// relative tolerance.
     ///
     /// [`RelaxConfig::initial_step`] follows the relaxation method. FIRE
     /// and quick-min read it as a time step, length over the square root
@@ -1940,45 +1943,230 @@ mod tests {
         }
     }
 
-    fn unit_fields(config: &ArtConfig) -> [(&'static str, f64); 23] {
-        [
-            ("mode.dr", config.mode.dr),
-            ("mode.force_tol", config.mode.force_tol),
-            ("mode.max_move", config.mode.max_move),
-            ("mode.time_step", config.mode.time_step),
-            ("mode.rotation_tol", config.mode.rotation_tol),
-            ("mode.rotation_angle_tol", config.mode.rotation_angle_tol),
-            ("eigen_threshold", config.eigen_threshold),
-            ("push_length", config.push_length),
-            ("push_step", config.push_step),
-            ("perpendicular.force_tol", config.perpendicular.force_tol),
+    /// Every field of a configuration. The destructurings below name each
+    /// field, so adding one does not compile until it is classified here
+    /// and in [`dimension`].
+    struct Fields {
+        numbers: Vec<(String, f64)>,
+        discrete: Vec<(String, String)>,
+    }
+
+    fn fields(config: &ArtConfig) -> Fields {
+        let ArtConfig {
+            mode,
+            eigen_threshold,
+            push_length,
+            push_step,
+            max_pushes,
+            max_climbs,
+            perpendicular,
+            quench,
+            push_over,
+            saddle,
+            basin_rmsd,
+            duplicate_rmsd,
+            permute_identical,
+        } = config;
+        let MinModeConfig {
+            kind,
+            dr,
+            difference,
+            rotation_tol,
+            rotation_angle_tol,
+            rotation_angle_tol_set,
+            max_rotations,
+            krylov_dim,
+            force_tol,
+            max_move,
+            time_step,
+            method,
+            seed_curvature,
+            saddle_check,
+            artn,
+        } = mode;
+        let SaddleIndexCheck {
+            block,
+            lowest,
+            residual_tol,
+            negative_tol,
+            max_actions,
+            dr: saddle_dr,
+            difference: saddle_difference,
+            seed,
+            escape,
+        } = saddle;
+        let mut numbers = vec![
+            ("mode.dr".to_string(), *dr),
+            ("mode.rotation_tol".into(), *rotation_tol),
+            ("mode.rotation_angle_tol".into(), *rotation_angle_tol),
+            ("mode.force_tol".into(), *force_tol),
+            ("mode.max_move".into(), *max_move),
+            ("mode.time_step".into(), *time_step),
+            ("eigen_threshold".into(), *eigen_threshold),
+            ("push_length".into(), *push_length),
+            ("push_step".into(), *push_step),
+            ("push_over".into(), *push_over),
+            ("saddle.residual_tol".into(), *residual_tol),
+            ("saddle.negative_tol".into(), *negative_tol),
+            ("saddle.dr".into(), *saddle_dr),
+            ("basin_rmsd".into(), *basin_rmsd),
+            ("duplicate_rmsd".into(), *duplicate_rmsd),
+        ];
+        let mut discrete = vec![
+            ("mode.kind".to_string(), format!("{kind:?}")),
+            ("mode.difference".into(), format!("{difference:?}")),
             (
-                "perpendicular.max_atom_move",
-                config.perpendicular.max_atom_move,
+                "mode.rotation_angle_tol_set".into(),
+                format!("{rotation_angle_tol_set:?}"),
             ),
-            (
-                "perpendicular.initial_step",
-                config.perpendicular.initial_step,
-            ),
-            ("quench.force_tol", config.quench.force_tol),
-            ("quench.max_atom_move", config.quench.max_atom_move),
-            ("quench.initial_step", config.quench.initial_step),
-            ("push_over", config.push_over),
-            ("saddle.residual_tol", config.saddle.residual_tol),
-            ("saddle.negative_tol", config.saddle.negative_tol),
-            ("saddle.dr", config.saddle.dr),
-            ("basin_rmsd", config.basin_rmsd),
-            ("duplicate_rmsd", config.duplicate_rmsd),
-            ("mode.krylov_dim", config.mode.krylov_dim as f64),
-            ("max_pushes", config.max_pushes as f64),
-        ]
+            ("mode.max_rotations".into(), format!("{max_rotations:?}")),
+            ("mode.krylov_dim".into(), format!("{krylov_dim:?}")),
+            ("mode.method".into(), format!("{method:?}")),
+            ("mode.seed_curvature".into(), format!("{seed_curvature:?}")),
+            ("mode.saddle_check".into(), format!("{saddle_check:?}")),
+            ("mode.artn".into(), format!("{artn:?}")),
+            ("max_pushes".into(), format!("{max_pushes:?}")),
+            ("max_climbs".into(), format!("{max_climbs:?}")),
+            ("saddle.block".into(), format!("{block:?}")),
+            ("saddle.lowest".into(), format!("{lowest:?}")),
+            ("saddle.max_actions".into(), format!("{max_actions:?}")),
+            ("saddle.difference".into(), format!("{saddle_difference:?}")),
+            ("saddle.seed".into(), format!("{seed:?}")),
+            ("saddle.escape".into(), format!("{escape:?}")),
+            ("permute_identical".into(), format!("{permute_identical:?}")),
+        ];
+        for (name, relax) in [("perpendicular", perpendicular), ("quench", quench)] {
+            let RelaxConfig {
+                method,
+                force_tol,
+                max_steps,
+                max_atom_move,
+                initial_step,
+            } = relax;
+            numbers.push((format!("{name}.force_tol"), *force_tol));
+            numbers.push((format!("{name}.max_atom_move"), *max_atom_move));
+            numbers.push((format!("{name}.initial_step"), *initial_step));
+            discrete.push((format!("{name}.method"), format!("{method:?}")));
+            discrete.push((format!("{name}.max_steps"), format!("{max_steps:?}")));
+        }
+        Fields { numbers, discrete }
+    }
+
+    /// Powers of the energy and length scales by which a field converts.
+    ///
+    /// With unit mass a time is a length over the square root of an energy.
+    /// A force is an energy per length and a curvature an energy per length
+    /// squared. The rotation stop is a relative Ritz change, and the
+    /// rotation angle is in radians, so neither carries a unit.
+    fn dimension(name: &str) -> (f64, i32) {
+        match name {
+            "mode.dr"
+            | "mode.max_move"
+            | "push_length"
+            | "push_step"
+            | "push_over"
+            | "saddle.dr"
+            | "basin_rmsd"
+            | "duplicate_rmsd"
+            | "perpendicular.max_atom_move"
+            | "quench.max_atom_move" => (0.0, 1),
+            "mode.force_tol" | "perpendicular.force_tol" | "quench.force_tol" => (1.0, -1),
+            "eigen_threshold" | "saddle.residual_tol" | "saddle.negative_tol" => (1.0, -2),
+            "mode.time_step" | "perpendicular.initial_step" | "quench.initial_step" => (-0.5, 1),
+            "mode.rotation_tol" | "mode.rotation_angle_tol" => (0.0, 0),
+            other => panic!("no dimension recorded for {other}"),
+        }
+    }
+
+    fn assert_close(a: f64, b: f64, label: &str, name: &str) {
+        assert!(
+            (a - b).abs() <= 1e-13 * a.abs().max(b.abs()),
+            "{label}: {name} {a:e} != {b:e}"
+        );
     }
 
     fn assert_same_units(left: &ArtConfig, right: &ArtConfig, label: &str) {
-        for ((name, a), (_, b)) in unit_fields(left).into_iter().zip(unit_fields(right)) {
+        let (left, right) = (fields(left), fields(right));
+        assert_eq!(left.numbers.len(), right.numbers.len());
+        for ((name, a), (other, b)) in left.numbers.iter().zip(&right.numbers) {
+            assert_eq!(name, other);
+            assert_close(*a, *b, label, name);
+        }
+        assert_eq!(left.discrete, right.discrete, "{label}");
+    }
+
+    #[test]
+    fn art_unit_scaling_follows_dimensional_analysis() {
+        let reduced = ArtConfig::lj_art();
+        let base = fields(&reduced);
+        for (energy, length) in [(2.0, 4.0), (0.4093, 2.338), (1.0e-3, 50.0), (7.5, 0.3)] {
+            let scaled = fields(&ArtConfig::for_units(energy, length).unwrap());
+            assert_eq!(scaled.numbers.len(), base.numbers.len());
+            for ((name, before), (_, after)) in base.numbers.iter().zip(&scaled.numbers) {
+                let (energy_power, length_power) = dimension(name);
+                let factor = energy.powf(energy_power) * length.powi(length_power);
+                assert_close(*after, before * factor, "dimensional", name);
+            }
+            assert_eq!(scaled.discrete, base.discrete);
+        }
+    }
+
+    /// The reduced double well written in host units: lengths are
+    /// `length` times the reduced ones and energies `energy` times them.
+    struct ScaledWell {
+        energy: f64,
+        length: f64,
+    }
+
+    impl PointSurface for ScaledWell {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let (a, b, c) = (x[0] / self.length, x[1] / self.length, x[2] / self.length);
+            let energy = self.energy * (0.25 * (a * a - 1.0).powi(2) + 0.5 * (b * b + c * c));
+            let force_scale = self.energy / self.length;
+            Ok((
+                energy,
+                array![
+                    force_scale * (a * a * a - a),
+                    force_scale * b,
+                    force_scale * c
+                ],
+            ))
+        }
+    }
+
+    #[test]
+    fn art_event_is_the_same_in_every_unit_system() {
+        let seed = array![1.0, 0.1, 0.0];
+        let run = |energy: f64, length: f64| {
+            let config = ArtConfig::for_units(energy, length).unwrap();
+            let surface = ScaledWell { energy, length };
+            let minimum = array![-length, 0.0, 0.0];
+            let mut session = ArtSession::new(config, minimum, seed.clone(), full_mask(3)).unwrap();
+            session.run(&surface, 400).unwrap();
+            session.outcome()
+        };
+        let reference = run(1.0, 1.0);
+        assert_eq!(reference.status, ArtStatus::Connected, "{reference:?}");
+        for (energy, length) in [(2.0, 4.0), (0.4093, 2.338), (7.5, 0.3), (4.0, 2.0)] {
+            let outcome = run(energy, length);
+            assert_eq!(outcome.status, reference.status, "{energy} {length}");
+            assert_eq!(outcome.saddle_index, reference.saddle_index);
+            assert_eq!(outcome.pushes, reference.pushes, "{energy} {length}");
+            let saddle = outcome.saddle.unwrap() / length;
+            let expected = reference.saddle.clone().unwrap();
+            for (found, wanted) in saddle.iter().zip(&expected) {
+                assert!((found - wanted).abs() < 2.0e-3, "{saddle:?} {expected:?}");
+            }
+            let barrier = outcome.saddle_energy.unwrap() / energy;
             assert!(
-                (a - b).abs() <= 1e-14 * a.abs().max(b.abs()),
-                "{label}: {name} {a:e} != {b:e}"
+                (barrier - reference.saddle_energy.unwrap()).abs() < 2.0e-3,
+                "{energy} {length}: {barrier}"
+            );
+            let curvature = outcome.curvature * length * length / energy;
+            assert!(
+                (curvature - reference.curvature).abs() < 2.0e-2 * reference.curvature.abs(),
+                "{energy} {length}: {curvature} vs {}",
+                reference.curvature
             );
         }
     }
