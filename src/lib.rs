@@ -337,7 +337,10 @@ pub use pes_internal::{
     SellaPes, niggli_reduce_cell, niggli_reduce_vectors, place_perp_dummy,
 };
 
-pub use covalent::{atomic_number, covalent_radius, element_symbol};
+pub use covalent::{
+    ATOMIC_MASSES_AMU, atomic_mass, atomic_mass_by_symbol, atomic_number, covalent_radius,
+    element_symbol,
+};
 pub use topology::{
     AtomMap, DummyHost, InternalTopology, LinearBend, PlanarWatch, TopologyCheck, TopologyConfig,
     check_chart,
