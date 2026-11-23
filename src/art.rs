@@ -70,6 +70,8 @@ use std::sync::{Arc, Mutex};
 
 use ndarray::{Array1, Array2, ArrayView1};
 
+use rgmin::Method;
+
 use crate::cell_log::M3;
 use crate::error::SaddleError;
 use crate::force::ForceGate;
@@ -144,11 +146,13 @@ enum Leg {
 
 /// Tolerances and budgets of one ART nouveau event.
 ///
-/// Lengths are the host's. Use [`ArtConfig::for_units`] to convert the
-/// reduced-unit preset to a potential's energy and length scales. The
-/// estimator in [`ArtConfig::mode`] must be Lanczos. `artn` and
-/// `saddle_check` on that block are cleared: the phases below own the push,
-/// the relaxation, and the certificate.
+/// [`ArtConfig::default`] is in the host's units: pushes of one host length
+/// and the published defaults of the nested blocks. It is not a potential
+/// preset. [`ArtConfig::lj_art`] is the Lennard-Jones reduced unit preset,
+/// and [`ArtConfig::for_units`] scales that preset. The estimator in
+/// [`ArtConfig::mode`] must be Lanczos. `artn` and `saddle_check` on that
+/// block are cleared: the phases below own the push, the relaxation, and
+/// the certificate.
 ///
 /// Non-exhaustive: start from [`ArtConfig::default`] and chain `with_*`.
 #[non_exhaustive]
@@ -199,8 +203,31 @@ with_setters!(ArtConfig {
 });
 
 impl Default for ArtConfig {
+    /// One host length for each push, with the nested blocks at their own
+    /// defaults and Lanczos selected. The perpendicular force tolerance
+    /// matches the mode force tolerance. These values do not assume a
+    /// potential or a unit system. [`Self::lj_art`] holds the Lennard-Jones
+    /// reduced unit numbers.
     fn default() -> Self {
-        Self::lj_art()
+        let mode = MinModeConfig::default()
+            .with_kind(MinModeKind::Lanczos)
+            .with_saddle_check(None);
+        let perpendicular = RelaxConfig::default().with_force_tol(mode.force_tol);
+        Self {
+            mode,
+            eigen_threshold: -SaddleIndexCheck::default().negative_tol,
+            push_length: 1.0,
+            push_step: 1.0,
+            max_pushes: 12,
+            max_climbs: 40,
+            perpendicular,
+            quench: RelaxConfig::default(),
+            push_over: 1.0,
+            saddle: SaddleIndexCheck::default(),
+            basin_rmsd: 1.0,
+            duplicate_rmsd: 1.0,
+            permute_identical: false,
+        }
     }
 }
 
@@ -254,9 +281,12 @@ impl ArtConfig {
     /// unit and `length_scale` is the host length represented by one reduced
     /// length unit. Lengths scale by `length_scale`, forces by
     /// `energy_scale / length_scale`, and curvatures by
-    /// `energy_scale / length_scale^2`. Method-specific solver controls such
-    /// as [`RelaxConfig::initial_step`] are unchanged: for FIRE that value is
-    /// a time step, not a length.
+    /// `energy_scale / length_scale^2`. [`RelaxConfig::initial_step`] follows
+    /// the relaxation method. A FIRE opening move is the force times the
+    /// square of that step, so the step scales as length over the square root
+    /// of energy. A line search opening step scales as a length. Any other
+    /// relaxation method returns [`SaddleError::Invalid`]. The preset does
+    /// not read [`SaddleIndexCheck::escape`], so that push is left unset.
     pub fn for_units(energy_scale: f64, length_scale: f64) -> Result<Self, SaddleError> {
         if !(energy_scale.is_finite()
             && energy_scale > 0.0
@@ -279,8 +309,20 @@ impl ArtConfig {
         config.push_step *= length_scale;
         config.perpendicular.force_tol *= force_scale;
         config.perpendicular.max_atom_move *= length_scale;
+        config.perpendicular.initial_step = scaled_initial_step(
+            &config.perpendicular.method,
+            config.perpendicular.initial_step,
+            energy_scale,
+            length_scale,
+        )?;
         config.quench.force_tol *= force_scale;
         config.quench.max_atom_move *= length_scale;
+        config.quench.initial_step = scaled_initial_step(
+            &config.quench.method,
+            config.quench.initial_step,
+            energy_scale,
+            length_scale,
+        )?;
         config.push_over *= length_scale;
         config.saddle.residual_tol *= curvature_scale;
         config.saddle.negative_tol *= curvature_scale;
@@ -291,8 +333,14 @@ impl ArtConfig {
         Ok(config)
     }
 
-    /// Check that ART's parameters are finite, physically consistent, and
-    /// supported by the session implementation.
+    /// Reject a configuration the session cannot run.
+    ///
+    /// Returns [`SaddleError::Invalid`] when a length is not finite and
+    /// positive, a budget is zero, the nested relaxation or saddle check is
+    /// refused, or the mode force tolerance is not finite and positive. A
+    /// perpendicular force tolerance looser than that mode force tolerance
+    /// is the same error and the message names both values. [`ArtSession::new`]
+    /// and [`run_events`] call this before the first evaluation.
     pub fn validate(&self) -> Result<(), SaddleError> {
         if self.mode.kind != MinModeKind::Lanczos {
             return Err(SaddleError::Invalid(
@@ -324,6 +372,11 @@ impl ArtConfig {
         }
         self.perpendicular.check()?;
         self.quench.check()?;
+        if !(self.mode.force_tol.is_finite() && self.mode.force_tol > 0.0) {
+            return Err(SaddleError::Invalid(
+                "ART mode force tolerance must be finite and positive".into(),
+            ));
+        }
         if self.perpendicular.force_tol > self.mode.force_tol {
             return Err(SaddleError::Invalid(format!(
                 "ART perpendicular_force_tol={:e} energy/length is looser than \
@@ -341,6 +394,37 @@ impl ArtConfig {
         mode.saddle_check = None;
         mode
     }
+}
+
+/// Scale one relaxation opening step into the host's units.
+///
+/// FIRE's first move from rest is `F dt^2` with unit mass, so `dt` has units
+/// of length over the square root of energy. A line search opening step is a
+/// length. Every other method is refused: its step is not left at the
+/// reduced unit value.
+fn scaled_initial_step(
+    method: &Method,
+    initial_step: f64,
+    energy_scale: f64,
+    length_scale: f64,
+) -> Result<f64, SaddleError> {
+    let factor = match method {
+        Method::Fire { .. } => length_scale / energy_scale.sqrt(),
+        Method::Bfgs
+        | Method::Lbfgs { .. }
+        | Method::Nlcg { .. }
+        | Method::Steepest
+        | Method::Adam { .. }
+        | Method::Diis { .. }
+        | Method::Bb => length_scale,
+        _ => {
+            return Err(SaddleError::Invalid(format!(
+                "ART cannot scale the initial step of relaxation method {}",
+                method.as_str()
+            )));
+        }
+    };
+    Ok(initial_step * factor)
 }
 
 /// One force evaluation the session requested.
@@ -1677,24 +1761,45 @@ mod tests {
 
     #[test]
     fn default_art_tolerances_are_consistent() {
-        ArtConfig::default().validate().unwrap();
-        assert_eq!(
-            ArtConfig::default().perpendicular.force_tol,
-            ArtConfig::default().mode.force_tol
-        );
+        let host = ArtConfig::default();
+        let lj = ArtConfig::lj_art();
+        host.validate().unwrap();
+        assert_eq!(host.perpendicular.force_tol, host.mode.force_tol);
+        assert_eq!(host.push_length, 1.0);
+        assert_eq!(host.saddle.difference, FiniteDifference::Forward);
+        assert_ne!(host.push_length, lj.push_length);
+        assert_eq!(lj.saddle.difference, FiniteDifference::Central);
+        assert!(lj.perpendicular.force_tol <= lj.mode.force_tol);
     }
 
     #[test]
     fn looser_perpendicular_tolerance_has_a_typed_error() {
-        let config = ArtConfig::default().with_perpendicular(
-            RelaxConfig::default().with_force_tol(2.0 * ArtConfig::default().mode.force_tol),
-        );
+        let mode_tol = ArtConfig::default().mode.force_tol;
+        let perp_tol = 2.0 * mode_tol;
+        let config = ArtConfig::default()
+            .with_perpendicular(RelaxConfig::default().with_force_tol(perp_tol));
         match config.validate() {
             Err(SaddleError::Invalid(message)) => {
-                assert!(message.contains("perpendicular_force_tol=2e-2 energy/length"));
-                assert!(message.contains("mode_force_tol=1e-2 energy/length"));
+                assert!(message.contains(&format!(
+                    "perpendicular_force_tol={perp_tol:e} energy/length"
+                )));
+                assert!(message.contains(&format!("mode_force_tol={mode_tol:e} energy/length")));
             }
             other => panic!("unexpected ART validation result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_positive_mode_force_tolerance_is_rejected() {
+        for force_tol in [0.0, f64::NAN, f64::INFINITY] {
+            let config =
+                ArtConfig::default().with_mode(ArtConfig::default().mode.with_force_tol(force_tol));
+            match config.validate() {
+                Err(SaddleError::Invalid(message)) => {
+                    assert!(message.contains("mode force tolerance must be finite and positive"));
+                }
+                other => panic!("unexpected ART validation result: {other:?}"),
+            }
         }
     }
 
@@ -1770,12 +1875,36 @@ mod tests {
             scaled.saddle.negative_tol,
             curvature_scale * reduced.saddle.negative_tol
         );
+        let step_scale = length_scale / 2.0_f64.sqrt();
         assert_eq!(
             scaled.perpendicular.initial_step,
-            reduced.perpendicular.initial_step
+            step_scale * reduced.perpendicular.initial_step
         );
-        assert_eq!(scaled.quench.initial_step, reduced.quench.initial_step);
+        assert_eq!(
+            scaled.quench.initial_step,
+            step_scale * reduced.quench.initial_step
+        );
         scaled.validate().unwrap();
+    }
+
+    #[test]
+    fn art_initial_step_scale_follows_the_relaxation_method() {
+        let fire = scaled_initial_step(&Method::fire(rgmin::FireKind::V2), 0.05, 2.0, 4.0).unwrap();
+        assert_eq!(fire, 0.05 * 4.0 / 2.0_f64.sqrt());
+        let line_search = scaled_initial_step(&Method::lbfgs(), 0.05, 2.0, 4.0).unwrap();
+        assert_eq!(line_search, 0.05 * 4.0);
+        match scaled_initial_step(&Method::Dogleg, 0.05, 2.0, 4.0) {
+            Err(SaddleError::Invalid(message)) => {
+                assert!(message.contains("relaxation method dogleg"));
+            }
+            other => panic!("unexpected ART step scale result: {other:?}"),
+        }
+        match scaled_initial_step(&Method::Ode12r, 0.05, 2.0, 4.0) {
+            Err(SaddleError::Invalid(message)) => {
+                assert!(message.contains("relaxation method ode12r"));
+            }
+            other => panic!("unexpected ART step scale result: {other:?}"),
+        }
     }
 
     #[test]

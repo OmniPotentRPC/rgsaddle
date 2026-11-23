@@ -1,0 +1,4 @@
+~ArtConfig::default~ is the host unit configuration, and ~ArtConfig::lj_art~ keeps the Lennard-Jones reduced unit values.
+~ArtConfig::for_units~ scales a FIRE initial step as length over the square root of energy and a line search initial step as a length, and returns ~SaddleError::Invalid~ for any other relaxation method.
+~ArtConfig::validate~ returns ~SaddleError::Invalid~ when the perpendicular relaxation force tolerance is looser than the mode force tolerance, or when that mode force tolerance is not finite and positive.
+~ArtSession::new~ and ~run_events~ report that error before a search starts.
