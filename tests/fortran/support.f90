@@ -11,7 +11,8 @@ module rgsaddle_fortran_test_support
   real(c_double), parameter :: x0(4) = [ 1.0_c_double, 0.0_c_double, -0.5_c_double, -1.0_c_double ]
   real(c_double), parameter :: y0(4) = [ 0.0_c_double, 0.5_c_double, 1.5_c_double, 1.0_c_double ]
 
-  public :: fill_linear_band, fortran_surface, c_surface, close_enough, check_status
+  public :: fill_linear_band, fortran_surface, c_surface, pafi_along_x_surface, ohtst_quadratic_surface, &
+    close_enough, check_status
 
 contains
 
@@ -120,6 +121,43 @@ contains
       grad(3 * (i - 1) + 1:3 * (i - 1) + 3) = g
     end do
   end function c_surface
+
+  integer(c_int) function pafi_along_x_surface(user, n_dof, position, energy, gradient) result(status)
+    type(c_ptr), value :: user
+    integer(c_int64_t), value :: n_dof
+    real(c_double), intent(in) :: position(*)
+    real(c_double), intent(inout) :: energy
+    real(c_double), intent(inout) :: gradient(*)
+    integer :: i
+    real(c_double) :: x
+    if (n_dof < 1_c_int64_t) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    x = position(1)
+    energy = (1.0_c_double - x * x) * (1.0_c_double - x * x)
+    do i = 1, int(n_dof, kind=kind(0))
+      gradient(i) = 0.0_c_double
+    end do
+    gradient(1) = -4.0_c_double * x * (1.0_c_double - x * x)
+    status = RGSADDLE_OK
+  end function pafi_along_x_surface
+
+  integer(c_int) function ohtst_quadratic_surface(user, n_dof, position, energy, gradient) result(status)
+    type(c_ptr), value :: user
+    integer(c_int64_t), value :: n_dof
+    real(c_double), intent(in) :: position(*)
+    real(c_double), intent(inout) :: energy
+    real(c_double), intent(inout) :: gradient(*)
+    if (n_dof /= 2_c_int64_t) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    energy = 0.5_c_double * (-position(1) * position(1) + 4.0_c_double * position(2) * position(2))
+    gradient(1) = -position(1)
+    gradient(2) = 4.0_c_double * position(2)
+    status = RGSADDLE_OK
+  end function ohtst_quadratic_surface
 
   logical function close_enough(a, b, scale) result(ok)
     real(c_double), value, intent(in) :: a, b, scale

@@ -13,6 +13,10 @@ module rgsaddle
   integer(c_int), parameter, public :: RGSADDLE_METHOD_LBFGS = 1_c_int
   integer(c_int), parameter, public :: RGSADDLE_MINMODE_DIMER = 0_c_int
   integer(c_int), parameter, public :: RGSADDLE_MINMODE_LANCZOS = 1_c_int
+  integer(c_int), parameter, public :: RGSADDLE_OHTST_INTEGRATOR_BAOAB = 0_c_int
+  integer(c_int), parameter, public :: RGSADDLE_OHTST_INTEGRATOR_GHMC = 1_c_int
+  integer(c_int), parameter, public :: RGSADDLE_OHTST_COUNT_FINAL = 0_c_int
+  integer(c_int), parameter, public :: RGSADDLE_OHTST_COUNT_FIRST_CROSSING = 1_c_int
   integer(c_int64_t), parameter :: RGSADDLE_REQ_ONE_IMAGE = 1_c_int64_t
 
   type, bind(C), public :: rgsaddle_version_t
@@ -76,6 +80,69 @@ module rgsaddle
     integer(c_int64_t) :: rotations
   end type rgsaddle_report_t
 
+  type, bind(C), public :: rgsaddle_pafi_config_t
+    type(rgsaddle_version_t) :: version
+    integer(c_int64_t) :: flags
+    real(c_double) :: thermal
+    real(c_double) :: mobility
+    real(c_double) :: time_step
+    integer(c_int64_t) :: thermalize
+    integer(c_int64_t) :: stride
+    integer(c_int64_t) :: samples
+    integer(c_int64_t) :: blocks
+    integer(c_int64_t) :: seed
+    integer(c_int32_t) :: fix_com
+    integer(c_int64_t) :: retain
+    real(c_double) :: target_error
+    integer(c_int64_t) :: max_rounds
+  end type rgsaddle_pafi_config_t
+
+  type, bind(C), public :: rgsaddle_pafi_result_t
+    type(rgsaddle_version_t) :: version
+    integer(c_int64_t) :: flags
+    real(c_double) :: barrier
+    real(c_double) :: barrier_error
+    integer(c_int64_t) :: dividing
+    integer(c_int64_t) :: samples
+    integer(c_int64_t) :: evaluations
+  end type rgsaddle_pafi_result_t
+
+  type, bind(C), public :: rgsaddle_ohtst_config_t
+    type(rgsaddle_version_t) :: version
+    integer(c_int64_t) :: flags
+    real(c_double) :: thermal
+    real(c_double) :: sample_time_step
+    real(c_double) :: sample_friction
+    integer(c_int64_t) :: sample_burn_in
+    integer(c_int64_t) :: sample_stride
+    integer(c_int64_t) :: sample_records
+    integer(c_int64_t) :: sample_blocks
+    integer(c_int64_t) :: sample_seed
+    integer(c_int64_t) :: sample_retain
+    integer(c_int32_t) :: sample_integrator
+    real(c_double) :: shooting_friction
+    real(c_double) :: shooting_time_step
+    integer(c_int64_t) :: shooting_steps
+    integer(c_int64_t) :: shooting_check_every
+    integer(c_int64_t) :: shooting_commit
+    integer(c_int64_t) :: shooting_shots
+    integer(c_int64_t) :: shooting_blocks
+    integer(c_int64_t) :: shooting_seed
+    integer(c_int32_t) :: counting
+  end type rgsaddle_ohtst_config_t
+
+  type, bind(C), public :: rgsaddle_ohtst_result_t
+    type(rgsaddle_version_t) :: version
+    integer(c_int64_t) :: flags
+    real(c_double) :: kappa
+    real(c_double) :: error
+    integer(c_int64_t) :: shots
+    integer(c_int64_t) :: unassigned
+    integer(c_int64_t) :: reactive
+    integer(c_int64_t) :: recrossed
+    integer(c_int64_t) :: evaluations
+  end type rgsaddle_ohtst_result_t
+
   abstract interface
     integer(c_int) function surface_proc(user, n_images, n_atoms, positions, energies, gradients, image) result(status)
       import :: c_ptr, c_int, c_int64_t, c_double
@@ -87,6 +154,17 @@ module rgsaddle
       real(c_double), intent(inout) :: gradients(*)
       integer(c_int64_t), value :: image
     end function surface_proc
+  end interface
+
+  abstract interface
+    integer(c_int) function point_surface_proc(user, n_dof, position, energy, gradient) result(status)
+      import :: c_ptr, c_int, c_int64_t, c_double
+      type(c_ptr), value :: user
+      integer(c_int64_t), value :: n_dof
+      real(c_double), intent(in) :: position(*)
+      real(c_double), intent(inout) :: energy
+      real(c_double), intent(inout) :: gradient(*)
+    end function point_surface_proc
   end interface
 
   type, public :: band_handle
@@ -118,6 +196,11 @@ module rgsaddle
   contains
     final :: pafi_finalize
     procedure, public :: create => pafi_create
+    procedure, public :: set_config => pafi_set_config
+    procedure, public :: run => pafi_run
+    procedure, public :: run_c => pafi_run_c
+    procedure, public :: result => pafi_result
+    procedure, public :: profile => pafi_profile
   end type pafi_handle
 
   type, public :: ohtst_handle
@@ -126,12 +209,19 @@ module rgsaddle
   contains
     final :: ohtst_finalize
     procedure, public :: create => ohtst_create
+    procedure, public :: set_config => ohtst_set_config
+    procedure, public :: run => ohtst_run
+    procedure, public :: run_c => ohtst_run_c
+    procedure, public :: result => ohtst_result
+    procedure, public :: curve => ohtst_curve
   end type ohtst_handle
 
   procedure(surface_proc), pointer, save :: active_surface => null()
+  procedure(point_surface_proc), pointer, save :: active_point_surface => null()
   type(c_ptr), save :: active_user = c_null_ptr
 
-  public :: init_band_config, init_minmode_config, abi_stamp, status_name, surface_proc
+  public :: init_band_config, init_minmode_config, init_pafi_config, init_ohtst_config, &
+    abi_stamp, status_name, surface_proc, point_surface_proc
 
   interface
     function c_rgsaddle_abi_stamp(out) bind(C, name="rgsaddle_abi_stamp") result(status)
@@ -206,6 +296,107 @@ module rgsaddle
       import :: c_ptr
       type(c_ptr), value :: session
     end subroutine c_rgsaddle_minmode_free
+
+    function c_rgsaddle_pafi_create(config, n_frames, n_dof, frames, arcs, n_arcs) &
+        bind(C, name="rgsaddle_pafi_create") result(handle)
+      import :: c_ptr, c_int64_t, c_double, rgsaddle_pafi_config_t
+      type(rgsaddle_pafi_config_t), intent(in) :: config
+      integer(c_int64_t), value :: n_frames
+      integer(c_int64_t), value :: n_dof
+      real(c_double), intent(in) :: frames(*)
+      type(c_ptr), value :: arcs
+      integer(c_int64_t), value :: n_arcs
+      type(c_ptr) :: handle
+    end function c_rgsaddle_pafi_create
+
+    function c_rgsaddle_pafi_set_config(session, config) bind(C, name="rgsaddle_pafi_set_config") result(status)
+      import :: c_ptr, c_int, rgsaddle_pafi_config_t
+      type(c_ptr), value :: session
+      type(rgsaddle_pafi_config_t), intent(in) :: config
+      integer(c_int) :: status
+    end function c_rgsaddle_pafi_set_config
+
+    function c_rgsaddle_pafi_run(session, surface, user) bind(C, name="rgsaddle_pafi_run") result(status)
+      import :: c_ptr, c_funptr, c_int
+      type(c_ptr), value :: session
+      type(c_funptr), value :: surface
+      type(c_ptr), value :: user
+      integer(c_int) :: status
+    end function c_rgsaddle_pafi_run
+
+    function c_rgsaddle_pafi_result(session, out) bind(C, name="rgsaddle_pafi_result") result(status)
+      import :: c_ptr, c_int, rgsaddle_pafi_result_t
+      type(c_ptr), value :: session
+      type(rgsaddle_pafi_result_t), intent(out) :: out
+      integer(c_int) :: status
+    end function c_rgsaddle_pafi_result
+
+    function c_rgsaddle_pafi_profile(session, arcs, gradients, gradient_errors, &
+        free_energy, free_energy_errors, capacity, written) &
+        bind(C, name="rgsaddle_pafi_profile") result(status)
+      import :: c_ptr, c_double, c_int64_t, c_int
+      type(c_ptr), value :: session
+      real(c_double), intent(out) :: arcs(*)
+      real(c_double), intent(out) :: gradients(*)
+      real(c_double), intent(out) :: gradient_errors(*)
+      real(c_double), intent(out) :: free_energy(*)
+      real(c_double), intent(out) :: free_energy_errors(*)
+      integer(c_int64_t), value :: capacity
+      integer(c_int64_t), intent(out) :: written
+      integer(c_int) :: status
+    end function c_rgsaddle_pafi_profile
+
+    subroutine c_rgsaddle_pafi_free(session) bind(C, name="rgsaddle_pafi_free")
+      import :: c_ptr
+      type(c_ptr), value :: session
+    end subroutine c_rgsaddle_pafi_free
+
+    function c_rgsaddle_ohtst_create(config, n_dof, point, normal) bind(C, name="rgsaddle_ohtst_create") result(handle)
+      import :: c_ptr, c_int64_t, c_double, rgsaddle_ohtst_config_t
+      type(rgsaddle_ohtst_config_t), intent(in) :: config
+      integer(c_int64_t), value :: n_dof
+      real(c_double), intent(in) :: point(*)
+      real(c_double), intent(in) :: normal(*)
+      type(c_ptr) :: handle
+    end function c_rgsaddle_ohtst_create
+
+    function c_rgsaddle_ohtst_set_config(session, config) bind(C, name="rgsaddle_ohtst_set_config") result(status)
+      import :: c_ptr, c_int, rgsaddle_ohtst_config_t
+      type(c_ptr), value :: session
+      type(rgsaddle_ohtst_config_t), intent(in) :: config
+      integer(c_int) :: status
+    end function c_rgsaddle_ohtst_set_config
+
+    function c_rgsaddle_ohtst_run(session, surface, user) bind(C, name="rgsaddle_ohtst_run") result(status)
+      import :: c_ptr, c_funptr, c_int
+      type(c_ptr), value :: session
+      type(c_funptr), value :: surface
+      type(c_ptr), value :: user
+      integer(c_int) :: status
+    end function c_rgsaddle_ohtst_run
+
+    function c_rgsaddle_ohtst_result(session, out) bind(C, name="rgsaddle_ohtst_result") result(status)
+      import :: c_ptr, c_int, rgsaddle_ohtst_result_t
+      type(c_ptr), value :: session
+      type(rgsaddle_ohtst_result_t), intent(out) :: out
+      integer(c_int) :: status
+    end function c_rgsaddle_ohtst_result
+
+    function c_rgsaddle_ohtst_curve(session, times, kappa_of_t, capacity, written) &
+        bind(C, name="rgsaddle_ohtst_curve") result(status)
+      import :: c_ptr, c_int, c_double, c_int64_t
+      type(c_ptr), value :: session
+      real(c_double), intent(out) :: times(*)
+      real(c_double), intent(out) :: kappa_of_t(*)
+      integer(c_int64_t), value :: capacity
+      integer(c_int64_t), intent(out) :: written
+      integer(c_int) :: status
+    end function c_rgsaddle_ohtst_curve
+
+    subroutine c_rgsaddle_ohtst_free(session) bind(C, name="rgsaddle_ohtst_free")
+      import :: c_ptr
+      type(c_ptr), value :: session
+    end subroutine c_rgsaddle_ohtst_free
   end interface
 
 contains
@@ -250,6 +441,26 @@ contains
       20_c_int64_t, sqrt(epsilon(1.0_c_double)), 0.1_c_double, 0.0_c_double, 0_c_int32_t, 0_c_int32_t)
     status = abi_stamp(config%version)
   end subroutine init_minmode_config
+
+  subroutine init_pafi_config(config)
+    type(rgsaddle_pafi_config_t), intent(out) :: config
+    integer(c_int) :: status
+    config = rgsaddle_pafi_config_t(rgsaddle_version_t(0_c_int32_t, 0_c_int32_t), 0_c_int64_t, &
+      0.02585_c_double, 1.0_c_double, 1.0e-3_c_double, 200_c_int64_t, 5_c_int64_t, 200_c_int64_t, &
+      5_c_int64_t, 1_c_int64_t, 1_c_int32_t, 16_c_int64_t, 0.0_c_double, 4_c_int64_t)
+    status = abi_stamp(config%version)
+  end subroutine init_pafi_config
+
+  subroutine init_ohtst_config(config)
+    type(rgsaddle_ohtst_config_t), intent(out) :: config
+    integer(c_int) :: status
+    config = rgsaddle_ohtst_config_t(rgsaddle_version_t(0_c_int32_t, 0_c_int32_t), 0_c_int64_t, &
+      0.02585_c_double, 0.1_c_double, 1.0_c_double, 300_c_int64_t, 5_c_int64_t, 1000_c_int64_t, &
+      16_c_int64_t, 1_c_int64_t, 256_c_int64_t, int(RGSADDLE_OHTST_INTEGRATOR_BAOAB, c_int32_t), &
+      1.0_c_double, 0.05_c_double, 400_c_int64_t, 40_c_int64_t, 0_c_int64_t, 1024_c_int64_t, &
+      16_c_int64_t, 2_c_int64_t, int(RGSADDLE_OHTST_COUNT_FINAL, c_int32_t))
+    status = abi_stamp(config%version)
+  end subroutine init_ohtst_config
 
   integer(c_int) function band_create(self, config, n_images, n_atoms, positions) result(status)
     class(band_handle), intent(inout) :: self
@@ -357,17 +568,145 @@ contains
     status = c_rgsaddle_minmode_mode(self%raw, mode)
   end function minmode_mode
 
-  integer(c_int) function pafi_create(self) result(status)
+  integer(c_int) function pafi_create(self, config, n_frames, n_dof, frames, arcs) result(status)
     class(pafi_handle), intent(inout) :: self
-    self%raw = c_null_ptr
-    status = RGSADDLE_INVALID_PARAMETER
+    type(rgsaddle_pafi_config_t), intent(in) :: config
+    integer(c_int64_t), value :: n_frames
+    integer(c_int64_t), value :: n_dof
+    real(c_double), intent(in) :: frames(*)
+    real(c_double), intent(in), target :: arcs(:)
+    type(c_ptr) :: arcs_ptr
+    integer(c_int64_t) :: n_arcs
+    arcs_ptr = c_loc(arcs(1))
+    n_arcs = size(arcs, kind=c_int64_t)
+    self%raw = c_rgsaddle_pafi_create(config, n_frames, n_dof, frames, arcs_ptr, n_arcs)
+    if (c_associated(self%raw)) then
+      status = RGSADDLE_OK
+    else
+      status = RGSADDLE_INVALID_PARAMETER
+    end if
   end function pafi_create
 
-  integer(c_int) function ohtst_create(self) result(status)
+  integer(c_int) function pafi_set_config(self, config) result(status)
+    class(pafi_handle), intent(inout) :: self
+    type(rgsaddle_pafi_config_t), intent(in) :: config
+    if (.not. c_associated(self%raw)) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    status = c_rgsaddle_pafi_set_config(self%raw, config)
+  end function pafi_set_config
+
+  integer(c_int) function pafi_run(self, callback, user) result(status)
+    class(pafi_handle), intent(inout) :: self
+    procedure(point_surface_proc), pointer, intent(in) :: callback
+    type(c_ptr), value, intent(in), optional :: user
+    type(c_ptr) :: user_ptr
+    user_ptr = c_null_ptr
+    if (present(user)) user_ptr = user
+    active_user = user_ptr
+    active_point_surface => callback
+    status = c_rgsaddle_pafi_run(self%raw, c_funloc(fortran_point_surface_trampoline), user_ptr)
+    active_point_surface => null()
+  end function pafi_run
+
+  integer(c_int) function pafi_run_c(self, surface, user) result(status)
+    class(pafi_handle), intent(inout) :: self
+    type(c_funptr), value :: surface
+    type(c_ptr), value, intent(in), optional :: user
+    type(c_ptr) :: user_ptr
+    user_ptr = c_null_ptr
+    if (present(user)) user_ptr = user
+    status = c_rgsaddle_pafi_run(self%raw, surface, user_ptr)
+  end function pafi_run_c
+
+  integer(c_int) function pafi_result(self, out) result(status)
+    class(pafi_handle), intent(in) :: self
+    type(rgsaddle_pafi_result_t), intent(out) :: out
+    status = c_rgsaddle_pafi_result(self%raw, out)
+  end function pafi_result
+
+  integer(c_int) function pafi_profile(self, arcs, gradients, gradient_errors, &
+      free_energy, free_energy_errors, written) result(status)
+    class(pafi_handle), intent(in) :: self
+    real(c_double), intent(out) :: arcs(:)
+    real(c_double), intent(out) :: gradients(:)
+    real(c_double), intent(out) :: gradient_errors(:)
+    real(c_double), intent(out) :: free_energy(:)
+    real(c_double), intent(out) :: free_energy_errors(:)
+    integer(c_int64_t), intent(out), optional :: written
+    integer(c_int64_t) :: n_written
+    integer(c_int64_t) :: cap
+    cap = size(arcs, kind=c_int64_t)
+    status = c_rgsaddle_pafi_profile(self%raw, arcs, gradients, gradient_errors, &
+      free_energy, free_energy_errors, cap, n_written)
+    if (present(written)) written = n_written
+  end function pafi_profile
+
+  integer(c_int) function ohtst_create(self, config, n_dof, point, normal) result(status)
     class(ohtst_handle), intent(inout) :: self
-    self%raw = c_null_ptr
-    status = RGSADDLE_INVALID_PARAMETER
+    type(rgsaddle_ohtst_config_t), intent(in) :: config
+    integer(c_int64_t), value :: n_dof
+    real(c_double), intent(in) :: point(*)
+    real(c_double), intent(in) :: normal(*)
+    self%raw = c_rgsaddle_ohtst_create(config, n_dof, point, normal)
+    if (c_associated(self%raw)) then
+      status = RGSADDLE_OK
+    else
+      status = RGSADDLE_INVALID_PARAMETER
+    end if
   end function ohtst_create
+
+  integer(c_int) function ohtst_set_config(self, config) result(status)
+    class(ohtst_handle), intent(inout) :: self
+    type(rgsaddle_ohtst_config_t), intent(in) :: config
+    if (.not. c_associated(self%raw)) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    status = c_rgsaddle_ohtst_set_config(self%raw, config)
+  end function ohtst_set_config
+
+  integer(c_int) function ohtst_run(self, callback, user) result(status)
+    class(ohtst_handle), intent(inout) :: self
+    procedure(point_surface_proc), pointer, intent(in) :: callback
+    type(c_ptr), value, intent(in), optional :: user
+    type(c_ptr) :: user_ptr
+    user_ptr = c_null_ptr
+    if (present(user)) user_ptr = user
+    active_user = user_ptr
+    active_point_surface => callback
+    status = c_rgsaddle_ohtst_run(self%raw, c_funloc(fortran_point_surface_trampoline), user_ptr)
+    active_point_surface => null()
+  end function ohtst_run
+
+  integer(c_int) function ohtst_run_c(self, surface, user) result(status)
+    class(ohtst_handle), intent(inout) :: self
+    type(c_funptr), value :: surface
+    type(c_ptr), value, intent(in), optional :: user
+    type(c_ptr) :: user_ptr
+    user_ptr = c_null_ptr
+    if (present(user)) user_ptr = user
+    status = c_rgsaddle_ohtst_run(self%raw, surface, user_ptr)
+  end function ohtst_run_c
+
+  integer(c_int) function ohtst_result(self, out) result(status)
+    class(ohtst_handle), intent(in) :: self
+    type(rgsaddle_ohtst_result_t), intent(out) :: out
+    status = c_rgsaddle_ohtst_result(self%raw, out)
+  end function ohtst_result
+
+  integer(c_int) function ohtst_curve(self, times, kappa_of_t, written) result(status)
+    class(ohtst_handle), intent(in) :: self
+    real(c_double), intent(out) :: times(:)
+    real(c_double), intent(out) :: kappa_of_t(:)
+    integer(c_int64_t), intent(out), optional :: written
+    integer(c_int64_t) :: n_written
+    integer(c_int64_t) :: cap
+    cap = size(times, kind=c_int64_t)
+    status = c_rgsaddle_ohtst_curve(self%raw, times, kappa_of_t, cap, n_written)
+    if (present(written)) written = n_written
+  end function ohtst_curve
 
   subroutine band_finalize(self)
     type(band_handle), intent(inout) :: self
@@ -387,12 +726,18 @@ contains
 
   subroutine pafi_finalize(self)
     type(pafi_handle), intent(inout) :: self
-    self%raw = c_null_ptr
+    if (c_associated(self%raw)) then
+      call c_rgsaddle_pafi_free(self%raw)
+      self%raw = c_null_ptr
+    end if
   end subroutine pafi_finalize
 
   subroutine ohtst_finalize(self)
     type(ohtst_handle), intent(inout) :: self
-    self%raw = c_null_ptr
+    if (c_associated(self%raw)) then
+      call c_rgsaddle_ohtst_free(self%raw)
+      self%raw = c_null_ptr
+    end if
   end subroutine ohtst_finalize
 
   integer(c_int) function fortran_surface_trampoline(user, req_ptr) bind(C) result(status)
@@ -424,5 +769,22 @@ contains
     call c_f_pointer(req%gradients, gradients, [int(n_pos, kind=kind(0))])
     status = active_surface(user, req%n_images, req%n_atoms, positions, energies, gradients, req%image)
   end function fortran_surface_trampoline
+
+  integer(c_int) function fortran_point_surface_trampoline(user, n_dof, position_ptr, energy, gradient_ptr) bind(C) result(status)
+    type(c_ptr), value :: user
+    integer(c_int64_t), value :: n_dof
+    type(c_ptr), value :: position_ptr
+    real(c_double), intent(out) :: energy
+    type(c_ptr), value :: gradient_ptr
+    real(c_double), pointer :: position(:)
+    real(c_double), pointer :: gradient(:)
+    if (.not. associated(active_point_surface)) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    call c_f_pointer(position_ptr, position, [int(n_dof, kind=kind(0))])
+    call c_f_pointer(gradient_ptr, gradient, [int(n_dof, kind=kind(0))])
+    status = active_point_surface(user, n_dof, position, energy, gradient)
+  end function fortran_point_surface_trampoline
 
 end module rgsaddle
