@@ -31,7 +31,14 @@ module rgsaddle
   integer(c_int), parameter, public :: RGSADDLE_OHTST_INTEGRATOR_GHMC = 1_c_int
   integer(c_int), parameter, public :: RGSADDLE_OHTST_COUNT_FINAL = 0_c_int
   integer(c_int), parameter, public :: RGSADDLE_OHTST_COUNT_FIRST_CROSSING = 1_c_int
-  integer(c_int64_t), parameter :: RGSADDLE_REQ_ONE_IMAGE = 1_c_int64_t
+  integer(c_int64_t), parameter, public :: RGSADDLE_BAND_PER_IMAGE = 1_c_int64_t
+  integer(c_int64_t), parameter, public :: RGSADDLE_REQ_ONE_IMAGE = 1_c_int64_t
+  ! `error stop` code for `b = a` on a handle. Assignment would copy the
+  ! raw pointer and both finalizers would free it.
+  integer, parameter, public :: RGSADDLE_HANDLE_NOT_ASSIGNABLE = 17
+  ! floor((2**63 - 1) / 3): the largest atom count whose three Cartesian
+  ! coordinates still fit in a signed 64-bit length.
+  integer(c_int64_t), parameter :: max_atoms_for_triplet = 3074457345618258602_c_int64_t
 
   type, bind(C), public :: rgsaddle_version_t
     integer(c_int32_t) :: major
@@ -104,6 +111,8 @@ module rgsaddle
     integer(c_int64_t) :: stride
     integer(c_int64_t) :: samples
     integer(c_int64_t) :: blocks
+    ! C `uint64_t` bit pattern. Values above 2^63-1 are negative here;
+    ! `uint64_bits` builds them. The bits are passed through unchanged.
     integer(c_int64_t) :: seed
     integer(c_int32_t) :: fix_com
     integer(c_int64_t) :: retain
@@ -131,6 +140,7 @@ module rgsaddle
     integer(c_int64_t) :: sample_stride
     integer(c_int64_t) :: sample_records
     integer(c_int64_t) :: sample_blocks
+    ! C `uint64_t` bit pattern; see `seed` on `rgsaddle_pafi_config_t`.
     integer(c_int64_t) :: sample_seed
     integer(c_int64_t) :: sample_retain
     integer(c_int32_t) :: sample_integrator
@@ -141,6 +151,7 @@ module rgsaddle
     integer(c_int64_t) :: shooting_commit
     integer(c_int64_t) :: shooting_shots
     integer(c_int64_t) :: shooting_blocks
+    ! C `uint64_t` bit pattern; see `seed` on `rgsaddle_pafi_config_t`.
     integer(c_int64_t) :: shooting_seed
     integer(c_int32_t) :: counting
   end type rgsaddle_ohtst_config_t
@@ -190,6 +201,8 @@ module rgsaddle
     procedure, public :: step => band_step
     procedure, public :: step_c => band_step_c
     procedure, public :: positions => band_positions
+    procedure, public :: release => release_band
+    procedure, public :: move_from => move_from_band
   end type band_handle
 
   type, public :: minmode_handle
@@ -202,6 +215,8 @@ module rgsaddle
     procedure, public :: step_c => minmode_step_c
     procedure, public :: position => minmode_position
     procedure, public :: mode => minmode_mode
+    procedure, public :: release => release_minmode
+    procedure, public :: move_from => move_from_minmode
   end type minmode_handle
 
   type, public :: pafi_handle
@@ -215,6 +230,8 @@ module rgsaddle
     procedure, public :: run_c => pafi_run_c
     procedure, public :: result => pafi_result
     procedure, public :: profile => pafi_profile
+    procedure, public :: release => release_pafi
+    procedure, public :: move_from => move_from_pafi
   end type pafi_handle
 
   type, public :: ohtst_handle
@@ -228,14 +245,29 @@ module rgsaddle
     procedure, public :: run_c => ohtst_run_c
     procedure, public :: result => ohtst_result
     procedure, public :: curve => ohtst_curve
+    procedure, public :: release => release_ohtst
+    procedure, public :: move_from => move_from_ohtst
   end type ohtst_handle
 
-  procedure(surface_proc), pointer, save :: active_surface => null()
-  procedure(point_surface_proc), pointer, save :: active_point_surface => null()
-  type(c_ptr), save :: active_user = c_null_ptr
+  ! One call's callback and the host pointer, passed as the C user
+  ! argument. Workers read it; the caller keeps it alive until the
+  ! C call returns. There is no module-level callback.
+  type :: callback_box
+    procedure(surface_proc), pointer, nopass :: surface => null()
+    procedure(point_surface_proc), pointer, nopass :: point => null()
+    type(c_ptr) :: user = c_null_ptr
+  end type callback_box
 
+  interface assignment(=)
+    module procedure assign_band
+    module procedure assign_minmode
+    module procedure assign_pafi
+    module procedure assign_ohtst
+  end interface
+
+  public :: assignment(=)
   public :: init_band_config, init_minmode_config, init_pafi_config, init_ohtst_config, &
-    abi_stamp, status_name, surface_proc, point_surface_proc
+    abi_stamp, status_name, surface_proc, point_surface_proc, uint64_bits
 
   interface
     function c_rgsaddle_abi_stamp(out) bind(C, name="rgsaddle_abi_stamp") result(status)
@@ -464,11 +496,22 @@ contains
     integer(c_int32_t), intent(in), optional :: kind
     integer(c_int) :: status
     integer(c_int32_t) :: mode_kind
+    ! No C ABI default-initializer exists for this struct. The numbers
+    ! are MinModeConfig::default: dr and force_tol 1e-3, rotation_tol
+    ! 1e-4, 20 rotations, Krylov 12, max_move 0.2, and the five-degree
+    ! angle stop (zero would disable it).
+    real(c_double), parameter :: default_dr = 1.0_c_double / 1000.0_c_double
+    real(c_double), parameter :: default_rotation_tol = 1.0_c_double / 10000.0_c_double
+    real(c_double), parameter :: default_force_tol = 1.0_c_double / 1000.0_c_double
+    real(c_double), parameter :: default_max_move = 0.2_c_double
+    real(c_double), parameter :: default_rotation_angle_tol = &
+      5.0_c_double * acos(-1.0_c_double) / 180.0_c_double
     mode_kind = RGSADDLE_MINMODE_DIMER
     if (present(kind)) mode_kind = kind
     config = rgsaddle_minmode_config_t(rgsaddle_version_t(0_c_int32_t, 0_c_int32_t), 0_c_int64_t, &
-      mode_kind, RGSADDLE_METHOD_FIRE, sqrt(epsilon(1.0_c_double)), sqrt(epsilon(1.0_c_double)), 40_c_int64_t, &
-      20_c_int64_t, sqrt(epsilon(1.0_c_double)), 0.1_c_double, 0.0_c_double, 0_c_int32_t, 0_c_int32_t)
+      mode_kind, RGSADDLE_METHOD_FIRE, default_dr, default_rotation_tol, 20_c_int64_t, &
+      12_c_int64_t, default_force_tol, default_max_move, default_rotation_angle_tol, &
+      0_c_int32_t, 0_c_int32_t)
     status = abi_stamp(config%version)
   end subroutine init_minmode_config
 
@@ -498,13 +541,19 @@ contains
     integer(c_int64_t), value :: n_images
     integer(c_int64_t), value :: n_atoms
     real(c_double), intent(in) :: positions(*)
+    logical :: shape_ok
     call band_finalize(self)
-    self%raw = c_rgsaddle_band_create(config, n_images, n_atoms, positions)
-    if (c_associated(self%raw)) then
-      status = RGSADDLE_OK
-    else
-      status = RGSADDLE_INVALID_PARAMETER
+    shape_ok = n_images >= 3_c_int64_t .and. n_atoms >= 1_c_int64_t
+    if (shape_ok) then
+      if (n_atoms > max_atoms_for_triplet / n_images) shape_ok = .false.
     end if
+    if (config%version%major /= int(RGSADDLE_ABI_MAJOR, c_int32_t) .or. .not. shape_ok) then
+      status = create_status(c_null_ptr, config%version%major, shape_ok)
+      return
+    end if
+    self%raw = c_rgsaddle_band_create(config, n_images, n_atoms, positions)
+    status = create_status(self%raw, config%version%major, .true.)
+    if (status /= RGSADDLE_OK) call band_finalize(self)
   end function band_create
 
   integer(c_int) function band_step(self, callback, user, out) result(status)
@@ -513,15 +562,13 @@ contains
     type(c_ptr), value, intent(in), optional :: user
     type(rgsaddle_report_t), intent(out), optional :: out
     type(rgsaddle_report_t) :: report
-    if (present(user)) then
-      active_user = user
-    else
-      active_user = c_null_ptr
-    end if
-    active_surface => callback
-    status = c_rgsaddle_band_step(self%raw, c_funloc(fortran_surface_trampoline), active_user, report)
+    type(callback_box), target :: box
+    box%surface => callback
+    box%point => null()
+    box%user = c_null_ptr
+    if (present(user)) box%user = user
+    status = c_rgsaddle_band_step(self%raw, c_funloc(fortran_surface_trampoline), c_loc(box), report)
     if (present(out)) out = report
-    active_surface => null()
   end function band_step
 
   integer(c_int) function band_step_c(self, surface, user, out) result(status)
@@ -549,13 +596,19 @@ contains
     integer(c_int64_t), value :: n_atoms
     real(c_double), intent(in) :: position(*)
     real(c_double), intent(in) :: mode(*)
+    logical :: shape_ok
     call minmode_finalize(self)
-    self%raw = c_rgsaddle_minmode_create(config, n_atoms, position, mode)
-    if (c_associated(self%raw)) then
-      status = RGSADDLE_OK
-    else
-      status = RGSADDLE_INVALID_PARAMETER
+    shape_ok = n_atoms >= 1_c_int64_t
+    if (shape_ok) then
+      if (n_atoms > max_atoms_for_triplet) shape_ok = .false.
     end if
+    if (config%version%major /= int(RGSADDLE_ABI_MAJOR, c_int32_t) .or. .not. shape_ok) then
+      status = create_status(c_null_ptr, config%version%major, shape_ok)
+      return
+    end if
+    self%raw = c_rgsaddle_minmode_create(config, n_atoms, position, mode)
+    status = create_status(self%raw, config%version%major, .true.)
+    if (status /= RGSADDLE_OK) call minmode_finalize(self)
   end function minmode_create
 
   integer(c_int) function minmode_step(self, callback, user, out) result(status)
@@ -564,15 +617,13 @@ contains
     type(c_ptr), value, intent(in), optional :: user
     type(rgsaddle_report_t), intent(out), optional :: out
     type(rgsaddle_report_t) :: report
-    if (present(user)) then
-      active_user = user
-    else
-      active_user = c_null_ptr
-    end if
-    active_surface => callback
-    status = c_rgsaddle_minmode_step(self%raw, c_funloc(fortran_surface_trampoline), active_user, report)
+    type(callback_box), target :: box
+    box%surface => callback
+    box%point => null()
+    box%user = c_null_ptr
+    if (present(user)) box%user = user
+    status = c_rgsaddle_minmode_step(self%raw, c_funloc(fortran_surface_trampoline), c_loc(box), report)
     if (present(out)) out = report
-    active_surface => null()
   end function minmode_step
 
   integer(c_int) function minmode_step_c(self, surface, user, out) result(status)
@@ -609,6 +660,7 @@ contains
     real(c_double), intent(in), contiguous, target, optional :: arcs(:)
     type(c_ptr) :: arcs_ptr
     integer(c_int64_t) :: n_arcs
+    logical :: shape_ok
     call pafi_finalize(self)
     arcs_ptr = c_null_ptr
     n_arcs = 0_c_int64_t
@@ -618,19 +670,24 @@ contains
         arcs_ptr = c_loc(arcs(1))
       end if
     end if
-    self%raw = c_rgsaddle_pafi_create(config, n_frames, n_dof, frames, arcs_ptr, n_arcs)
-    if (c_associated(self%raw)) then
-      status = RGSADDLE_OK
-    else
-      status = RGSADDLE_INVALID_PARAMETER
+    shape_ok = n_frames >= 2_c_int64_t .and. n_dof >= 1_c_int64_t
+    if (shape_ok) then
+      if (n_dof > huge(n_dof) / n_frames) shape_ok = .false.
     end if
+    if (config%version%major /= int(RGSADDLE_ABI_MAJOR, c_int32_t) .or. .not. shape_ok) then
+      status = create_status(c_null_ptr, config%version%major, shape_ok)
+      return
+    end if
+    self%raw = c_rgsaddle_pafi_create(config, n_frames, n_dof, frames, arcs_ptr, n_arcs)
+    status = create_status(self%raw, config%version%major, .true.)
+    if (status /= RGSADDLE_OK) call pafi_finalize(self)
   end function pafi_create
 
   integer(c_int) function pafi_set_config(self, config) result(status)
     class(pafi_handle), intent(inout) :: self
     type(rgsaddle_pafi_config_t), intent(in) :: config
     if (.not. c_associated(self%raw)) then
-      status = RGSADDLE_INVALID_PARAMETER
+      status = RGSADDLE_NULL_SESSION
       return
     end if
     status = c_rgsaddle_pafi_set_config(self%raw, config)
@@ -640,13 +697,12 @@ contains
     class(pafi_handle), intent(inout) :: self
     procedure(point_surface_proc), pointer, intent(in) :: callback
     type(c_ptr), value, intent(in), optional :: user
-    type(c_ptr) :: user_ptr
-    user_ptr = c_null_ptr
-    if (present(user)) user_ptr = user
-    active_user = user_ptr
-    active_point_surface => callback
-    status = c_rgsaddle_pafi_run(self%raw, c_funloc(fortran_point_surface_trampoline), user_ptr)
-    active_point_surface => null()
+    type(callback_box), target :: box
+    box%surface => null()
+    box%point => callback
+    box%user = c_null_ptr
+    if (present(user)) box%user = user
+    status = c_rgsaddle_pafi_run(self%raw, c_funloc(fortran_point_surface_trampoline), c_loc(box))
   end function pafi_run
 
   integer(c_int) function pafi_run_c(self, surface, user) result(status)
@@ -691,20 +747,23 @@ contains
     integer(c_int64_t), value :: n_dof
     real(c_double), intent(in) :: point(*)
     real(c_double), intent(in) :: normal(*)
+    logical :: shape_ok
     call ohtst_finalize(self)
-    self%raw = c_rgsaddle_ohtst_create(config, n_dof, point, normal)
-    if (c_associated(self%raw)) then
-      status = RGSADDLE_OK
-    else
-      status = RGSADDLE_INVALID_PARAMETER
+    shape_ok = n_dof >= 1_c_int64_t
+    if (config%version%major /= int(RGSADDLE_ABI_MAJOR, c_int32_t) .or. .not. shape_ok) then
+      status = create_status(c_null_ptr, config%version%major, shape_ok)
+      return
     end if
+    self%raw = c_rgsaddle_ohtst_create(config, n_dof, point, normal)
+    status = create_status(self%raw, config%version%major, .true.)
+    if (status /= RGSADDLE_OK) call ohtst_finalize(self)
   end function ohtst_create
 
   integer(c_int) function ohtst_set_config(self, config) result(status)
     class(ohtst_handle), intent(inout) :: self
     type(rgsaddle_ohtst_config_t), intent(in) :: config
     if (.not. c_associated(self%raw)) then
-      status = RGSADDLE_INVALID_PARAMETER
+      status = RGSADDLE_NULL_SESSION
       return
     end if
     status = c_rgsaddle_ohtst_set_config(self%raw, config)
@@ -714,13 +773,12 @@ contains
     class(ohtst_handle), intent(inout) :: self
     procedure(point_surface_proc), pointer, intent(in) :: callback
     type(c_ptr), value, intent(in), optional :: user
-    type(c_ptr) :: user_ptr
-    user_ptr = c_null_ptr
-    if (present(user)) user_ptr = user
-    active_user = user_ptr
-    active_point_surface => callback
-    status = c_rgsaddle_ohtst_run(self%raw, c_funloc(fortran_point_surface_trampoline), user_ptr)
-    active_point_surface => null()
+    type(callback_box), target :: box
+    box%surface => null()
+    box%point => callback
+    box%user = c_null_ptr
+    if (present(user)) box%user = user
+    status = c_rgsaddle_ohtst_run(self%raw, c_funloc(fortran_point_surface_trampoline), c_loc(box))
   end function ohtst_run
 
   integer(c_int) function ohtst_run_c(self, surface, user) result(status)
@@ -784,52 +842,231 @@ contains
     end if
   end subroutine ohtst_finalize
 
-  integer(c_int) function fortran_surface_trampoline(user, req_ptr) bind(C) result(status)
+  recursive integer(c_int) function fortran_surface_trampoline(user, req_ptr) &
+      bind(C, name="rgsaddle_fortran_surface_trampoline") result(status)
     type(c_ptr), value :: user
     type(c_ptr), value :: req_ptr
     type(rgsaddle_surface_request_t), pointer :: req
+    type(callback_box), pointer :: box
     real(c_double), pointer :: positions(:)
     real(c_double), pointer :: energies(:)
     real(c_double), pointer :: gradients(:)
     integer(c_int64_t) :: n_pos, n_eval
-    if (.not. associated(active_surface)) then
-      status = RGSADDLE_INVALID_PARAMETER
-      return
-    end if
+    logical :: one_image
     call c_f_pointer(req_ptr, req)
     if (.not. associated(req)) then
       status = RGSADDLE_INVALID_PARAMETER
       return
     end if
     if (iand(req%flags, RGSADDLE_REQ_ONE_IMAGE) /= 0_c_int64_t) then
-      n_pos = 3_c_int64_t * req%n_atoms
-      n_eval = 1_c_int64_t
+      one_image = .true.
     else
-      n_pos = req%n_images * 3_c_int64_t * req%n_atoms
-      n_eval = req%n_images
+      one_image = .false.
+    end if
+    status = buffer_extent(req%n_images, req%n_atoms, one_image, n_pos, n_eval)
+    if (status /= RGSADDLE_OK) return
+    call c_f_pointer(user, box)
+    if (.not. associated(box)) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    if (.not. associated(box%surface)) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
     end if
     call c_f_pointer(req%positions, positions, [int(n_pos, kind=kind(0))])
     call c_f_pointer(req%energies, energies, [int(n_eval, kind=kind(0))])
     call c_f_pointer(req%gradients, gradients, [int(n_pos, kind=kind(0))])
-    status = active_surface(user, req%n_images, req%n_atoms, positions, energies, gradients, req%image)
+    ! n_eval is the number of rows in the buffers: 1 for ONE_IMAGE,
+    ! the request's row count otherwise. req%image is the band index
+    ! or -1 for a batch.
+    status = box%surface(box%user, n_eval, req%n_atoms, positions, energies, gradients, req%image)
   end function fortran_surface_trampoline
 
-  integer(c_int) function fortran_point_surface_trampoline(user, n_dof, position_ptr, energy, gradient_ptr) bind(C) result(status)
+  recursive integer(c_int) function fortran_point_surface_trampoline(user, n_dof, position_ptr, energy, gradient_ptr) &
+      bind(C, name="rgsaddle_fortran_point_trampoline") result(status)
     type(c_ptr), value :: user
     integer(c_int64_t), value :: n_dof
     type(c_ptr), value :: position_ptr
     real(c_double), intent(out) :: energy
     type(c_ptr), value :: gradient_ptr
+    type(callback_box), pointer :: box
     real(c_double), pointer :: position(:)
     real(c_double), pointer :: gradient(:)
     energy = 0.0_c_double
-    if (.not. associated(active_point_surface)) then
+    if (n_dof < 1_c_int64_t .or. n_dof > int(huge(0), c_int64_t)) then
+      status = RGSADDLE_SHAPE
+      return
+    end if
+    call c_f_pointer(user, box)
+    if (.not. associated(box)) then
+      status = RGSADDLE_INVALID_PARAMETER
+      return
+    end if
+    if (.not. associated(box%point)) then
       status = RGSADDLE_INVALID_PARAMETER
       return
     end if
     call c_f_pointer(position_ptr, position, [int(n_dof, kind=kind(0))])
     call c_f_pointer(gradient_ptr, gradient, [int(n_dof, kind=kind(0))])
-    status = active_point_surface(user, n_dof, position, energy, gradient)
+    status = box%point(box%user, n_dof, position, energy, gradient)
   end function fortran_point_surface_trampoline
+
+  integer(c_int) function create_status(handle, major, shape_ok) result(status)
+    type(c_ptr), intent(in) :: handle
+    integer(c_int32_t), intent(in) :: major
+    logical, intent(in) :: shape_ok
+    if (major /= int(RGSADDLE_ABI_MAJOR, c_int32_t)) then
+      status = RGSADDLE_ABI_MISMATCH
+    else if (.not. shape_ok) then
+      status = RGSADDLE_SHAPE
+    else if (.not. c_associated(handle)) then
+      status = RGSADDLE_INVALID_PARAMETER
+    else
+      status = RGSADDLE_OK
+    end if
+  end function create_status
+
+  integer(c_int) function buffer_extent(n_images, n_atoms, one_image, n_pos, n_eval) result(status)
+    integer(c_int64_t), intent(in) :: n_images, n_atoms
+    logical, intent(in) :: one_image
+    integer(c_int64_t), intent(out) :: n_pos, n_eval
+    integer(c_int64_t) :: rows, atoms3
+    integer(c_int64_t), parameter :: default_huge = int(huge(0), c_int64_t)
+    n_pos = 0_c_int64_t
+    n_eval = 0_c_int64_t
+    if (n_images < 1_c_int64_t .or. n_atoms < 1_c_int64_t) then
+      status = RGSADDLE_SHAPE
+      return
+    end if
+    if (one_image) then
+      rows = 1_c_int64_t
+    else
+      rows = n_images
+    end if
+    if (n_atoms > max_atoms_for_triplet) then
+      status = RGSADDLE_SHAPE
+      return
+    end if
+    atoms3 = 3_c_int64_t * n_atoms
+    if (rows > huge(rows) / atoms3) then
+      status = RGSADDLE_SHAPE
+      return
+    end if
+    n_pos = rows * atoms3
+    n_eval = rows
+    if (n_pos > default_huge .or. n_eval > default_huge) then
+      status = RGSADDLE_SHAPE
+      return
+    end if
+    status = RGSADDLE_OK
+  end function buffer_extent
+
+  pure function uint64_bits(high, low) result(bits)
+    integer(c_int64_t), intent(in) :: high, low
+    integer(c_int64_t) :: bits
+    integer(c_int64_t), parameter :: mask32 = int(z'FFFFFFFF', c_int64_t)
+    bits = ior(shiftl(iand(high, mask32), 32), iand(low, mask32))
+  end function uint64_bits
+
+  subroutine release_band(self)
+    class(band_handle), intent(inout) :: self
+    call band_finalize(self)
+  end subroutine release_band
+
+  subroutine release_minmode(self)
+    class(minmode_handle), intent(inout) :: self
+    call minmode_finalize(self)
+  end subroutine release_minmode
+
+  subroutine release_pafi(self)
+    class(pafi_handle), intent(inout) :: self
+    call pafi_finalize(self)
+  end subroutine release_pafi
+
+  subroutine release_ohtst(self)
+    class(ohtst_handle), intent(inout) :: self
+    call ohtst_finalize(self)
+  end subroutine release_ohtst
+
+  subroutine move_from_band(self, src)
+    class(band_handle), intent(inout) :: self
+    type(band_handle), intent(inout) :: src
+    type(c_ptr) :: stolen
+    if (c_associated(self%raw, src%raw)) return
+    stolen = src%raw
+    call band_finalize(self)
+    self%raw = stolen
+    src%raw = c_null_ptr
+  end subroutine move_from_band
+
+  subroutine move_from_minmode(self, src)
+    class(minmode_handle), intent(inout) :: self
+    type(minmode_handle), intent(inout) :: src
+    type(c_ptr) :: stolen
+    if (c_associated(self%raw, src%raw)) return
+    stolen = src%raw
+    call minmode_finalize(self)
+    self%raw = stolen
+    src%raw = c_null_ptr
+  end subroutine move_from_minmode
+
+  subroutine move_from_pafi(self, src)
+    class(pafi_handle), intent(inout) :: self
+    type(pafi_handle), intent(inout) :: src
+    type(c_ptr) :: stolen
+    if (c_associated(self%raw, src%raw)) return
+    stolen = src%raw
+    call pafi_finalize(self)
+    self%raw = stolen
+    src%raw = c_null_ptr
+  end subroutine move_from_pafi
+
+  subroutine move_from_ohtst(self, src)
+    class(ohtst_handle), intent(inout) :: self
+    type(ohtst_handle), intent(inout) :: src
+    type(c_ptr) :: stolen
+    if (c_associated(self%raw, src%raw)) return
+    stolen = src%raw
+    call ohtst_finalize(self)
+    self%raw = stolen
+    src%raw = c_null_ptr
+  end subroutine move_from_ohtst
+
+  subroutine assign_band(lhs, rhs)
+    type(band_handle), intent(inout) :: lhs
+    type(band_handle), intent(in) :: rhs
+    type(c_ptr) :: seen
+    seen = rhs%raw
+    if (c_associated(lhs%raw, seen)) error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
+    error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
+  end subroutine assign_band
+
+  subroutine assign_minmode(lhs, rhs)
+    type(minmode_handle), intent(inout) :: lhs
+    type(minmode_handle), intent(in) :: rhs
+    type(c_ptr) :: seen
+    seen = rhs%raw
+    if (c_associated(lhs%raw, seen)) error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
+    error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
+  end subroutine assign_minmode
+
+  subroutine assign_pafi(lhs, rhs)
+    type(pafi_handle), intent(inout) :: lhs
+    type(pafi_handle), intent(in) :: rhs
+    type(c_ptr) :: seen
+    seen = rhs%raw
+    if (c_associated(lhs%raw, seen)) error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
+    error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
+  end subroutine assign_pafi
+
+  subroutine assign_ohtst(lhs, rhs)
+    type(ohtst_handle), intent(inout) :: lhs
+    type(ohtst_handle), intent(in) :: rhs
+    type(c_ptr) :: seen
+    seen = rhs%raw
+    if (c_associated(lhs%raw, seen)) error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
+    error stop RGSADDLE_HANDLE_NOT_ASSIGNABLE
+  end subroutine assign_ohtst
 
 end module rgsaddle
