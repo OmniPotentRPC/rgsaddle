@@ -1,8 +1,10 @@
 {
   "eessi": {
     "compiler": "GCCcore/15.2.0",
-    "rust_module_prefix": "Rust/",
-    "rust_module_suffix": "-GCCcore-15.2.0",
+    "rust_modules": {
+      "aarch64": "Rust/1.94.1-GCCcore-15.2.0",
+      "x86_64": "Rust/1.94.1-GCCcore-15.2.0"
+    },
     "stack_version": "2026.06"
   },
   "legs": {

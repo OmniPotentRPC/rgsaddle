@@ -94,12 +94,15 @@ def fake_eessi(tmp_path, monkeypatch):
     init.write_text(
         textwrap.dedent(
             """
+            : "${EESSI_NO_MODULE_PURGE_ON_INIT}"
+            if [ -n "$PS1" ]; then :; fi
             module() {
               case "$*" in
                 "-t avail Rust")
                   echo "Rust/1.88.0-GCCcore-14.3.0"
-                  echo "Rust/1.91.0-GCCcore-15.2.0" ;;
-                "-t list") echo "Rust/1.91.0-GCCcore-15.2.0" ;;
+                  echo "Rust/1.94.1-GCCcore-15.2.0"
+                  echo "Rust/1.95.0-GCCcore-15.2.0" ;;
+                "-t list") echo "Rust/1.94.1-GCCcore-15.2.0" ;;
               esac
             }
             """
@@ -161,10 +164,48 @@ def test_eessi_leg_keeps_the_callers_path(fake_eessi, monkeypatch):
     assert leg.status == "passed", leg.reason
     outputs = "\n".join(result.output for result in leg.commands)
     assert "command not found" not in outputs
-    assert "Rust module: Rust/1.91.0-GCCcore-15.2.0" in leg.artefacts
-    assert "module list: Rust/1.91.0-GCCcore-15.2.0" in leg.artefacts
+    assert "Rust module: Rust/1.94.1-GCCcore-15.2.0" in leg.artefacts
+    assert "module list: Rust/1.94.1-GCCcore-15.2.0" in leg.artefacts
     eb_local = shlex.quote(shutil.which("eb-local"))
-    assert all(f"$({eb_local} dev " in script for script in scripts[1:])
+    assert all(
+        f"$({eb_local} dev Rust/1.94.1-GCCcore-15.2.0)" in script
+        for script in scripts[2:]
+    )
+
+
+def test_eessi_leg_reports_init_failure(fake_eessi):
+    init = (
+        run.EESSI_ROOT
+        / "versions"
+        / fake_eessi["eessi"]["stack_version"]
+        / "init"
+        / "lmod"
+        / "bash"
+    )
+    init.write_text("echo broken init >&2\nfalse\n", encoding="utf-8")
+    leg = run.eessi_leg(fake_eessi)
+    assert leg.status == "failed"
+    assert leg.reason == "EESSI initialization failed with exit 1"
+    assert "EESSI init: failed with exit 1" in leg.artefacts
+
+
+def test_eessi_leg_refuses_an_unpinned_architecture(fake_eessi, monkeypatch):
+    monkeypatch.setattr(run.platform, "machine", lambda: "riscv64")
+    leg = run.eessi_leg(fake_eessi)
+    assert leg.status == "failed"
+    assert leg.reason == "no Rust module is pinned for architecture riscv64"
+
+
+def test_eessi_leg_refuses_a_missing_pinned_module(fake_eessi):
+    fake_eessi["eessi"]["rust_modules"][run.platform.machine()] = (
+        "Rust/1.93.0-GCCcore-15.2.0"
+    )
+    leg = run.eessi_leg(fake_eessi)
+    assert leg.status == "failed"
+    assert leg.reason == (
+        "pinned Rust module Rust/1.93.0-GCCcore-15.2.0 "
+        f"is unavailable on {run.platform.machine()}"
+    )
 
 
 def test_eessi_leg_fails_closed_when_eb_local_fails(fake_eessi, tmp_path):

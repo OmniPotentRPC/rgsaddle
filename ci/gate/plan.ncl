@@ -12,8 +12,10 @@ let plan = {
   eessi = {
     stack_version = "2026.06",
     compiler = "GCCcore/15.2.0",
-    rust_module_prefix = "Rust/",
-    rust_module_suffix = "-GCCcore-15.2.0",
+    rust_modules = {
+      x86_64 = "Rust/1.94.1-GCCcore-15.2.0",
+      aarch64 = "Rust/1.94.1-GCCcore-15.2.0",
+    },
   },
   matrix = gate_matrix,
   legs = {
@@ -126,8 +128,8 @@ let workflow = {
       name = "Generated files are current",
       runs-on = "ubuntu-24.04",
       steps = [
-        { uses = "actions/checkout@v4" },
-        { uses = "prefix-dev/setup-pixi@v0.9.3", with = { cache = true } },
+        { uses = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" },
+        { uses = "prefix-dev/setup-pixi@82d477f15f3a381dbcc8adc1206ce643fe110fb7", with = { cache = true } },
         { name = "Check generated gate files", run = "pixi run check-gate" },
       ],
     },
@@ -139,11 +141,11 @@ let workflow = {
         matrix = { include = gate_matrix },
       },
       steps = [
-        { uses = "actions/checkout@v4" },
+        { uses = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" },
         {
           name = "Load EESSI",
           "if" = "matrix.leg == 'eessi'",
-          uses = "EESSI/github-action-eessi@v3.4.0",
+          uses = "EESSI/github-action-eessi@834df09f7d60de47f10a7cbf59b470d69b9e2852",
           with = { eessi_stack_version = "2026.06" },
         },
         {
@@ -155,7 +157,7 @@ let workflow = {
         {
           name = "Set up pixi",
           "if" = "matrix.leg == 'pixi'",
-          uses = "prefix-dev/setup-pixi@v0.9.3",
+          uses = "prefix-dev/setup-pixi@82d477f15f3a381dbcc8adc1206ce643fe110fb7",
           with = { cache = true },
         },
         {
@@ -167,7 +169,7 @@ let workflow = {
         {
           name = "Upload gate report",
           "if" = "always()",
-          uses = "actions/upload-artifact@v4",
+          uses = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
           with = {
             name = m%"gate-report-${{ matrix.leg }}-${{ matrix.arch }}"%,
             path = "${{ runner.temp }}/gate.md",
