@@ -2407,10 +2407,6 @@ pub unsafe extern "C" fn rgsaddle_trics_path(
             return RGSADDLE_INVALID_PARAMETER;
         }
         let initial_vec = unsafe { slice::from_raw_parts(initial, total).to_vec() };
-        let initial = match Array2::from_shape_vec((images, dof), initial_vec) {
-            Ok(path) => path,
-            Err(_) => return RGSADDLE_SHAPE,
-        };
         let config = crate::TricsConfig::default()
             .with_inversion(
                 crate::TricInversionConfig::default()
@@ -2422,6 +2418,19 @@ pub unsafe extern "C" fn rgsaddle_trics_path(
             .with_splice_tolerance(splice_tolerance)
             .with_max_splice_iterations(max_splice_iterations)
             .with_length_per_angstrom(length_per_angstrom);
+        if let Err(err) = crate::trics::check_trics_config(&config) {
+            return status_of(&err);
+        }
+        if initial_vec.iter().any(|value| !value.is_finite()) {
+            return RGSADDLE_NON_FINITE;
+        }
+        if images == 2 {
+            return RGSADDLE_SOLVER;
+        }
+        let initial = match Array2::from_shape_vec((images, dof), initial_vec) {
+            Ok(path) => path,
+            Err(_) => return RGSADDLE_SHAPE,
+        };
         match crate::trics_path(initial.view(), &config) {
             Ok(report) => {
                 let out = unsafe { slice::from_raw_parts_mut(out, total) };

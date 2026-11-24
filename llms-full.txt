@@ -3882,10 +3882,13 @@ The inversion, diagnostic, and splice arguments correspond to
 coordinates, 1.0 for angstrom and 0.1 for nanometres; a path in other units
 is converted before the work and back before it is written.  A non-positive
 or non-finite value returns `RGSADDLE_INVALID_PARAMETER`.  The call does not
-evaluate a surface.  A diagnostic maze
-with no stable route, a coordinate singularity that damped inversion cannot
-pass, or an inversion or splice that does not converge returns
-`RGSADDLE_SOLVER`.  See
+evaluate a surface.  `n_images < 2`, `n_atoms < 1`, or dimension overflow
+returns `RGSADDLE_SHAPE`.  A two-image path (no interior image), a
+multi-segment split whose segments contain no interior image, a diagnostic
+maze with no stable route, a coordinate singularity that damped inversion
+cannot pass, or an inversion or splice that does not converge returns
+`RGSADDLE_SOLVER`.  Non-finite input or derived geometry returns
+`RGSADDLE_NON_FINITE`.  See
 `howto/path-initialization` for the Rust selector and the published splice
 tolerance.
 

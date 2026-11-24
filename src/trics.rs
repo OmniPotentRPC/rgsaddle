@@ -1479,6 +1479,8 @@ fn candidate_error_priority(error: &SaddleError) -> u8 {
         | SaddleError::NotEquilibrated { .. }
         | SaddleError::InsufficientEffectiveSamples { .. } => 2,
         SaddleError::Solver(_) | SaddleError::Singular(_) => 1,
+        #[allow(unreachable_patterns)]
+        _ => 1,
     }
 }
 
