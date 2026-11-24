@@ -167,6 +167,23 @@ def test_eessi_leg_keeps_the_callers_path(fake_eessi, monkeypatch):
     assert all(f"$({eb_local} dev " in script for script in scripts[1:])
 
 
+def test_eessi_leg_fails_closed_when_eb_local_fails(fake_eessi, tmp_path):
+    write_executable(
+        tmp_path / "tools" / "eb-local",
+        """
+        #!/bin/sh
+        echo 'eb-local: no such module' >&2
+        exit 1
+        """,
+    )
+    leg = run.eessi_leg(fake_eessi)
+    assert leg.status == "failed"
+    assert leg.commands and all(result.returncode != 0 for result in leg.commands)
+    outputs = "\n".join(result.output for result in leg.commands)
+    assert "eb-local" in outputs
+    assert "host toolchain" in outputs
+
+
 check_gate = load_module("check_gate")
 needs_nickel = pytest.mark.skipif(
     shutil.which("nickel") is None, reason="nickel is not on PATH"

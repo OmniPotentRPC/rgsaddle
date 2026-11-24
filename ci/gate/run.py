@@ -261,6 +261,7 @@ def eessi_leg(plan: dict[str, object]) -> LegResult:
         )
 
     module_probe = (
+        "set -euo pipefail\n"
         f"source {shlex.quote(str(init))}\n"
         f"module use {shlex.quote(str(modules))}\n"
         "module -t avail Rust 2>&1"
@@ -287,12 +288,18 @@ def eessi_leg(plan: dict[str, object]) -> LegResult:
             ],
         )
 
+    # Capture eb-local first: a failure inside eval "$(...)" is masked and
+    # would leave the host toolchain in use.
+    eb_command = f"{shlex.quote(eb_local)} dev {shlex.quote(rust_module)}"
     setup = (
+        "set -euo pipefail\n"
         f"source {shlex.quote(str(init))}\n"
         f"module use {shlex.quote(str(modules))}\n"
         "unset LD_LIBRARY_PATH\n"
         f"export EESSI_VERSION={shlex.quote(stack)}\n"
-        f'eval "$({shlex.quote(eb_local)} dev {shlex.quote(rust_module)})"'
+        f"eb_env=$({eb_command}) || "
+        "{ echo 'eb-local failed; refusing to use the host toolchain' >&2; exit 1; }\n"
+        'eval "$eb_env"'
     )
     commands = plan["legs"]["eessi"]["commands"]
     results = execute_commands(commands, prefix=setup)
