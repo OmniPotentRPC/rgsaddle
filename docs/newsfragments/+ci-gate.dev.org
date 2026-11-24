@@ -2,3 +2,4 @@ The reproducible build and test gate runs ~ci/gate/plan.json~ through ~ci/gate/r
 ~ci/gate/plan.ncl~ is the single source of the plan and of ~.github/workflows/gate.yml~; ~pixi run --locked check-gate~ fails when either generated file differs from it, without rewriting them.
 The pixi environments ship ~capnp~ for the all-features build, the EESSI scripts keep the caller's ~PATH~, and test counts report passed, failed, ignored, and skipped totals for cargo, pytest, and Meson.
 The python environment installs the project as an editable path with the test extra, and pins ASE, Hypothesis, numpy, pytest-run-parallel, nanobind, and scikit-build-core in ~pixi.lock~. The gate runs ~pixi~ with ~--locked~, and no task installs from the network.
+The pixi cache key hashes ~Cargo.lock~, every ~Cargo.toml~, the Rust, C, and C++ sources of the editable extension, and the build scripts, so a later commit with the same lockfile rebuilds that extension.

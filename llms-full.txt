@@ -4163,6 +4163,8 @@ pixi run --locked check-gate
 
 The python environment installs this checkout as an editable path dependency with the `test` extra. ASE, Hypothesis, numpy, pytest-run-parallel, nanobind, and scikit-build-core are conda dependencies of that environment, so the solve pins them in `pixi.lock`. The build task imports `rgsaddle`. No task installs from the network.
 
+The Actions cache stores all of `.pixi`. Its key is a prefix plus a hash of `pixi.lock`, and the prefix hashes `Cargo.lock`, every `Cargo.toml`, `src/`, the headers and `bind/` sources compiled into the editable extension, and the build scripts (`build.rs`, `CMakeLists.txt`, and `pyproject.toml`). A commit that changes those files misses the cache, and the install builds the extension again.
+
 Run the gate's own tests:
 
 ```sh

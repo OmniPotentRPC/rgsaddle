@@ -180,6 +180,40 @@ def test_gate_commands_do_not_resolve_outside_the_lock():
     assert "pixi run --locked check-gate" in workflow
 
 
+# setup-pixi hashes pixi.lock itself. These patterns are the extra prefix,
+# and every one of them is compiled into the editable native extension or
+# drives that build. include/ and bind/ are not under src/.
+PIXI_CACHE_PATTERNS = (
+    "Cargo.lock",
+    "**/Cargo.toml",
+    "src/**",
+    "include/**",
+    "bind/**",
+    "build.rs",
+    "**/build.rs",
+    "CMakeLists.txt",
+    "pyproject.toml",
+)
+
+
+def test_pixi_cache_key_hashes_native_sources():
+    workflow = (ROOT / ".github" / "workflows" / "gate.yml").read_text(encoding="utf-8")
+    setups = re.findall(r"uses: prefix-dev/setup-pixi@\S+", workflow)
+    keys = re.findall(r"(?m)^[ ]*cache-key:[ ]*(.+?)\s*$", workflow)
+    assert len(setups) == 2
+    assert len(keys) == len(setups)
+    normalized = [key.strip().strip("'\"").replace("''", "'") for key in keys]
+    assert normalized[0] == normalized[1]
+    key = normalized[0]
+    assert key.startswith("pixi-")
+    assert "hashFiles(" in key
+    for pattern in PIXI_CACHE_PATTERNS:
+        assert pattern in key, pattern
+    source = (GATE_DIR / "plan.ncl").read_text(encoding="utf-8")
+    for pattern in PIXI_CACHE_PATTERNS:
+        assert pattern in source
+
+
 def write_executable(path: pathlib.Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(text).lstrip(), encoding="utf-8")

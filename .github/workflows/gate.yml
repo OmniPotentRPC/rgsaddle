@@ -29,6 +29,7 @@ jobs:
       uses: prefix-dev/setup-pixi@82d477f15f3a381dbcc8adc1206ce643fe110fb7
       with:
         cache: true
+        cache-key: pixi-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'src/**', 'include/**', 'bind/**', 'build.rs', '**/build.rs', 'CMakeLists.txt', 'pyproject.toml') }}
         locked: true
         pixi-version: v0.84.2
     - id: gate
@@ -79,6 +80,7 @@ jobs:
     - uses: prefix-dev/setup-pixi@82d477f15f3a381dbcc8adc1206ce643fe110fb7
       with:
         cache: true
+        cache-key: pixi-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'src/**', 'include/**', 'bind/**', 'build.rs', '**/build.rs', 'CMakeLists.txt', 'pyproject.toml') }}
         locked: true
         pixi-version: v0.84.2
     - name: Check generated gate files

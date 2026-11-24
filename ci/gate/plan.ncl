@@ -114,6 +114,13 @@ status=$?
 echo "status=${status}" >> "${GITHUB_OUTPUT}"
 exit 0
 "% in
+# setup-pixi saves the whole .pixi directory. Its cache key is a prefix plus
+# a hash of pixi.lock, so a later commit with the same lockfile restores an
+# editable extension built from older sources. The action has no exclude
+# list, and removing the extension from a restored tree does not make pixi
+# rebuild it. The prefix therefore hashes the native sources and build
+# scripts. A change misses the cache and the install builds the extension again.
+let pixi_cache_key = "pixi-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'src/**', 'include/**', 'bind/**', 'build.rs', '**/build.rs', 'CMakeLists.txt', 'pyproject.toml') }}" in
 let workflow = {
   name = "Reproducible build and test gate",
   on = {
@@ -129,7 +136,7 @@ let workflow = {
       runs-on = "ubuntu-24.04",
       steps = [
         { uses = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" },
-        { uses = "prefix-dev/setup-pixi@82d477f15f3a381dbcc8adc1206ce643fe110fb7", with = { cache = true, locked = true, "pixi-version" = "v0.84.2" } },
+        { uses = "prefix-dev/setup-pixi@82d477f15f3a381dbcc8adc1206ce643fe110fb7", with = { cache = true, locked = true, "pixi-version" = "v0.84.2", "cache-key" = pixi_cache_key } },
         { name = "Check generated gate files", run = "pixi run --locked check-gate" },
       ],
     },
@@ -158,7 +165,7 @@ let workflow = {
           name = "Set up pixi",
           "if" = "matrix.leg == 'pixi'",
           uses = "prefix-dev/setup-pixi@82d477f15f3a381dbcc8adc1206ce643fe110fb7",
-          with = { cache = true, locked = true, "pixi-version" = "v0.84.2" },
+          with = { cache = true, locked = true, "pixi-version" = "v0.84.2", "cache-key" = pixi_cache_key },
         },
         {
           name = "Run gate",
