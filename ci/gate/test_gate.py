@@ -214,6 +214,28 @@ def test_pixi_cache_key_hashes_native_sources():
         assert pattern in source
 
 
+def test_all_features_cargo_is_limited_to_two_jobs():
+    manifest = tomllib.loads((ROOT / "pixi.toml").read_text(encoding="utf-8"))
+    builds = [
+        command
+        for command in task_commands(manifest)
+        if "--all-features" in command
+        and re.search(r"\bcargo\s+(?:build|test|clippy)\b", command)
+    ]
+    assert len(builds) == 3
+    for command in builds:
+        assert re.search(r"(?:^|\s)CARGO_BUILD_JOBS=2(?:\s|$)", command), command
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        if "--all-features" not in text:
+            continue
+        assert (
+            "CARGO_BUILD_JOBS=2" in text
+            or 'CARGO_BUILD_JOBS: "2"' in text
+            or "CARGO_BUILD_JOBS: 2" in text
+        ), path
+
+
 def write_executable(path: pathlib.Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(text).lstrip(), encoding="utf-8")

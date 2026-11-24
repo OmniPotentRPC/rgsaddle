@@ -4165,6 +4165,8 @@ The python environment installs this checkout as an editable path dependency wit
 
 The Actions cache stores all of `.pixi`. Its key is a prefix plus a hash of `pixi.lock`, and the prefix hashes `Cargo.lock`, every `Cargo.toml`, `src/`, the headers and `bind/` sources compiled into the editable extension, and the build scripts (`build.rs`, `CMakeLists.txt`, and `pyproject.toml`). A commit that changes those files misses the cache, and the install builds the extension again.
 
+The all-features cargo tasks set =CARGO_BUILD_JOBS=2=. Four jobs peaked near 19 GiB, above a 16 GiB runner. The same cap belongs on every all-features build the workflows run.
+
 Run the gate's own tests:
 
 ```sh

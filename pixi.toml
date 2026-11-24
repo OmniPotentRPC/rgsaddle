@@ -7,9 +7,10 @@ platforms = ["linux-64", "linux-aarch64"]
 gen-gate = "nickel export --format yaml --field workflow ci/gate/plan.ncl -o .github/workflows/gate.yml && nickel export --format json --field plan ci/gate/plan.ncl -o ci/gate/plan.json"
 gen-gha = { depends-on = ["gen-gate"] }
 check-gate = "python ci/gate/check_gate.py"
-gate-cargo-build = "CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --locked --all-features"
-gate-cargo-test = "CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo test --locked --all-features"
-gate-clippy = "CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo clippy --locked --all-targets --all-features -- -D warnings"
+# Four rustc jobs peaked near 19 GiB. Two jobs stay within a 16 GiB runner.
+gate-cargo-build = "CMAKE_POLICY_VERSION_MINIMUM=3.5 CARGO_BUILD_JOBS=2 cargo build --locked --all-features"
+gate-cargo-test = "CMAKE_POLICY_VERSION_MINIMUM=3.5 CARGO_BUILD_JOBS=2 cargo test --locked --all-features"
+gate-clippy = "CMAKE_POLICY_VERSION_MINIMUM=3.5 CARGO_BUILD_JOBS=2 cargo clippy --locked --all-targets --all-features -- -D warnings"
 gate-rustfmt = "cargo fmt --check"
 gate-capi-build = "cargo build --locked --features capi --verbose"
 gate-capi-test = "cargo test --locked --features capi --verbose"
