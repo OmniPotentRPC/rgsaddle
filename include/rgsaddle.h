@@ -1539,8 +1539,10 @@ rgsaddle_status_t rgsaddle_dyneb_mask(int64_t n_images, int64_t n_atoms,
  * rgsaddle_stencil_run is a loop over rgsaddle_stencil_step.
  * The older band and min-mode sessions stay step-only.
  * Band presets (5 through 13) fail at rgsaddle_stencil_new with
- * rgsaddle_last_error(); the band builder is feat/band-methods-zoom.
- * ABI minor stays 16. These symbols are additive.
+ * "band presets stay on feat/band-methods-zoom" from rgsaddle_last_error()
+ * (kept for compatibility); use rgsaddle_band_create for bands.
+ * These symbols are additive: opaque handles and
+ * rgsaddle_stencil_report_t.struct_size carry layout without RGSADDLE_ABI_MINOR.
  */
 typedef struct rgsaddle_stencil_config rgsaddle_stencil_config_t;
 typedef struct rgsaddle_stencil rgsaddle_stencil_t;
