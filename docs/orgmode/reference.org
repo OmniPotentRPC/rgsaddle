@@ -387,6 +387,7 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 - =tests/softmode_seeding.rs=: soft-mode-subspace-first direction seeding (=soft_mode_then_full_directions=, =spectral_gap_rank=) against isotropic random starts on coupled wells and Müller-Brown.
 - =tests/makri_vacancy.rs= — Makri, Ortner, and Kermode (2019) Table II 107-atom Morse Cu fcc vacancy counts for ODE12r and ODE12r-Exp, plus simplified string (spline, linear, and climbing spline) barrier parity with NEB
 - =tests/autoneb.rs= — ASE AutoNEB decisions and the Müller-Brown insertion sequence. =tests/autoneb_gate.rs= hashes the insertion list and the trajectory at 1, 2, 3 and 8 threads, and an ignored release run compares AutoNEB with CI-NEB at one force-call budget. Strong scaling of a full AutoNEB run is an ignored test in the crate.
+- =tests/autoneb_abi.rs= runs =tests/c/autoneb_abi.c=: =rgsaddle_autoneb_run= on a double well reports =status= 1 with =max_force= under the stop and a repeatable =iteration= count, reports =status= 0 and =iteration= equal to the step budget when the climb is cut short, and returns =RGSADDLE_INVALID_PARAMETER=, =RGSADDLE_NULL_SURFACE=, =RGSADDLE_SHAPE=, =RGSADDLE_NON_FINITE=, =RGSADDLE_ABI_MISMATCH=, and =RGSADDLE_SURFACE_FAILED= for the matching bad inputs.
 - =tests/minmode_saddle.rs= — dimer / Lanczos
 - =tests/band_workspace.rs=: a warm band step allocates as often at 13
   images as at 5, for five spring, projection and optimizer settings,
