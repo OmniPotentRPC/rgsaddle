@@ -1264,10 +1264,10 @@ def _optimizer_maxstep(optimizer: Any) -> float:
         from ase.optimize import FIRE
     except ImportError as err:
         raise NotImplementedError("AutoNEB optimizer is FIRE") from err
-    if not (optimizer is FIRE or (isinstance(optimizer, type) and issubclass(optimizer, FIRE))):
+    if not (isinstance(optimizer, type) and issubclass(optimizer, FIRE)):
         raise NotImplementedError("AutoNEB steps with the band FIRE solver; pass FIRE")
     try:
-        signature = inspect.signature(optimizer.__init__)
+        signature = inspect.signature(optimizer)
     except (TypeError, ValueError):
         return 0.2
     parameter = signature.parameters.get("maxstep")
