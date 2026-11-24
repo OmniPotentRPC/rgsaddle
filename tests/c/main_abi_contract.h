@@ -492,6 +492,32 @@ _Static_assert(offsetof(rgsaddle_saddle_index_t, evaluations) == offsetof(abi40_
 _Static_assert(offsetof(rgsaddle_saddle_index_t, total_evaluations) == offsetof(abi40_rgsaddle_saddle_index_t, total_evaluations), "rgsaddle_saddle_index_t.total_evaluations");
 _Static_assert(offsetof(rgsaddle_saddle_index_t, escapes) == offsetof(abi40_rgsaddle_saddle_index_t, escapes), "rgsaddle_saddle_index_t.escapes");
 
+typedef struct {
+  abi15_rgsaddle_version_t version;
+  uint64_t flags;
+  abi15_rgsaddle_band_config_t band;
+  int64_t n_images;
+  double frontier_tol;
+  int64_t min_steps_per_node;
+  int64_t max_steps_per_node;
+  double join_tol;
+  int32_t reparametrization;
+  int32_t force_gate;
+} abi44_rgsaddle_growing_string_config_t;
+_Static_assert(sizeof(rgsaddle_growing_string_config_t) == 160, "rgsaddle_growing_string_config_t size");
+_Static_assert(sizeof(rgsaddle_growing_string_config_t) == sizeof(abi44_rgsaddle_growing_string_config_t), "rgsaddle_growing_string_config_t size");
+_Static_assert(_Alignof(rgsaddle_growing_string_config_t) == _Alignof(abi44_rgsaddle_growing_string_config_t), "rgsaddle_growing_string_config_t alignment");
+_Static_assert(offsetof(rgsaddle_growing_string_config_t, version) == offsetof(abi44_rgsaddle_growing_string_config_t, version), "rgsaddle_growing_string_config_t.version");
+_Static_assert(offsetof(rgsaddle_growing_string_config_t, flags) == offsetof(abi44_rgsaddle_growing_string_config_t, flags), "rgsaddle_growing_string_config_t.flags");
+_Static_assert(offsetof(rgsaddle_growing_string_config_t, band) == offsetof(abi44_rgsaddle_growing_string_config_t, band), "rgsaddle_growing_string_config_t.band");
+_Static_assert(offsetof(rgsaddle_growing_string_config_t, n_images) == offsetof(abi44_rgsaddle_growing_string_config_t, n_images), "rgsaddle_growing_string_config_t.n_images");
+_Static_assert(offsetof(rgsaddle_growing_string_config_t, frontier_tol) == offsetof(abi44_rgsaddle_growing_string_config_t, frontier_tol), "rgsaddle_growing_string_config_t.frontier_tol");
+_Static_assert(offsetof(rgsaddle_growing_string_config_t, min_steps_per_node) == offsetof(abi44_rgsaddle_growing_string_config_t, min_steps_per_node), "rgsaddle_growing_string_config_t.min_steps_per_node");
+_Static_assert(offsetof(rgsaddle_growing_string_config_t, max_steps_per_node) == offsetof(abi44_rgsaddle_growing_string_config_t, max_steps_per_node), "rgsaddle_growing_string_config_t.max_steps_per_node");
+_Static_assert(offsetof(rgsaddle_growing_string_config_t, join_tol) == offsetof(abi44_rgsaddle_growing_string_config_t, join_tol), "rgsaddle_growing_string_config_t.join_tol");
+_Static_assert(offsetof(rgsaddle_growing_string_config_t, reparametrization) == offsetof(abi44_rgsaddle_growing_string_config_t, reparametrization), "rgsaddle_growing_string_config_t.reparametrization");
+_Static_assert(offsetof(rgsaddle_growing_string_config_t, force_gate) == offsetof(abi44_rgsaddle_growing_string_config_t, force_gate), "rgsaddle_growing_string_config_t.force_gate");
+
 typedef rgsaddle_status_t (*abi40_signature_rgsaddle_saddle_check_default)(
     rgsaddle_saddle_check_t *out);
 _Static_assert(_Generic(&rgsaddle_saddle_check_default, abi40_signature_rgsaddle_saddle_check_default: 1, default: 0), "rgsaddle_saddle_check_default signature");
@@ -549,6 +575,34 @@ _Static_assert(_Generic(&rgsaddle_growing_string_step, abi44_signature_rgsaddle_
 typedef int64_t (*abi44_signature_rgsaddle_growing_string_nodes_added)(
     const RgsaddleGrowingString *session);
 _Static_assert(_Generic(&rgsaddle_growing_string_nodes_added, abi44_signature_rgsaddle_growing_string_nodes_added: 1, default: 0), "rgsaddle_growing_string_nodes_added signature");
+
+typedef int32_t (*abi44_signature_rgsaddle_growing_string_phase)(
+    const RgsaddleGrowingString *session);
+_Static_assert(_Generic(&rgsaddle_growing_string_phase, abi44_signature_rgsaddle_growing_string_phase: 1, default: 0), "rgsaddle_growing_string_phase signature");
+
+typedef int64_t (*abi44_signature_rgsaddle_growing_string_n_images)(
+    const RgsaddleGrowingString *session);
+_Static_assert(_Generic(&rgsaddle_growing_string_n_images, abi44_signature_rgsaddle_growing_string_n_images: 1, default: 0), "rgsaddle_growing_string_n_images signature");
+
+typedef rgsaddle_status_t (*abi44_signature_rgsaddle_growing_string_positions)(
+    const RgsaddleGrowingString *session, double *out);
+_Static_assert(_Generic(&rgsaddle_growing_string_positions, abi44_signature_rgsaddle_growing_string_positions: 1, default: 0), "rgsaddle_growing_string_positions signature");
+
+typedef rgsaddle_status_t (*abi44_signature_rgsaddle_growing_string_ids)(
+    const RgsaddleGrowingString *session, uint64_t *out);
+_Static_assert(_Generic(&rgsaddle_growing_string_ids, abi44_signature_rgsaddle_growing_string_ids: 1, default: 0), "rgsaddle_growing_string_ids signature");
+
+typedef rgsaddle_status_t (*abi44_signature_rgsaddle_growing_string_set_fixed_atoms)(
+    RgsaddleGrowingString *session, const uint8_t *fixed, int64_t n_atoms);
+_Static_assert(_Generic(&rgsaddle_growing_string_set_fixed_atoms, abi44_signature_rgsaddle_growing_string_set_fixed_atoms: 1, default: 0), "rgsaddle_growing_string_set_fixed_atoms signature");
+
+typedef rgsaddle_status_t (*abi44_signature_rgsaddle_growing_string_saddle_index)(
+    const RgsaddleGrowingString *session, rgsaddle_saddle_index_t *out, double *curvatures,
+    int64_t capacity);
+_Static_assert(_Generic(&rgsaddle_growing_string_saddle_index, abi44_signature_rgsaddle_growing_string_saddle_index: 1, default: 0), "rgsaddle_growing_string_saddle_index signature");
+
+typedef void (*abi44_signature_rgsaddle_growing_string_free)(RgsaddleGrowingString *session);
+_Static_assert(_Generic(&rgsaddle_growing_string_free, abi44_signature_rgsaddle_growing_string_free: 1, default: 0), "rgsaddle_growing_string_free signature");
 
 typedef rgsaddle_status_t (*abi45_signature_rgsaddle_band_set_free_end)(
     RgsaddleBand *band, int32_t enabled, int32_t side, int32_t has_target_energy,
