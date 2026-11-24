@@ -35,46 +35,46 @@ type Offsets = [[f64; 3]; 4];
 /// One Sella equality: a coordinate plus its target.
 #[derive(Clone, Debug)]
 pub enum Equality {
-    /// The Translation.
+    /// Fix a Cartesian translation coordinate.
     Translation {
-        /// The coord.
+        /// Translation coordinate evaluated on the Cartesian frame.
         coord: Translation,
-        /// The target.
+        /// Required value of `coord`, in the frame's length unit.
         target: f64,
     },
-    /// The Rotation.
+    /// Fix a rotation coordinate about a reference geometry.
     Rotation {
-        /// The coord.
+        /// Rotation coordinate evaluated on the Cartesian frame.
         coord: Rotation,
-        /// The target.
+        /// Required value returned by `coord`.
         target: f64,
     },
-    /// The Displacement.
+    /// Fix a caller-defined linear Cartesian displacement.
     Displacement {
-        /// The coord.
+        /// Normalized displacement coordinate.
         coord: Displacement,
-        /// The target.
+        /// Required projection onto `coord`, in the frame's length unit.
         target: f64,
     },
     /// Host-supplied pair. Evaluation is the Wilson bond, not vocn.
     Bond {
-        /// The atoms.
+        /// Zero-based indices of the two atoms.
         atoms: [usize; 2],
-        /// The target.
+        /// Required bond length.
         target: f64,
     },
     /// Host-supplied triple, vertex in the middle.
     Angle {
-        /// The atoms.
+        /// Zero-based atom indices, with the vertex at index 1.
         atoms: [usize; 3],
-        /// The target.
+        /// Required angle in radians.
         target: f64,
     },
     /// Host-supplied quadruple. Residual is wrapped to `(-pi, pi]`.
     Dihedral {
-        /// The atoms.
+        /// Zero-based atom indices in torsion order.
         atoms: [usize; 4],
-        /// The target.
+        /// Required dihedral angle in radians.
         target: f64,
     },
 }
@@ -137,17 +137,17 @@ impl Equality {
 /// Packed Sella internals counts for [`crate::restricted::MaxInternalStep`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InternalCounts {
-    /// The ntrans.
+    /// Translation coordinates at the start of the packed vector.
     pub ntrans: usize,
-    /// The nbonds.
+    /// Bond coordinates after the translations.
     pub nbonds: usize,
-    /// The nangles.
+    /// Angle coordinates after the bonds.
     pub nangles: usize,
-    /// The ndihedrals.
+    /// Dihedral coordinates after the angles.
     pub ndihedrals: usize,
-    /// The nother.
+    /// Other coordinates after the dihedrals.
     pub nother: usize,
-    /// The nrotations.
+    /// Rotation coordinates at the end of the packed vector.
     pub nrotations: usize,
 }
 
