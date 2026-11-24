@@ -74,6 +74,7 @@ pub mod capi;
 pub mod capi_hyperplane;
 pub mod connect;
 pub mod defect_pair;
+pub mod elastic_dipole;
 pub mod error;
 pub mod geodesic;
 pub mod idpp;
@@ -156,6 +157,11 @@ pub use defect_pair::{
 };
 pub use elastic::{
     ElasticMultipole, LocalField, Octupole, Quadrupole, StrainGradient, quadrupole_energy,
+};
+pub use elastic_dipole::{
+    AnisotropicGreen, AnisotropicGreenConfig, CorrectedEnergy, CorrectedRate, DefectDipole,
+    ElasticConstants, ElasticCorrection, ElasticPairState, ElasticRate, GreenSecondDerivative,
+    InteractionEstimate, PeriodicElastic, PeriodicElasticConfig, Tensor4,
 };
 pub use error::SaddleError;
 pub use field::{DefectSource, DirectSolver, FieldSolver, FmmSolver, Kelvin};

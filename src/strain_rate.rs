@@ -12,7 +12,12 @@
 //!
 //! then symmetrized, because the defect has no net torque (their Eq. (1)).
 //! The same tensor is the first moment of the Kanzaki forces when those
-//! forces are known.
+//! forces are known.  The residual-stress, homogeneous-strain, and force
+//! routes are reviewed by Clouet, Varvenne, and Jourdan, Comput. Mater.
+//! Sci. 147, 49 (2018), doi:10.1016/j.commatsci.2018.01.053.  The
+//! finite-cell interpretation and image correction follow Varvenne,
+//! Bruneval, Marinica, and Clouet, Phys. Rev. B 88, 134102 (2013),
+//! doi:10.1103/PhysRevB.88.134102.
 //!
 //! A hop's barrier at an imposed strain follows by subtracting the two
 //! interaction energies:
@@ -163,6 +168,30 @@ impl ElasticDipole {
     pub fn from_stress(volume: f64, defect: M3, bulk: M3) -> Result<Self, SaddleError> {
         Ok(Self {
             tensor: elastic_dipole(volume, defect, bulk)?,
+        })
+    }
+
+    /// Homogeneous-strain route, `P = -(∂E_defect/∂ε - ∂E_bulk/∂ε)`.
+    ///
+    /// Both arguments are energy derivatives with respect to the full
+    /// symmetric strain tensor.  A stress-based evaluator has
+    /// `∂E/∂ε = V σ`, so this route is algebraically identical to
+    /// [`Self::from_stress`] without requiring the caller to divide by
+    /// the volume first.
+    pub fn from_energy_strain_gradient(defect: M3, bulk: M3) -> Result<Self, SaddleError> {
+        if !finite_m3(defect) || !finite_m3(bulk) {
+            return Err(SaddleError::NonFinite(
+                "homogeneous-strain energy derivative",
+            ));
+        }
+        let mut tensor = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                tensor[i][j] = -(defect[i][j] - bulk[i][j]);
+            }
+        }
+        Ok(Self {
+            tensor: symmetrize(tensor),
         })
     }
 
