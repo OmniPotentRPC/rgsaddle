@@ -1982,3 +1982,108 @@ fn ssneb_validates_the_copper_dimer() {
         eprintln!("wrote {} rows to {}", lines.len() - 1, path.display());
     }
 }
+
+#[test]
+#[ignore = "release Cu joint Vineyard spectrum"]
+fn cu_joint_vineyard_has_one_unstable_saddle_mode() {
+    let copper = Copper::new();
+    let gamma = 0.03;
+    let (perfect, cube) = fcc(3, 3.615);
+    let along_100 = dumbbell(&perfect, [1.0, 0.0, 0.0], 2.05);
+    let along_110 = dumbbell(
+        &perfect,
+        [
+            std::f64::consts::FRAC_1_SQRT_2,
+            std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+        ],
+        2.05,
+    );
+    let (sheared, cell) = apply_shear(&along_100, cube, gamma);
+    let (mut other, _) = apply_shear(&along_110, cube, gamma);
+    relax(&copper, &mut other, cell, RELAX_FORCE_TOL, 200);
+    let mut minimum = sheared;
+    relax(&copper, &mut minimum, cell, RELAX_FORCE_TOL, 200);
+    let (e_min, _, sigma_min) = copper.evaluate(minimum.view(), cell);
+    let (_, _, min_dir) = closest_pair(&minimum, cell);
+    let (min_100, min_110, _, _) = axis_report(min_dir);
+    let connect = minimum_image_difference(&other, &minimum, cell);
+    let norm = connect.dot(&connect).sqrt();
+    let mut nudged = minimum.clone();
+    for (slot, component) in nudged.iter_mut().zip(connect.iter()) {
+        *slot += 0.02 * component / norm;
+    }
+    let mut external = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            external[i][j] = -sigma_min[i][j];
+        }
+    }
+    let saddle = saddle_from_minimum(
+        &copper,
+        &nudged,
+        cell,
+        &connect,
+        CellMask::all(),
+        external,
+        cube,
+        e_min,
+        min_100,
+        min_110,
+        2500,
+    );
+    assert_eq!(saddle.status, MinModeStatus::Converged);
+    assert_eq!(saddle.negative_modes, Some(1));
+    assert!(!saddle.rejected);
+
+    let chart =
+        rgsaddle::JointChart::new(cell, minimum.len() / 3, CellMask::all(), external, 1.0).unwrap();
+    let q_min = rgsaddle::joint_coordinate(&chart, CellMask::all(), minimum.view(), cell).unwrap();
+    let q_saddle = rgsaddle::joint_coordinate(
+        &chart,
+        CellMask::all(),
+        saddle.positions.view(),
+        saddle.cell,
+    )
+    .unwrap();
+    let surface = HeldCell {
+        copper: &copper,
+        cell,
+    };
+    let config = rgsaddle::JointHessianConfig::new(1.0e-4, 1.0e-6, 3.0e-3);
+    let minimum_hessian = rgsaddle::joint_hessian(&surface, &chart, q_min.view(), config).unwrap();
+    let saddle_hessian =
+        rgsaddle::joint_hessian(&surface, &chart, q_saddle.view(), config).unwrap();
+    let (minimum_values, _) = rgsaddle::exact_eigh(minimum_hessian.matrix.view()).unwrap();
+    let (saddle_values, _) = rgsaddle::exact_eigh(saddle_hessian.matrix.view()).unwrap();
+    eprintln!(
+        "CU_JOINT_RAW minimum_gradient={:.9e} saddle_gradient={:.9e} minimum_low={} saddle_low={}",
+        minimum_hessian.max_gradient,
+        saddle_hessian.max_gradient,
+        minimum_values
+            .iter()
+            .take(12)
+            .map(|value| format!("{value:.12e}"))
+            .collect::<Vec<_>>()
+            .join(";"),
+        saddle_values
+            .iter()
+            .take(12)
+            .map(|value| format!("{value:.12e}"))
+            .collect::<Vec<_>>()
+            .join(";"),
+    );
+    let report = rgsaddle::joint_vineyard_prefactor(
+        minimum_hessian.matrix.view(),
+        saddle_hessian.matrix.view(),
+        rgsaddle::JointVineyardConfig::new(63.546, 1.0e-3),
+    )
+    .unwrap();
+    eprintln!(
+        "CU_JOINT_VINEYARD unstable={:.12e} prefactor_hz={:.12e} minimum_zero={} saddle_zero={}",
+        report.unstable_eigenvalue,
+        report.prefactor_hz,
+        report.minimum_zero_modes,
+        report.saddle_zero_modes,
+    );
+}
