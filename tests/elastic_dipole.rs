@@ -172,12 +172,12 @@ fn periodic_pair_correction_removes_the_smoke_scale_cell_drift() {
             let infinite = corrector
                 .correct_energy(&cell, state)
                 .expect("corrected energy");
+            let reference_energy = chemical + reference_pair.infinite;
+            let mismatch = (infinite.infinite - reference_energy).abs();
             raw.push(periodic_energy);
             corrected.push(infinite.infinite);
-            reference_infinite.push(chemical + reference_pair.infinite);
-            max_reference_mismatch = max_reference_mismatch.max(
-                (infinite.infinite - (chemical + reference_pair.infinite)).abs(),
-            );
+            reference_infinite.push(reference_energy);
+            max_reference_mismatch = max_reference_mismatch.max(mismatch);
         }
         assert!(
             span(&reference_infinite) <= f64::EPSILON.sqrt() * chemical.abs().max(1.0),
