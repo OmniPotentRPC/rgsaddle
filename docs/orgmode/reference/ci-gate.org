@@ -10,6 +10,16 @@ The gate report starts with:
 - =Job dir=: the checkout used for every command.
 - =Commit SHA=: the tested commit.
 
-The status table records submission, start, finish, and the final reason. The finished row lists every command's exit status, the output scan for =error|FAILED|panicked=, and test counts.
+The status table records submission, start, finish, and the final reason. The finished row lists every command's exit status, the output scan for =error|FAILED|panicked=, and test counts. A test command passes only when it exits 0, its output is clean, a summary was found, and that summary has no failures.
+
+Each test count has four totals: passed, failed, ignored, and skipped.
+
+| Tool   | Failed                               | Ignored         | Skipped                    |
+|--------+--------------------------------------+-----------------+----------------------------|
+| cargo  | =failed=                             | =ignored=       | =filtered out=             |
+| pytest | =failed= and =errors=                | =xfailed=       | =skipped= and =deselected= |
+| Meson  | =Fail=, =Unexpected Pass=, =Timeout= | =Expected Fail= | =Skipped=                  |
+
+Cargo sums every libtest summary in the output. Pytest and Meson use the last summary. Pytest's =xpassed= counts as passed.
 
 Artefacts record pixi, Rust, Cargo, Python, the EESSI stack and compiler, loaded modules, and test summaries when they apply. =EESSI not available= means the EESSI leg did not run; it is never reported as success.
