@@ -2760,6 +2760,13 @@ NB_MODULE(_core, m) {
       nb::arg("gate"), "Claim and wait, with the GIL released, until gate.release().");
   testing.def("set_last_error", [](const std::string &text) { rgsaddle_py_set_last_error(text.c_str()); },
               nb::arg("text"), "Replace the thread-local last-error text.");
+  testing.def(
+      "mapped_status",
+      [](int code) {
+        return rgbind::status_traits<rgsaddle_status_t>::code(static_cast<rgsaddle_status_t>(code));
+      },
+      nb::arg("code"),
+      "Integer produced by status_traits for an rgsaddle_status_t value.");
   testing.def("schedule_canonical", &schedule_canonical, nb::arg("ids").noconvert(), nb::arg("owners").noconvert(),
               nb::arg("reentrant").noconvert(), nb::arg("threads"),
               "Canonical owner schedule. The worker count is not part of the text.");
