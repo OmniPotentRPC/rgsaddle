@@ -1290,7 +1290,6 @@ fn stress_check_stops_a_box_keyed_on_its_extents() {
 
 #[test]
 fn dumbbell_searches_start_at_the_sheared_minimum() {
-    let copper = Copper::new();
     let n = 3;
     let (perfect, cube) = fcc(n, 3.615);
     let along_100 = dumbbell(&perfect, [1.0, 0.0, 0.0], 2.05);
@@ -1312,8 +1311,11 @@ fn dumbbell_searches_start_at_the_sheared_minimum() {
     let mut lines = vec![
         "shear,method,calls,steps,barrier_eV,enthalpy_barrier_eV,curvature,max_force,stress_xx,stress_yy,stress_zz,stress_yz,stress_xz,stress_xy,dipole_xy_eV,angle_100_deg,angle_110_deg,switch,final_shear,volume_A3,negative_modes,reactant_negative,reactant_lowest,calls_at_loose,index_evaluations,result".to_string(),
     ];
-    for gamma in [0.0, 0.02, 0.03, 0.04, 0.05] {
-        let (sheared, cell) = apply_shear(&along_100, cube, gamma);
+    let results: Vec<_> = [0.0, 0.02, 0.03, 0.04, 0.05]
+        .into_par_iter()
+        .map(|gamma| {
+            let copper = Copper::new();
+            let (sheared, cell) = apply_shear(&along_100, cube, gamma);
         let (sheared_110, _) = apply_shear(&along_110, cube, gamma);
         let mut other = sheared_110;
         let other_steps = relax_direct(&copper, &mut other, cell, 1e-3);
@@ -1450,14 +1452,23 @@ fn dumbbell_searches_start_at_the_sheared_minimum() {
                 assert_opposite_110_saddle(variable);
             }
         }
-        lines.push(csv_row(gamma, "fixed", &fixed_reactant, Some(&fixed)));
-        lines.push(csv_row(
-            gamma,
-            "variable",
-            &variable_reactant,
-            variable.as_ref(),
-        ));
-        barriers.push(fixed.barrier);
+            (
+                fixed.barrier,
+                [
+                    csv_row(gamma, "fixed", &fixed_reactant, Some(&fixed)),
+                    csv_row(
+                        gamma,
+                        "variable",
+                        &variable_reactant,
+                        variable.as_ref(),
+                    ),
+                ],
+            )
+        })
+        .collect();
+    for (barrier, rows) in results {
+        barriers.push(barrier);
+        lines.extend(rows);
     }
     for pair in barriers.windows(2) {
         assert!(pair[1] < pair[0], "fixed barriers {barriers:?}");

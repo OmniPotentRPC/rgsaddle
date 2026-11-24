@@ -8,6 +8,7 @@
 //! image off the mirror to the first-order saddle. An all-false mask is
 //! the band without a mask.
 
+use rayon::prelude::*;
 use rgsaddle::{
     BandConfig, BandRtr, BandSession, BandStatus, BandSurface, ExpBandPrecon, MinModeConfig,
     MinModeKind, MinModeSession, MinModeStatus, PointSurface, RtrConfig, SaddleError, SaddleEscape,
@@ -146,32 +147,47 @@ fn index_of(run: &Converged) -> usize {
     run.index.as_ref().expect("certified").index
 }
 
-#[test]
-fn frozen_atoms_are_bitwise_unchanged_by_every_stepper() {
+fn assert_frozen_atoms_bitwise_unchanged(name: &str, method: rgmin::Method, rtr: bool) {
     let band = slab_band(N_IMAGES);
-    let methods = [
-        ("FIRE", rgmin::Method::fire(rgmin::FireKind::V2), false),
-        ("L-BFGS", rgmin::Method::lbfgs_with_memory(20), false),
-        ("quick-min", rgmin::Method::QuickMin, false),
-        ("ODE12r", rgmin::Method::Ode12r, false),
-        ("RTR", rgmin::Method::fire(rgmin::FireKind::V2), true),
-    ];
-    for (name, method, rtr) in methods {
-        let run = converge(config().with_method(method), rtr, &band);
-        eprintln!(
-            "{name}: energy {:.9}, free |g| {:.2e}, {} rows ({} for the index), index {}",
-            run.energy,
-            run.residual,
-            run.rows,
-            run.check_rows,
-            index_of(&run)
-        );
-        assert!(
-            run.residual <= 1e-3,
-            "{name} climbing image is not stationary"
-        );
-        assert_eq!(index_of(&run), 3, "{name} stops on the mirror point");
-    }
+    let run = converge(config().with_method(method), rtr, &band);
+    eprintln!(
+        "{name}: energy {:.9}, free |g| {:.2e}, {} rows ({} for the index), index {}",
+        run.energy,
+        run.residual,
+        run.rows,
+        run.check_rows,
+        index_of(&run)
+    );
+    assert!(
+        run.residual <= 1e-3,
+        "{name} climbing image is not stationary"
+    );
+    assert_eq!(index_of(&run), 3, "{name} stops on the mirror point");
+}
+
+#[test]
+fn frozen_atoms_are_bitwise_unchanged_by_fire() {
+    assert_frozen_atoms_bitwise_unchanged("FIRE", rgmin::Method::fire(rgmin::FireKind::V2), false);
+}
+
+#[test]
+fn frozen_atoms_are_bitwise_unchanged_by_lbfgs() {
+    assert_frozen_atoms_bitwise_unchanged("L-BFGS", rgmin::Method::lbfgs_with_memory(20), false);
+}
+
+#[test]
+fn frozen_atoms_are_bitwise_unchanged_by_quick_min() {
+    assert_frozen_atoms_bitwise_unchanged("quick-min", rgmin::Method::QuickMin, false);
+}
+
+#[test]
+fn frozen_atoms_are_bitwise_unchanged_by_ode12r() {
+    assert_frozen_atoms_bitwise_unchanged("ODE12r", rgmin::Method::Ode12r, false);
+}
+
+#[test]
+fn frozen_atoms_are_bitwise_unchanged_by_rtr() {
+    assert_frozen_atoms_bitwise_unchanged("RTR", rgmin::Method::fire(rgmin::FireKind::V2), true);
 }
 
 #[test]
@@ -220,24 +236,36 @@ fn exp_precon_with_a_frozen_layer_reaches_the_same_mirror_point() {
     let band = slab_band(N_IMAGES);
     let tol = 1e-4;
     let plain = config().with_force_tol(tol);
-    let fire = converge(plain.clone(), false, &band);
-    let climb_only = converge(plain.clone().with_min_mode(None), false, &band);
-    let lbfgs = converge(
-        plain
-            .clone()
-            .with_method(rgmin::Method::lbfgs_with_memory(20)),
-        false,
-        &band,
-    );
-    let ode = converge(
-        plain
-            .clone()
-            .with_method(rgmin::Method::Ode12r)
-            .with_exp_precon(Some(exp())),
-        false,
-        &band,
-    );
-    let fire_exp = converge(plain.with_exp_precon(Some(exp())), false, &band);
+    let specs = [
+        ("FIRE", plain.clone()),
+        (
+            "FIRE without the refinement",
+            plain.clone().with_min_mode(None),
+        ),
+        (
+            "L-BFGS",
+            plain
+                .clone()
+                .with_method(rgmin::Method::lbfgs_with_memory(20)),
+        ),
+        (
+            "ODE12r-Exp",
+            plain
+                .clone()
+                .with_method(rgmin::Method::Ode12r)
+                .with_exp_precon(Some(exp())),
+        ),
+        ("FIRE-Exp", plain.with_exp_precon(Some(exp()))),
+    ];
+    let runs: Vec<(&str, Converged)> = specs
+        .into_par_iter()
+        .map(|(name, cfg)| (name, converge(cfg, false, &band)))
+        .collect();
+    let fire = &runs[0].1;
+    let climb_only = &runs[1].1;
+    let lbfgs = &runs[2].1;
+    let ode = &runs[3].1;
+    let fire_exp = &runs[4].1;
     eprintln!(
         "mirror-point energies: FIRE {:.10}, FIRE without the refinement {:.10}, \
          L-BFGS {:.10}, ODE12r-Exp {:.10}, FIRE-Exp {:.10}",
@@ -254,11 +282,11 @@ fn exp_precon_with_a_frozen_layer_reaches_the_same_mirror_point() {
     // tol^2 / |lambda| of that energy; the softest mode here is well
     // above 1e-2.
     for (name, run) in [
-        ("FIRE", &fire),
-        ("FIRE without the refinement", &climb_only),
-        ("ODE12r-Exp", &ode),
-        ("FIRE-Exp", &fire_exp),
-        ("L-BFGS", &lbfgs),
+        ("FIRE", fire),
+        ("FIRE without the refinement", climb_only),
+        ("ODE12r-Exp", ode),
+        ("FIRE-Exp", fire_exp),
+        ("L-BFGS", lbfgs),
     ] {
         assert!(
             (run.energy - fire.energy).abs() < 1e-6,
@@ -270,38 +298,42 @@ fn exp_precon_with_a_frozen_layer_reaches_the_same_mirror_point() {
     }
 }
 
-#[test]
-fn the_escape_leaves_the_mirror_for_the_first_order_saddle() {
+fn assert_escape_leaves_the_mirror(name: &str, config: BandConfig) {
     let band = slab_band(N_IMAGES);
     let tol = 1e-4;
-    for (name, config) in [
-        ("FIRE", config().with_force_tol(tol)),
-        (
-            "ODE12r-Exp",
-            config()
-                .with_force_tol(tol)
-                .with_method(rgmin::Method::Ode12r)
-                .with_exp_precon(Some(exp())),
-        ),
-    ] {
-        let run = converge(config.with_saddle_check(escape()), false, &band);
-        let index = run.index.as_ref().expect("certified");
-        let mirror = mirror_error(run.image.view());
-        eprintln!(
-            "{name} escape: energy {:.10}, free |g| {:.2e}, {} rows ({} for the index and \
-             the push); mirror error {mirror:.3}; curvatures {:?}",
-            run.energy, run.residual, run.rows, run.check_rows, index.curvatures
-        );
-        assert_eq!(index.index, 1, "{name}: {index:?}");
-        assert_eq!(run.escapes, 1, "{name}");
-        assert!(run.residual <= tol, "{name}");
-        assert!((run.energy - SADDLE).abs() < 1e-6, "{name}: {}", run.energy);
-        assert!(
-            (index.curvatures[0] + 0.913).abs() < 1e-2,
-            "{name}: {index:?}"
-        );
-        assert!(mirror > 0.5, "{name} stayed near the mirror: {mirror}");
-    }
+    let run = converge(config.with_saddle_check(escape()), false, &band);
+    let index = run.index.as_ref().expect("certified");
+    let mirror = mirror_error(run.image.view());
+    eprintln!(
+        "{name} escape: energy {:.10}, free |g| {:.2e}, {} rows ({} for the index and \
+         the push); mirror error {mirror:.3}; curvatures {:?}",
+        run.energy, run.residual, run.rows, run.check_rows, index.curvatures
+    );
+    assert_eq!(index.index, 1, "{name}: {index:?}");
+    assert_eq!(run.escapes, 1, "{name}");
+    assert!(run.residual <= tol, "{name}");
+    assert!((run.energy - SADDLE).abs() < 1e-6, "{name}: {}", run.energy);
+    assert!(
+        (index.curvatures[0] + 0.913).abs() < 1e-2,
+        "{name}: {index:?}"
+    );
+    assert!(mirror > 0.5, "{name} stayed near the mirror: {mirror}");
+}
+
+#[test]
+fn fire_escape_leaves_the_mirror_for_the_first_order_saddle() {
+    assert_escape_leaves_the_mirror("FIRE", config().with_force_tol(1e-4));
+}
+
+#[test]
+fn preconditioned_escape_leaves_the_mirror_for_the_first_order_saddle() {
+    assert_escape_leaves_the_mirror(
+        "ODE12r-Exp",
+        config()
+            .with_force_tol(1e-4)
+            .with_method(rgmin::Method::Ode12r)
+            .with_exp_precon(Some(exp())),
+    );
 }
 
 /// The slab as a point surface for a min-mode search: the frozen layer's

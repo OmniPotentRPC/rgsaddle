@@ -1,4 +1,5 @@
 use ndarray::Array1;
+use rayon::prelude::*;
 use rgsaddle::{Cell, NptBarostat, NptConfig, NptReport, SaddleError, npt_lattice};
 
 fn one_atom(a: f64) -> (Array1<f64>, Cell) {
@@ -767,31 +768,54 @@ fn lennard_jones_volume_fluctuations_do_not_depend_on_the_coupling_time() {
     let steps = 8_000;
     let equilibration = 2_000;
     let seeds = [11_u64, 29, 47, 71];
-    let mut short = Vec::new();
-    let mut long = Vec::new();
-    let mut short_volume = Vec::new();
-    let mut long_volume = Vec::new();
-    for seed in seeds {
-        let (mean_v, variance) = lennard_jones_volume(
-            NptBarostat::StochasticCellRescaling,
-            0.2 * tau_lj,
-            target,
-            seed,
-            steps,
-            equilibration,
-        );
-        short.push(variance);
-        short_volume.push(mean_v);
-        let (mean_v, variance) = lennard_jones_volume(
-            NptBarostat::StochasticCellRescaling,
-            1.0 * tau_lj,
-            target,
-            seed,
-            steps,
-            equilibration,
-        );
-        long.push(variance);
-        long_volume.push(mean_v);
+    let raised = 1.3 * target;
+    let taus = [0.2 * tau_lj, 1.0 * tau_lj, 0.5 * tau_lj, 0.5 * tau_lj];
+    let pressures = [target, target, target, raised];
+    let jobs: Vec<(usize, usize, u64)> = (0..4)
+        .flat_map(|arm| (0..seeds.len()).map(move |idx| (arm, idx, seeds[idx])))
+        .collect();
+    let results: Vec<((usize, usize), (f64, f64))> = jobs
+        .into_par_iter()
+        .map(|(arm, idx, seed)| {
+            (
+                (arm, idx),
+                lennard_jones_volume(
+                    NptBarostat::StochasticCellRescaling,
+                    taus[arm],
+                    pressures[arm],
+                    seed,
+                    steps,
+                    equilibration,
+                ),
+            )
+        })
+        .collect();
+    let mut short = vec![0.0; seeds.len()];
+    let mut long = vec![0.0; seeds.len()];
+    let mut short_volume = vec![0.0; seeds.len()];
+    let mut long_volume = vec![0.0; seeds.len()];
+    let mut low_v = vec![0.0; seeds.len()];
+    let mut high_v = vec![0.0; seeds.len()];
+    let mut fluct = vec![0.0; seeds.len()];
+    for ((arm, idx), (mean_v, variance)) in results {
+        match arm {
+            0 => {
+                short[idx] = variance;
+                short_volume[idx] = mean_v;
+            }
+            1 => {
+                long[idx] = variance;
+                long_volume[idx] = mean_v;
+            }
+            2 => {
+                low_v[idx] = mean_v;
+                fluct[idx] = variance / (thermal * mean_v);
+            }
+            3 => {
+                high_v[idx] = mean_v;
+            }
+            _ => unreachable!(),
+        }
     }
     let (short_mean, short_error) = mean_and_error(&short);
     let (long_mean, long_error) = mean_and_error(&long);
@@ -810,31 +834,6 @@ fn lennard_jones_volume_fluctuations_do_not_depend_on_the_coupling_time() {
 
     // Compressibility from the equation of state, against the fluctuation formula
     // κ = <(ΔV)^2> / (kT <V>). One coupling time, two target pressures.
-    let raised = 1.3 * target;
-    let mut low_v = Vec::new();
-    let mut high_v = Vec::new();
-    let mut fluct = Vec::new();
-    for seed in seeds {
-        let (mean_v, variance) = lennard_jones_volume(
-            NptBarostat::StochasticCellRescaling,
-            0.5 * tau_lj,
-            target,
-            seed,
-            steps,
-            equilibration,
-        );
-        low_v.push(mean_v);
-        fluct.push(variance / (thermal * mean_v));
-        let (mean_v, _) = lennard_jones_volume(
-            NptBarostat::StochasticCellRescaling,
-            0.5 * tau_lj,
-            raised,
-            seed,
-            steps,
-            equilibration,
-        );
-        high_v.push(mean_v);
-    }
     let (v_low, v_low_error) = mean_and_error(&low_v);
     let (v_high, v_high_error) = mean_and_error(&high_v);
     let (kappa_fluct, kappa_fluct_error) = mean_and_error(&fluct);

@@ -769,42 +769,67 @@ fn drive<S: PointSurface>(mut sess: SellaSaddleSession, surface: &S) -> Outcome 
     }
 }
 
-#[test]
-fn auto_internals_find_the_same_saddle_as_a_hand_chart_on_five_molecules() {
-    for mol in molecules() {
-        let hand = search(&mol, false);
-        let auto = search(&mol, true);
-        assert!(hand.converged, "{}: hand chart did not converge", mol.name);
+fn assert_auto_matches_hand(mol: Mol) {
+    let (hand, auto) = rayon::join(|| search(&mol, false), || search(&mol, true));
+    assert!(hand.converged, "{}: hand chart did not converge", mol.name);
+    assert!(
+        auto.converged,
+        "{}: automatic chart did not converge",
+        mol.name
+    );
+    assert!(
+        (hand.energy - auto.energy).abs() < 1.0e-6,
+        "{}: energies {} vs {}",
+        mol.name,
+        hand.energy,
+        auto.energy
+    );
+    let d = rmsd(&hand.x, &auto.x);
+    assert!(d < 1.0e-3, "{}: rmsd {d}", mol.name);
+    if let Some(e) = mol.ts_energy {
         assert!(
-            auto.converged,
-            "{}: automatic chart did not converge",
-            mol.name
-        );
-        assert!(
-            (hand.energy - auto.energy).abs() < 1.0e-6,
-            "{}: energies {} vs {}",
+            (auto.energy - e).abs() < 1.0e-6,
+            "{}: {}",
             mol.name,
-            hand.energy,
             auto.energy
         );
-        let d = rmsd(&hand.x, &auto.x);
-        assert!(d < 1.0e-3, "{}: rmsd {d}", mol.name);
-        if let Some(e) = mol.ts_energy {
-            assert!(
-                (auto.energy - e).abs() < 1.0e-6,
-                "{}: {}",
-                mol.name,
-                auto.energy
-            );
-        }
-        let ev = fd_spectrum(&mol.surface, &auto.x);
-        let neg = ev.iter().filter(|l| **l < -1.0e-3).count();
-        assert_eq!(neg, 1, "{}: {} negative modes", mol.name, neg);
-        eprintln!(
-            "{}: ok, {} rebuilds, E={:.6}, rmsd={d:.2e}",
-            mol.name, auto.restarts, auto.energy
-        );
     }
+    let ev = fd_spectrum(&mol.surface, &auto.x);
+    let neg = ev.iter().filter(|l| **l < -1.0e-3).count();
+    assert_eq!(neg, 1, "{}: {} negative modes", mol.name, neg);
+    eprintln!(
+        "{}: ok, {} rebuilds, E={:.6}, rmsd={d:.2e}",
+        mol.name, auto.restarts, auto.energy
+    );
+}
+
+fn molecule(index: usize) -> Mol {
+    molecules().into_iter().nth(index).unwrap()
+}
+
+#[test]
+fn ethane_auto_internals_match_the_hand_chart() {
+    assert_auto_matches_hand(molecule(0));
+}
+
+#[test]
+fn peroxide_auto_internals_match_the_hand_chart() {
+    assert_auto_matches_hand(molecule(1));
+}
+
+#[test]
+fn methanol_auto_internals_match_the_hand_chart() {
+    assert_auto_matches_hand(molecule(2));
+}
+
+#[test]
+fn methanethiol_auto_internals_match_the_hand_chart() {
+    assert_auto_matches_hand(molecule(3));
+}
+
+#[test]
+fn ammonia_auto_internals_match_the_hand_chart() {
+    assert_auto_matches_hand(molecule(4));
 }
 
 fn nh3(height: f64) -> Array1<f64> {
@@ -857,9 +882,6 @@ fn a_periodic_search_across_the_cell_boundary_finds_the_free_saddle() {
         Some((lattice, &images)),
     );
 
-    let free = search(&mol, true);
-    assert!(free.converged);
-
     let naive = InternalTopology::from_geometry(&mol.z, wrapped.view(), None)
         .unwrap()
         .constraints()
@@ -884,7 +906,8 @@ fn a_periodic_search_across_the_cell_boundary_finds_the_free_saddle() {
     )
     .unwrap();
     assert!(sess.internal_pes().unwrap().chart().is_periodic());
-    let periodic = drive(sess, &surface);
+    let (free, periodic) = rayon::join(|| search(&mol, true), || drive(sess, &surface));
+    assert!(free.converged);
     assert!(periodic.converged, "periodic search did not converge");
     assert!((periodic.energy - free.energy).abs() < 1.0e-6);
 

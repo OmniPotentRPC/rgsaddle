@@ -8,14 +8,11 @@
 /// `cargo build --lib` with the active feature set refreshes
 /// `librgsaddle.so` before the C compiler links against it.
 ///
-/// The nested build writes into its own `cdylib` subdirectory of the target
-/// directory, keyed by the active feature set. Cargo before 1.100 names the
-/// `rlib` of a `lib`, `cdylib` and `staticlib` crate without a hash, so a
-/// nested build in the outer target directory replaces the `librgsaddle.rlib`
-/// that rustdoc links later in the same `cargo test`. That `rlib` can be
-/// linked against another build of `rgmin` than the one the doctests name,
-/// and the doctests then fail to compile because the two copies of `rgmin`
-/// are different types.
+/// The build reuses the outer target directory and asks rustc for only the
+/// `cdylib`. Cargo before 1.100 names the `rlib` of a mixed crate without a
+/// hash, so a plain nested `cargo build` can replace the `rlib` that rustdoc
+/// links later in the same `cargo test`. Restricting the nested rustc output
+/// to the shared library avoids that replacement while sharing dependencies.
 fn cdylib_dir() -> std::path::PathBuf {
     static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(build_fresh_cdylib).clone()
@@ -116,8 +113,7 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
     };
 
     let features = active_features();
-    let nested_target_dir = target_dir.join("cdylib").join(features.join("_"));
-    let mut nested_profile_dir = nested_target_dir.clone();
+    let mut nested_profile_dir = target_dir.clone();
     if let Some(triple) = &target_triple {
         nested_profile_dir.push(triple);
     }
@@ -130,14 +126,14 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
         None => std::ffi::OsString::from(env!("CARGO")),
     };
     let mut cmd = std::process::Command::new(cargo);
-    cmd.arg("build")
+    cmd.arg("rustc")
         .arg("--manifest-path")
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .arg("--lib")
         .arg("--locked")
         .arg("--no-default-features")
         .arg("--target-dir")
-        .arg(&nested_target_dir);
+        .arg(&target_dir);
     if !features.is_empty() {
         cmd.arg("--features").arg(features.join(","));
     }
@@ -153,7 +149,8 @@ fn build_fresh_cdylib() -> std::path::PathBuf {
             cmd.arg("--profile").arg(other);
         }
     }
-    let output = cmd.output().expect("invoke cargo build --lib for cdylib");
+    cmd.arg("--").arg("--crate-type=cdylib");
+    let output = cmd.output().expect("invoke cargo rustc --lib for cdylib");
     assert!(
         output.status.success(),
         "cargo build --lib failed to refresh librgsaddle.so:\n{}",

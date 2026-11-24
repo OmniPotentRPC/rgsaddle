@@ -6,6 +6,7 @@ use std::f64::consts::TAU;
 use std::sync::Arc;
 
 use ndarray::{Array1, Array2, ArrayView1, array};
+use rayon::prelude::*;
 use rgsaddle::{
     ADAPTIVE_OHTST_MAX_SAMPLES, ADAPTIVE_OHTST_PILOT_SAMPLES, ADAPTIVE_OHTST_TARGET_LOG_ERROR,
     AdaptiveOhTstConfig, AdaptiveOhTstStatus, AffineSymmetry, AnalyticSurfaceSampler,
@@ -567,19 +568,25 @@ fn ar1_profile_error_is_autocorrelation_aware() {
     };
     let mut estimates = Vec::new();
     let mut failures = 0;
-    for seed in 1..=48 {
-        let mut sampler = CorrelatedSampler {
-            sigma: 0.25,
-            thermal,
-            phi: 0.9,
-            drift: 0.0,
-        };
-        let adaptive = config(thermal).with_sampler(
-            LangevinConfig::default()
-                .with_thermal(thermal)
-                .with_seed(seed * 7_919),
-        );
-        match adaptive_ohtst_string_rate(&mut sampler, &initial, &density, &adaptive) {
+    let outcomes: Vec<_> = (1_u64..=48)
+        .into_par_iter()
+        .map(|seed| {
+            let mut sampler = CorrelatedSampler {
+                sigma: 0.25,
+                thermal,
+                phi: 0.9,
+                drift: 0.0,
+            };
+            let adaptive = config(thermal).with_sampler(
+                LangevinConfig::default()
+                    .with_thermal(thermal)
+                    .with_seed(seed * 7_919),
+            );
+            adaptive_ohtst_string_rate(&mut sampler, &initial, &density, &adaptive)
+        })
+        .collect();
+    for outcome in outcomes {
+        match outcome {
             Ok(estimate) => {
                 estimates.push((estimate.profile.barrier, estimate.profile.barrier_error))
             }
@@ -629,47 +636,57 @@ fn noisy_run(seed: u64, sigma: f64) -> Result<(f64, f64, usize), SaddleError> {
     ))
 }
 
-#[test]
-fn noisy_strings_survive_and_profile_errors_cover() {
-    for sigma in [0.25, 0.5] {
-        let mut estimates = Vec::new();
-        let mut failures = std::collections::BTreeMap::new();
-        for seed in 1..=256 {
-            match noisy_run(1_000 * seed + 17, sigma) {
-                Ok(estimate) => estimates.push(estimate),
-                Err(error) => {
-                    *failures.entry(error.to_string()).or_insert(0_usize) += 1;
-                }
+fn assert_noisy_strings_survive_and_cover(sigma: f64) {
+    let mut estimates = Vec::new();
+    let mut failures = std::collections::BTreeMap::new();
+    let outcomes: Vec<_> = (1_u64..=256)
+        .into_par_iter()
+        .map(|seed| noisy_run(1_000 * seed + 17, sigma))
+        .collect();
+    for outcome in outcomes {
+        match outcome {
+            Ok(estimate) => estimates.push(estimate),
+            Err(error) => {
+                *failures.entry(error.to_string()).or_insert(0_usize) += 1;
             }
         }
-        assert!(
-            estimates.len() >= 248,
-            "sigma {sigma}: only {} of 256 estimates returned: {failures:?}",
-            estimates.len(),
-        );
-        let mean =
-            estimates.iter().map(|estimate| estimate.0).sum::<f64>() / estimates.len() as f64;
-        let empirical = (estimates
-            .iter()
-            .map(|estimate| (estimate.0 - mean).powi(2))
-            .sum::<f64>()
-            / (estimates.len() - 1) as f64)
-            .sqrt();
-        let reported =
-            estimates.iter().map(|estimate| estimate.1).sum::<f64>() / estimates.len() as f64;
-        let mean_count = estimates.iter().map(|estimate| estimate.2).sum::<usize>() as f64
-            / estimates.len() as f64;
-        let coverage = estimates
-            .iter()
-            .filter(|estimate| (estimate.0 - 1.0).abs() <= 2.0 * estimate.1)
-            .count() as f64
-            / estimates.len() as f64;
-        assert!(
-            reported >= 0.9 * empirical,
-            "sigma {sigma}: mean {mean}, count {mean_count}, reported {reported}, empirical {empirical}"
-        );
-        assert!(coverage >= 0.9, "sigma {sigma}: two-SE coverage {coverage}");
     }
+    assert!(
+        estimates.len() >= 248,
+        "sigma {sigma}: only {} of 256 estimates returned: {failures:?}",
+        estimates.len(),
+    );
+    let mean = estimates.iter().map(|estimate| estimate.0).sum::<f64>() / estimates.len() as f64;
+    let empirical = (estimates
+        .iter()
+        .map(|estimate| (estimate.0 - mean).powi(2))
+        .sum::<f64>()
+        / (estimates.len() - 1) as f64)
+        .sqrt();
+    let reported =
+        estimates.iter().map(|estimate| estimate.1).sum::<f64>() / estimates.len() as f64;
+    let mean_count =
+        estimates.iter().map(|estimate| estimate.2).sum::<usize>() as f64 / estimates.len() as f64;
+    let coverage = estimates
+        .iter()
+        .filter(|estimate| (estimate.0 - 1.0).abs() <= 2.0 * estimate.1)
+        .count() as f64
+        / estimates.len() as f64;
+    assert!(
+        reported >= 0.9 * empirical,
+        "sigma {sigma}: mean {mean}, count {mean_count}, reported {reported}, empirical {empirical}"
+    );
+    assert!(coverage >= 0.9, "sigma {sigma}: two-SE coverage {coverage}");
+}
+
+#[test]
+fn moderately_noisy_strings_survive_and_profile_errors_cover() {
+    assert_noisy_strings_survive_and_cover(0.25);
+}
+
+#[test]
+fn strongly_noisy_strings_survive_and_profile_errors_cover() {
+    assert_noisy_strings_survive_and_cover(0.5);
 }
 
 struct SymmetricDoubleWell;
@@ -2110,15 +2127,19 @@ fn fourteen_record_production_floor_is_the_caller_block_count() {
     let mut ise = 0usize;
     let mut ne = 0usize;
     let mut other = 0usize;
-    for seed in 1..=200 {
-        match fixed_count_iid_run(seed) {
+    let outcomes: Vec<_> = (1_u64..=200)
+        .into_par_iter()
+        .map(fixed_count_iid_run)
+        .collect();
+    for outcome in outcomes {
+        match outcome {
             Ok(_) => {}
             Err(SaddleError::InsufficientEffectiveSamples {
                 n_eff, required, ..
             }) => {
                 assert!(
                     n_eff < required && required == 7.0,
-                    "seed {seed}: n_eff {n_eff}, required {required}"
+                    "n_eff {n_eff}, required {required}"
                 );
                 ise += 1;
             }
@@ -2143,41 +2164,58 @@ fn fourteen_record_production_floor_is_the_caller_block_count() {
 /// a covered draw and is not dropped from the log: `required` must be the
 /// caller's seven blocks. A literal floor of 4 reports `required = 4` and
 /// fails that check. Split-half rejections stay in the `ne` count.
-#[test]
-fn fixed_count_sampled_error_has_two_sided_coverage() {
+fn assert_fixed_count_coverage(first: u64) {
     assert_fourteen_record_floor_is_seven();
     assert_fifteen_records_keep_seven_blocks();
-    for (first, last) in [(1, 200), (1_001, 1_200), (10_001, 10_200)] {
-        let mut returned = 0usize;
-        let mut covered = 0usize;
-        let mut ne = 0usize;
-        let mut other = 0usize;
-        for seed in first..=last {
-            match fixed_count_iid_run(seed) {
-                Ok((barrier, error, records)) => {
-                    assert_eq!(records, ADAPTIVE_OHTST_PILOT_SAMPLES);
-                    returned += 1;
-                    if (barrier - 1.0).abs() <= 2.0 * error {
-                        covered += 1;
-                    }
+    let last = first + 199;
+    let mut returned = 0usize;
+    let mut covered = 0usize;
+    let mut ne = 0usize;
+    let mut other = 0usize;
+    let outcomes: Vec<_> = (first..=last)
+        .into_par_iter()
+        .map(|seed| (seed, fixed_count_iid_run(seed)))
+        .collect();
+    for (seed, outcome) in outcomes {
+        match outcome {
+            Ok((barrier, error, records)) => {
+                assert_eq!(records, ADAPTIVE_OHTST_PILOT_SAMPLES);
+                returned += 1;
+                if (barrier - 1.0).abs() <= 2.0 * error {
+                    covered += 1;
                 }
-                Err(SaddleError::InsufficientEffectiveSamples {
-                    n_eff, required, ..
-                }) => {
-                    assert!(
-                        n_eff < required && required == 7.0,
-                        "seed {seed}: n_eff {n_eff}, required {required}"
-                    );
-                }
-                Err(SaddleError::NotEquilibrated { .. }) => ne += 1,
-                Err(_) => other += 1,
             }
+            Err(SaddleError::InsufficientEffectiveSamples {
+                n_eff, required, ..
+            }) => {
+                assert!(
+                    n_eff < required && required == 7.0,
+                    "seed {seed}: n_eff {n_eff}, required {required}"
+                );
+            }
+            Err(SaddleError::NotEquilibrated { .. }) => ne += 1,
+            Err(_) => other += 1,
         }
-        assert!(returned > 0, "seeds {first}..={last} returned nothing");
-        let coverage = covered as f64 / returned as f64;
-        assert!(
-            (0.90..=0.99).contains(&coverage),
-            "seeds {first}..={last}: {covered} of {returned} returned covered ({coverage}), split-half {ne}, other {other}"
-        );
     }
+    assert!(returned > 0, "seeds {first}..={last} returned nothing");
+    let coverage = covered as f64 / returned as f64;
+    assert!(
+        (0.90..=0.99).contains(&coverage),
+        "seeds {first}..={last}: {covered} of {returned} returned covered ({coverage}), split-half {ne}, other {other}"
+    );
+}
+
+#[test]
+fn fixed_count_sampled_error_has_two_sided_coverage_first_block() {
+    assert_fixed_count_coverage(1);
+}
+
+#[test]
+fn fixed_count_sampled_error_has_two_sided_coverage_second_block() {
+    assert_fixed_count_coverage(1_001);
+}
+
+#[test]
+fn fixed_count_sampled_error_has_two_sided_coverage_third_block() {
+    assert_fixed_count_coverage(10_001);
 }
