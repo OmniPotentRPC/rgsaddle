@@ -1412,7 +1412,8 @@ PyMinMode make_minmode(Vector x, Vector mode, const std::string &kind, double dr
 }
 
 void minmode_set_position(PyMinMode &self, Vector x, nb::handle gradient) {
-  if (self.handle == nullptr || x.shape(0) != self.n_atoms * 3) {
+  if (self.handle == nullptr ||
+      static_cast<std::int64_t>(x.shape(0)) != self.n_atoms * 3) {
     throw nb::value_error("position length must stay 3N");
   }
   const double *grad = nullptr;
