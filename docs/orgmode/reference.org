@@ -1,6 +1,9 @@
 #+title: Reference
 #+options: toc:nil num:nil
 
+* CI gate report
+=reference/ci-gate= defines the report header, status rows, checks, and artefacts.
+
 * Public Rust types
 The hosted [[https://docs.rs/rgsaddle][Rust API reference]] includes the default solver, C ABI, OH-TST, and readcon interfaces.
 =cargo doc --no-deps --features capi,ohtst,readcon-db --open= builds these pages from a checkout.

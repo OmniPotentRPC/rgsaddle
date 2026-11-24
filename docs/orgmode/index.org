@@ -98,6 +98,7 @@ while report.status != BandStatus::Converged {
    howto/migrate
    howto/stencil
    howto/formal
+   howto/ci-gate
    explanation/mep
    explanation/ohtst-pafi-exact
    explanation/one-stencil
@@ -110,6 +111,7 @@ while report.status != BandStatus::Converged {
    reference/c-symbols
    reference/pafi
    reference/ohtst
+   reference/ci-gate
    contributing/index
    changelog
 #+end_export

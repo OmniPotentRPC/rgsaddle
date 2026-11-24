@@ -1,6 +1,9 @@
 #+title: How-to
 #+options: toc:nil num:nil
 
+* Run the CI gate locally
+=howto/ci-gate= generates the committed workflow and plan, runs the pixi and EESSI legs, and writes the same report as GitHub Actions.
+
 * Step a band from C
 Enable =capi=. The header is =rgsaddle.h=. ABI major 1. Every wire struct opens with =rgsaddle_version_t=. The host:
 
