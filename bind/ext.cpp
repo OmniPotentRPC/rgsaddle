@@ -2027,14 +2027,23 @@ NB_MODULE(_core, m) {
                    "Surface evaluations in this call.")
       .def("converged", &rgsaddle::StencilReport::converged, "True when status is converged.");
 
+  rgsaddle_artn_config_t artn_defaults{};
+  if (rgsaddle_artn_config_default(&artn_defaults) != RGSADDLE_OK) {
+    throw std::runtime_error("could not read the ART nouveau defaults");
+  }
+
   nb::class_<PyStencil>(m, "Stencil")
       .def_static(
           "point", &make_point, nb::arg("x").noconvert(), nb::arg("preset") = "dimer",
           nb::arg("mode") = nb::none(), nb::arg("dr") = 1e-3, nb::arg("force_tol") = 1e-3,
           nb::arg("max_move") = 0.2, nb::arg("rotation_tol") = 1e-4, nb::arg("max_rotations") = 20,
-          nb::arg("krylov_dim") = 12, nb::arg("threads") = 1, nb::arg("art_threshold") = 0.0,
-          nb::arg("art_push") = 20,
+          nb::arg("krylov_dim") = 12, nb::arg("threads") = 1,
+          nb::arg("art_threshold") = artn_defaults.eigenvalue_threshold,
+          nb::arg("art_push") = artn_defaults.lanczos_start,
           "Point search. dimer and lanczos follow MinModeSession. "
+          "art pushes along the seed with perpendicular relaxation, starts "
+          "Lanczos at art_push (default 3), and activates below art_threshold "
+          "(default -0.01), matching ArtNConfig. "
           "The dimer keeps its Polak-Ribiere rotation history across "
           "translations. rotation_angle_tol is the Rust default of five "
           "degrees and is not a Python argument, so the dimer stops on that "

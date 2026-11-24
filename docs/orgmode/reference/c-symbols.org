@@ -149,7 +149,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_band_set_dynamic=. Purpose: Select dynamic NEB on the band, ABI minor 65. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_dyneb_mask=. Purpose: ASE 3.29 DyNEB mask, ABI minor 65. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_last_error=. Purpose: Diagnostic for the calling thread. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_stencil_config_new=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_stencil_config_new=. Purpose: Allocate a point-stencil configuration with the Stencil::point defaults; from ABI minor 66, RGSADDLE_STENCIL_KEY_ART_THRESHOLD is -0.01 and RGSADDLE_STENCIL_KEY_ART_PUSH is 3 (rgsaddle_artn_config_default). Parameters: the declaration. Units: the caller's.
 - =rgsaddle_stencil_config_set_f64=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_stencil_config_set_i64=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_stencil_config_set_array=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.

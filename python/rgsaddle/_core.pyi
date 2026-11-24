@@ -77,9 +77,9 @@ class StencilReport:
 
 class Stencil:
     @staticmethod
-    def point(x: Annotated[NDArray[numpy.float64], dict(shape=(None,), order='C', writable=False)], preset: str = 'dimer', mode: object | None = None, dr: float = 0.001, force_tol: float = 0.001, max_move: float = 0.2, rotation_tol: float = 0.0001, max_rotations: int = 20, krylov_dim: int = 12, threads: int = 1, art_threshold: float = 0.0, art_push: int = 20) -> Stencil:
+    def point(x: Annotated[NDArray[numpy.float64], dict(shape=(None,), order='C', writable=False)], preset: str = 'dimer', mode: object | None = None, dr: float = 0.001, force_tol: float = 0.001, max_move: float = 0.2, rotation_tol: float = 0.0001, max_rotations: int = 20, krylov_dim: int = 12, threads: int = 1, art_threshold: float = -0.01, art_push: int = 3) -> Stencil:
         """
-        Point search. dimer and lanczos follow MinModeSession. The dimer keeps its Polak-Ribiere rotation history across translations. rotation_angle_tol is the Rust default of five degrees and is not a Python argument, so the dimer stops on that angle or on rotation_tol without inferring the classic torque window. At rotation_tol 1e-4 and looser, lanczos also stops at two Krylov vectors once the Ritz residual is under 1. A curvature that is not negative steps by max_move along the mode. Band preset names raise ValueError.
+        Point search. dimer and lanczos follow MinModeSession. art pushes along the seed with perpendicular relaxation, starts Lanczos at art_push (default 3), and activates below art_threshold (default -0.01), matching ArtNConfig. The dimer keeps its Polak-Ribiere rotation history across translations. rotation_angle_tol is the Rust default of five degrees and is not a Python argument, so the dimer stops on that angle or on rotation_tol without inferring the classic torque window. At rotation_tol 1e-4 and looser, lanczos also stops at two Krylov vectors once the Ritz residual is under 1. A curvature that is not negative steps by max_move along the mode. Band preset names raise ValueError.
         """
 
     @staticmethod

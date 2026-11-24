@@ -11,7 +11,7 @@ use std::panic::AssertUnwindSafe;
 use ndarray::{Array1, ArrayView1};
 
 use crate::error::SaddleError;
-use crate::minmode::PointSurface;
+use crate::minmode::{ArtNConfig, PointSurface};
 use crate::stencil::{BAND_PRESET_SEAM, Preset, Stencil, StencilReport, StencilStatus};
 
 use super::{
@@ -33,9 +33,11 @@ pub const RGSADDLE_STENCIL_KEY_MAX_ROTATIONS: i32 = 5;
 pub const RGSADDLE_STENCIL_KEY_KRYLOV_DIM: i32 = 6;
 /// The RGSADDLE STENCIL KEY THREADS.
 pub const RGSADDLE_STENCIL_KEY_THREADS: i32 = 7;
-/// The RGSADDLE STENCIL KEY ART THRESHOLD.
+/// Key for the ART curvature threshold (`f64`), defaulting to
+/// [`ArtNConfig::default`]'s `eigenvalue_threshold` (`-0.01`).
 pub const RGSADDLE_STENCIL_KEY_ART_THRESHOLD: i32 = 8;
-/// The RGSADDLE STENCIL KEY ART PUSH.
+/// Key for the ART opening push count (`i64`), defaulting to
+/// [`ArtNConfig::default`]'s `lanczos_start` (`3`).
 pub const RGSADDLE_STENCIL_KEY_ART_PUSH: i32 = 9;
 /// The RGSADDLE STENCIL KEY MODE.
 pub const RGSADDLE_STENCIL_KEY_MODE: i32 = 10;
@@ -103,6 +105,7 @@ struct Config {
 
 impl Config {
     fn new(preset: i32) -> Self {
+        let artn = ArtNConfig::default();
         Self {
             preset,
             dr: 1e-3,
@@ -112,8 +115,8 @@ impl Config {
             max_rotations: 20,
             krylov_dim: 12,
             threads: 1,
-            art_threshold: 0.0,
-            art_push: 20,
+            art_threshold: artn.eigenvalue_threshold,
+            art_push: artn.lanczos_start,
             mode: Vec::new(),
         }
     }
@@ -264,6 +267,10 @@ pub extern "C" fn rgsaddle_last_error() -> *const c_char {
     LAST_ERROR.with(|slot| slot.borrow().as_ptr())
 }
 
+/// Allocate a point-stencil configuration initialized with the
+/// [`Stencil::point`] defaults, including [`ArtNConfig::default`]'s
+/// `eigenvalue_threshold` (`-0.01`) and `lanczos_start` (`3`).
+///
 /// # Safety
 /// The pointer is opaque. `preset` is a `Preset::to_abi` value.
 #[unsafe(no_mangle)]
@@ -757,6 +764,122 @@ mod tests {
         unsafe {
             rgsaddle_stencil_free(stencil);
             rgsaddle_stencil_config_free(config);
+        }
+    }
+
+    struct ShallowQuad {
+        cxx: f64,
+        cyy: f64,
+    }
+
+    impl PointSurface for ShallowQuad {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let energy = 0.5 * self.cxx * x[0] * x[0] + 0.5 * self.cyy * x[1] * x[1];
+            Ok((
+                energy,
+                Array1::from_vec(vec![self.cxx * x[0], self.cyy * x[1]]),
+            ))
+        }
+    }
+
+    unsafe extern "C" fn shallow_quad_cb(
+        user: *mut c_void,
+        rows: usize,
+        dof: usize,
+        _ids: *const u64,
+        x: *const f64,
+        e: *mut f64,
+        g: *mut f64,
+    ) -> i32 {
+        if rows != 1 || dof != 2 || user.is_null() || x.is_null() || e.is_null() || g.is_null() {
+            return -1;
+        }
+        let quad = unsafe { &*(user as *const ShallowQuad) };
+        let x0 = unsafe { *x };
+        let y = unsafe { *x.add(1) };
+        unsafe {
+            *e = 0.5 * quad.cxx * x0 * x0 + 0.5 * quad.cyy * y * y;
+            *g = quad.cxx * x0;
+            *g.add(1) = quad.cyy * y;
+        }
+        0
+    }
+
+    #[test]
+    fn art_preset_defaults_match_rust_stencil_point() {
+        let defaults = Config::new(Preset::Art.to_abi());
+        let artn = ArtNConfig::default();
+        assert_eq!(
+            defaults.art_threshold.to_bits(),
+            artn.eigenvalue_threshold.to_bits()
+        );
+        assert_eq!(defaults.art_push, artn.lanczos_start);
+
+        for cxx in [-0.005_f64, -4.0_f64] {
+            let mut surface = ShallowQuad { cxx, cyy: 10.0 };
+            let start = [0.4_f64, 0.3];
+            let seed = [1.0_f64, 0.0];
+            let mut rust = Stencil::point(Array1::from_vec(start.to_vec()))
+                .preset(Preset::Art)
+                .mode(Array1::from_vec(seed.to_vec()))
+                .build()
+                .unwrap();
+
+            let config = rgsaddle_stencil_config_new(Preset::Art.to_abi());
+            assert!(!config.is_null());
+            let status = unsafe {
+                rgsaddle_stencil_config_set_array(
+                    config,
+                    RGSADDLE_STENCIL_KEY_MODE,
+                    seed.as_ptr(),
+                    2,
+                )
+            };
+            assert_eq!(status, RGSADDLE_OK);
+            let stencil = unsafe { rgsaddle_stencil_new(config, 1, 2, start.as_ptr()) };
+            assert!(!stencil.is_null());
+
+            for step_index in 0..4 {
+                let expected = rust.step(&surface).unwrap();
+                let mut report = RgsaddleStencilReport {
+                    struct_size: 0,
+                    status: -1,
+                    reserved: 0,
+                    max_force: 0.0,
+                    curvature: 0.0,
+                    iteration: 0,
+                    evaluations: 0,
+                };
+                let user_ptr: *mut ShallowQuad = &mut surface;
+                let status = unsafe {
+                    rgsaddle_stencil_step(
+                        stencil,
+                        Some(shallow_quad_cb),
+                        user_ptr.cast(),
+                        &mut report,
+                    )
+                };
+                assert_eq!(status, RGSADDLE_OK);
+                if step_index < artn.lanczos_start {
+                    assert!(report.curvature.is_nan());
+                } else {
+                    assert!(report.curvature.is_finite());
+                }
+                assert_eq!(report.evaluations, expected.evaluations as u64);
+                assert_eq!(report.curvature.to_bits(), expected.curvature.to_bits());
+                assert_eq!(report.max_force.to_bits(), expected.max_force.to_bits());
+
+                let mut pos = [0.0_f64; 2];
+                let status = unsafe { rgsaddle_stencil_positions(stencil, pos.as_mut_ptr(), 2) };
+                assert_eq!(status, RGSADDLE_OK);
+                assert_eq!(pos[0].to_bits(), rust.position()[0].to_bits());
+                assert_eq!(pos[1].to_bits(), rust.position()[1].to_bits());
+            }
+
+            unsafe {
+                rgsaddle_stencil_free(stencil);
+                rgsaddle_stencil_config_free(config);
+            }
         }
     }
 }
