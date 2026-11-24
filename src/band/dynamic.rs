@@ -215,6 +215,12 @@ pub(crate) struct DynamicRun {
 impl DynamicRun {
     pub(crate) fn install(&mut self, spec: Option<DynamicNeb>) {
         self.spec = spec;
+        self.clear_answers();
+    }
+
+    /// Drop the step pin and every cached image answer. The spec stays,
+    /// so a reset keeps dynamic NEB on without replaying the old surface.
+    pub(crate) fn clear_answers(&mut self) {
         self.origin = None;
         self.step = None;
         self.images.clear();

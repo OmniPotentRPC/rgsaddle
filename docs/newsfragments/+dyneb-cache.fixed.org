@@ -1,0 +1,5 @@
+Clearing dynamic NEB drops the cached assembly and the solver's stored force, so an exponential metric band does not keep a masked driving force.
+~BandSession::reset~ drops the dynamic image answers, the step pin and the step origin when the surface changes.
+~DyNEB.set_positions~ reads the band force once, then moves every image that is still free.
+A non-finite ~fmax~ or ~scale_fmax~ on ~rgsaddle_band_set_dynamic~ and ~rgsaddle_dyneb_mask~ returns ~RGSADDLE_NON_FINITE~.
+The simplified string method and free-end adaptive NEB stay on the refused list of ~rgsaddle_band_set_dynamic~.

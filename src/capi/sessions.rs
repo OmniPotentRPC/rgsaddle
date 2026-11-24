@@ -3734,7 +3734,11 @@ pub unsafe extern "C" fn rgsaddle_growing_string_set_fixed_atoms(
     }
 }
 
-/// Dynamic NEB on the band (ABI minor 65). `enabled` 0 clears it.
+/// Dynamic NEB on the band (ABI minor 65). `enabled` 0 clears it and
+/// ignores `fmax` and `scale_fmax`. A non-finite threshold returns
+/// `RGSADDLE_NON_FINITE`. A solid-state band, the trust-region stepper,
+/// the simplified string method and free-end adaptive NEB are refused
+/// and left unchanged.
 ///
 /// # Safety
 /// `band` is a live session or null.
