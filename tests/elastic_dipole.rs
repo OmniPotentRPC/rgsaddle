@@ -19,23 +19,33 @@ fn cubic_constants() -> ElasticConstants {
 }
 
 #[test]
-fn barnett_quadrature_requires_multiples_of_four_from_sixteen() {
+fn barnett_quadrature_requires_multiples_of_eight_from_thirty_two() {
     let constants = cubic_constants();
-    for points in [8, 10, 12, 14, 18] {
+    for points in [8, 10, 12, 14, 16, 18, 20, 24, 28, 36] {
         let error = AnisotropicGreen::new(constants)
             .with_config(AnisotropicGreenConfig::default().with_angular_points(points))
             .expect_err("invalid quadrature should fail");
         assert!(
             error
                 .to_string()
-                .contains("at least sixteen points and a multiple of four"),
+                .contains("at least 32 points and a multiple of 8"),
             "points {points} gave {error}"
         );
     }
-    for points in [16, 20] {
-        AnisotropicGreen::new(constants)
+    let separation = [2.3, -1.1, 0.7];
+    let source = shear_dipole(1.7);
+    let target = shear_dipole(-0.8);
+    for points in [32, 40] {
+        let green = AnisotropicGreen::new(constants)
             .with_config(AnisotropicGreenConfig::default().with_angular_points(points))
             .expect("valid quadrature should pass");
+        let estimate = green
+            .dipole_interaction(separation, source, target)
+            .expect("valid quadrature should evaluate dipole_interaction");
+        assert!(
+            estimate.value.is_finite() && estimate.error.is_finite(),
+            "points {points} gave non-finite estimate {estimate:?}"
+        );
     }
 }
 
@@ -43,7 +53,7 @@ fn barnett_quadrature_requires_multiples_of_four_from_sixteen() {
 fn periodic_elastic_rejects_invalid_angular_mesh_boundaries() {
     let constants = cubic_constants();
     let config = PeriodicElasticConfig::default().with_image_shells(2);
-    for points in [12, 18] {
+    for points in [12, 16, 18, 20, 24, 36] {
         let error = PeriodicElastic::new(
             constants,
             config.with_green(AnisotropicGreenConfig::default().with_angular_points(points)),
@@ -52,15 +62,60 @@ fn periodic_elastic_rejects_invalid_angular_mesh_boundaries() {
         assert!(
             error
                 .to_string()
-                .contains("at least sixteen points and a multiple of four"),
+                .contains("at least 32 points and a multiple of 8"),
             "points {points} gave {error}"
         );
     }
-    PeriodicElastic::new(
+    let periodic = PeriodicElastic::new(
         constants,
-        config.with_green(AnisotropicGreenConfig::default().with_angular_points(16)),
+        config.with_green(AnisotropicGreenConfig::default().with_angular_points(32)),
     )
     .expect("boundary quadrature should pass");
+    let cell = linkcell::Cell::ortho(12.0, 12.0, 12.0).expect("cubic cell");
+    let first = DefectDipole {
+        position: [0.0, 0.0, 0.0],
+        dipole: shear_dipole(1.2),
+    };
+    let second = DefectDipole {
+        position: [3.0, 1.0, 0.5],
+        dipole: shear_dipole(-0.9),
+    };
+    let correction = periodic
+        .pair_correction(&cell, first, second)
+        .expect("boundary quadrature should evaluate dipole_interaction");
+    assert!(
+        correction.infinite.is_finite()
+            && correction.periodic.is_finite()
+            && correction.error.is_finite(),
+        "boundary correction gave non-finite result {correction:?}"
+    );
+}
+
+#[test]
+fn half_mesh_rejected_meshes_are_refused_at_construction() {
+    let constants = cubic_constants();
+    let periodic_config = PeriodicElasticConfig::default().with_image_shells(2);
+    for points in [16, 20, 24, 28, 36] {
+        let green_config = AnisotropicGreenConfig::default().with_angular_points(points);
+        let green_error = AnisotropicGreen::new(constants)
+            .with_config(green_config)
+            .expect_err("half-mesh rejection must happen at AnisotropicGreen construction");
+        assert!(
+            green_error
+                .to_string()
+                .contains("at least 32 points and a multiple of 8"),
+            "points {points} gave {green_error}"
+        );
+        let periodic_error =
+            PeriodicElastic::new(constants, periodic_config.with_green(green_config))
+                .expect_err("half-mesh rejection must happen at PeriodicElastic construction");
+        assert!(
+            periodic_error
+                .to_string()
+                .contains("at least 32 points and a multiple of 8"),
+            "points {points} gave {periodic_error}"
+        );
+    }
 }
 
 #[test]

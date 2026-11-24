@@ -145,7 +145,8 @@ impl ElasticConstants {
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct AnisotropicGreenConfig {
-    /// Points on the half-circle.  The periodic trapezoid rule is used.
+    /// Points on the half-circle (at least 32 and a multiple of 8).  The
+    /// periodic trapezoid rule is used together with a nested half mesh.
     pub angular_points: usize,
 }
 
@@ -587,9 +588,18 @@ impl PeriodicElastic {
 }
 
 fn validate_angular_points(points: usize) -> Result<(), SaddleError> {
+    if points < 32 || !points.is_multiple_of(8) {
+        return Err(SaddleError::Invalid(
+            "Barnett quadrature needs at least 32 points and a multiple of 8 so its nested half mesh has at least 16 points and a multiple of 4".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_barnett_mesh(points: usize) -> Result<(), SaddleError> {
     if points < 16 || !points.is_multiple_of(4) {
         return Err(SaddleError::Invalid(
-            "Barnett quadrature needs at least sixteen points and a multiple of four".into(),
+            "Barnett quadrature needs at least 16 points and a multiple of 4".into(),
         ));
     }
     Ok(())
@@ -601,7 +611,7 @@ fn barnett_second(
     separation: [f64; 3],
     points: usize,
 ) -> Result<GreenSecondDerivative, SaddleError> {
-    validate_angular_points(points)?;
+    validate_barnett_mesh(points)?;
     let radius = dot(separation, separation).sqrt();
     if !(radius.is_finite() && radius > f64::MIN_POSITIVE.sqrt()) {
         return Err(SaddleError::Invalid(
