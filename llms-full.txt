@@ -1398,7 +1398,7 @@ assert!(report.position[0].abs() < 1e-3);
 ```
 
 ## Dynamic NEB
-`BandConfig::dynamic` is off unless set. `DynamicNeb::default()` is ASE 3.29 `DyNEB`: `fmax` 0.05 and `scale_fmax` 0. `with_fmax` and `with_scale_fmax` change them. `fmax` is the largest per-atom Euclidean norm of the projected force, the optimizer's `fmax`, which is a different number from the band's `force_tol` (the largest absolute component).
+`BandConfig::dynamic` is off unless set. `DynamicNeb::default()` is ASE 3.29 `DyNEB`: `fmax` 0.05 and `scale_fmax` 0. `with_fmax` and `with_scale_fmax` change them. `fmax` is the largest per-atom Euclidean norm of the projected force, the optimizer's `fmax`, which is a different number from the band's `force_tol` (the largest absolute component). This follows Lindgren, Kastlunger, and Peterson, J. Chem. Theory Comput. 15, 5787 (2019), doi:10.1021/acs.jctc.9b00633 [lindgrenScaledDynamicOptimizations2019].
 
 An interior image whose norm is strictly below `fmax * (1 + distance * scale_fmax)` is left where it is. `distance` is the Euclidean norm of the coordinate difference from the highest-energy image, with no minimum image. That image keeps the energy and the Cartesian force from the last time it was evaluated. The spring and the tangent still include it. The highest-energy image is never given a zero force. When a neighbour moves far enough that the projected force exceeds the threshold, the image is evaluated again.
 
