@@ -1339,7 +1339,9 @@ rgsaddle_status_t rgsaddle_minmode_set_highs(RgsaddleMinMode *session, int32_t e
  * at -1; setting the bit with 0 keeps the old classic-window inference.
  * From ABI minor 41 a Lanczos session reads it too: with the window
  * on, an estimate stops once two Krylov vectors leave the Ritz residual
- * under 1, and 0 restores the estimate that runs to its residual.
+ * divided by the absolute Ritz value under 1. A Ritz value near zero
+ * compares that residual with 1 directly. 0 restores the estimate that
+ * runs to its dimensionless residual.
  * Other values return RGSADDLE_INVALID_PARAMETER and leave the session
  * unchanged.
  */

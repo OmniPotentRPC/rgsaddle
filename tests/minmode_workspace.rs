@@ -197,14 +197,14 @@ fn searches_match_the_allocating_code_bitwise() {
             MinModeKind::Lanczos,
             FiniteDifference::Forward,
             None,
-            0xd1a6_dd68_14a6_215c,
+            0xd671_d899_41de_d7fc,
         ),
         (
             "lanczos-central-lbfgs",
             MinModeKind::Lanczos,
             FiniteDifference::Central,
             Some(&lbfgs),
-            0x62bc_1c25_7ad8_4dbb,
+            0xadad_b383_d733_359b,
         ),
     ];
     let got: Vec<(&str, u64)> = cases

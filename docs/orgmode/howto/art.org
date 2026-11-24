@@ -20,6 +20,33 @@ The phase is stored on the session. =step= runs one phase and leaves the next on
 
 =ArtConfig::mode= is the Lanczos block. Its =artn= shortcut and its =saddle_check= are cleared: those steps are the phases above. =MinModeConfig::with_artn= remains the shorter opt-in inside one minimum-mode iteration. The point stencil's =Preset::Art= is still the push followed by a minimum-mode climb.
 
+=ArtConfig::default= is the host unit configuration: one host length for
+the pushes and the published defaults of the nested blocks. It is not a
+Lennard-Jones preset. The named =ArtConfig::lj_art()= preset is only for
+Lennard-Jones reduced units, where \(\epsilon = 1\) and
+\(\sigma = 1\). For a potential
+whose characteristic energy and length are not one in the host units, use
+=ArtConfig::for_units(energy_scale, length_scale)=. It scales lengths,
+forces, and curvatures separately. A FIRE or quick-min time step, including
+the climb's =MinModeConfig::time_step=, scales as length over the square root
+of energy, because the opening move is the force times the square of that
+step. The opening step of steepest descent, L-BFGS, nonlinear CG, DIIS and
+Barzilai-Borwein multiplies the force, so it scales as length squared over
+energy, and Adam's scales as a length. The angle stop =rotation_angle_tol=
+keeps its value. =rotation_tol= is dimensionless for Lanczos, the residual
+of the lowest Ritz pair divided by the absolute Ritz value and the relative
+change of that value, so it keeps its value. A dimer reads =rotation_tol=
+as a rotational force in curvature units, and unit conversion multiplies it
+by energy over length squared. Any other relaxation method is an
+error from =for_units=. =ArtConfig::validate()=
+returns an invalid parameter error when the perpendicular relaxation force
+tolerance is looser than the mode force tolerance, and when the mode force
+tolerance is not finite and positive. It also holds =ArtConfig::mode= to the
+checks of =MinModeSession::new=, so a zero Krylov or rotation budget, a step
+or time step that is not finite and positive, or a stepper that tests the
+oracle value is an =ART mode:= error rather than a value adjusted during the
+search. Sessions and batches call it before consuming a configuration.
+
 The runnable example is the doctest on =ArtSession=: a one-dimensional double well in three coordinates, a host seed, and a connected index-1 exit. =tests/art_session.rs= repeats the paper's census on LJ7, starting from the pentagonal bipyramid.
 
 #+begin_export rst

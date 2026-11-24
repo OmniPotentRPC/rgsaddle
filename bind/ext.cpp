@@ -2040,7 +2040,8 @@ NB_MODULE(_core, m) {
           "degrees and is not a Python argument, so the dimer stops on that "
           "angle or on rotation_tol without inferring the classic torque "
           "window. At rotation_tol 1e-4 and looser, lanczos also stops at "
-          "two Krylov vectors once the Ritz residual is under 1. A curvature "
+          "two Krylov vectors once the Ritz residual divided by the absolute "
+          "Ritz value is under 1. A curvature "
           "that is not negative steps by max_move along the mode. Band preset "
           "names raise ValueError.")
       .def_static("band", &make_band, nb::arg("x").noconvert(), nb::arg("preset") = "ci-neb",

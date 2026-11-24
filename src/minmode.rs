@@ -135,9 +135,12 @@ pub enum MinModeKind {
     #[default]
     Dimer,
     /// Lanczos on finite-difference Hessian actions: a Krylov
-    /// subspace per compute, one gradient per action, stopped when
-    /// the lowest Ritz pair's residual meets `rotation_tol`, or under
-    /// the dimer's torque window once two vectors leave it under 1.
+    /// subspace per compute, one gradient per action. The estimate
+    /// stops when the lowest Ritz pair's residual divided by the
+    /// absolute Ritz value meets `rotation_tol`, together with the
+    /// relative change of that value. A Ritz value near zero compares
+    /// the residual with `rotation_tol` directly. The torque window
+    /// stops once two vectors leave that same ratio under 1.
     Lanczos,
 }
 
@@ -268,18 +271,26 @@ pub struct MinModeConfig {
     pub dr: f64,
     /// Forward (default) or central difference for the actions.
     pub difference: FiniteDifference,
-    /// Rotation stops when the rotational force `|H v - (v.H v) v|`
-    /// falls under this. The default is 1e-4. At that value and any
-    /// looser one, a dimer with its angle test disabled also stops after
-    /// one rotation once the rotational force is under 1. Lanczos stops
-    /// once two vectors leave the Ritz residual under 1. The improved
-    /// dimer default uses the angle test instead. A tighter value keeps
-    /// driving the residual, and the torque window stays out of that
-    /// loop.
+    /// Rotation stop. The default is 1e-4.
+    ///
+    /// A dimer reads this as the rotational force
+    /// `|H v - (v.H v) v|`, in the host's curvature units. At the
+    /// default and any looser value, a dimer with its angle test
+    /// disabled also stops after one rotation once that force is under one.
+    /// The improved dimer default uses the angle test instead. A tighter
+    /// value keeps driving the residual, and the torque window stays out
+    /// of that loop.
     /// [`MinModeSession::set_torque_window`] turns the window on or off
-    /// whatever this value is. Lanczos
-    /// uses the same number as the Ritz residual. With no host relative
-    /// tolerance it is also the relative change of the lowest Ritz value.
+    /// whatever this value is.
+    ///
+    /// Lanczos reads the same number as a dimensionless tolerance. The
+    /// estimate stops when the lowest Ritz residual divided by the
+    /// absolute Ritz value is at most this, and, with no host relative
+    /// tolerance, when the relative change of that Ritz value is too.
+    /// A Ritz value whose magnitude is at most 1e-14 has no scale, so
+    /// the residual is compared with this number directly and the
+    /// quotient is never formed. Once two vectors are in hand, the
+    /// torque window stops when that same ratio is under 1.
     pub rotation_tol: f64,
     /// Dimer rotation also stops when the optimal rotation angle of an
     /// iteration falls under this many radians. The default is eOn's
@@ -294,7 +305,7 @@ pub struct MinModeConfig {
     pub rotation_angle_tol: f64,
     /// Whether [`MinModeConfig::with_rotation_angle_tol`] set
     /// `rotation_angle_tol`.
-    rotation_angle_tol_set: bool,
+    pub(crate) rotation_angle_tol_set: bool,
     /// Most dimer rotations, or Lanczos actions, in one estimate.
     pub max_rotations: usize,
     /// Krylov dimension for [`MinModeKind::Lanczos`].
@@ -309,6 +320,13 @@ pub struct MinModeConfig {
     /// [`MinModeSession::set_cg_translate`] that step has this global
     /// Euclidean norm, then is shortened so no atom moves farther.
     pub max_move: f64,
+    /// FIRE's opening time step for the translation, 1 by default. The
+    /// integrator's largest time step is 2.5 times this. With unit mass
+    /// the first move from rest is `F dt^2`, so the step has units of
+    /// length over the square root of energy. The stalled-FIRE probe
+    /// reads the stability bound `|λ| > 4 / dt^2` from it. L-BFGS does
+    /// not read it.
+    pub time_step: f64,
     /// Which rgmin stepper advances the assembled force.
     pub method: Method,
     /// Seed an empty translation from the mode curvature.
@@ -346,6 +364,7 @@ with_setters!(MinModeConfig {
     with_krylov_dim => krylov_dim: val usize,
     with_force_tol => force_tol: val f64,
     with_max_move => max_move: val f64,
+    with_time_step => time_step: val f64,
     with_method => method: val Method,
     with_seed_curvature => seed_curvature: val bool,
     with_saddle_check => saddle_check: opt SaddleIndexCheck,
@@ -359,6 +378,63 @@ impl MinModeConfig {
         self.rotation_angle_tol = rotation_angle_tol;
         self.rotation_angle_tol_set = true;
         self
+    }
+
+    /// Refuse a configuration no minimum-mode search can run.
+    ///
+    /// Returns [`SaddleError::Invalid`] when the finite-difference step or
+    /// [`Self::time_step`] is not finite and positive, the force or a
+    /// rotation tolerance is negative or not finite, the rotation or Krylov
+    /// budget is zero, [`Self::max_move`] is not finite, the saddle check
+    /// or ART nouveau block is refused, or [`Self::method`] tests the
+    /// oracle value. [`MinModeSession::new`] calls this; nothing is clamped.
+    pub(crate) fn validate(&self) -> Result<(), SaddleError> {
+        if !(self.dr.is_finite() && self.dr > 0.0) {
+            return Err(SaddleError::Invalid(
+                "finite-difference step must be positive and finite".into(),
+            ));
+        }
+        if !(self.force_tol.is_finite() && self.force_tol >= 0.0) {
+            return Err(SaddleError::Invalid(
+                "force tolerance must be finite and non-negative".into(),
+            ));
+        }
+        if !(self.rotation_tol.is_finite()
+            && self.rotation_tol >= 0.0
+            && self.rotation_angle_tol.is_finite()
+            && self.rotation_angle_tol >= 0.0)
+        {
+            return Err(SaddleError::Invalid(
+                "rotation tolerances must be finite and non-negative".into(),
+            ));
+        }
+        if self.max_rotations == 0 {
+            return Err(SaddleError::Invalid(
+                "max_rotations must be at least 1".into(),
+            ));
+        }
+        if self.krylov_dim == 0 {
+            return Err(SaddleError::Invalid(
+                "Lanczos krylov dimension must be at least 1".into(),
+            ));
+        }
+        if !self.max_move.is_finite() {
+            return Err(SaddleError::Invalid(
+                "max_move must be finite; a non-positive value leaves the step uncapped".into(),
+            ));
+        }
+        if !(self.time_step.is_finite() && self.time_step > 0.0) {
+            return Err(SaddleError::Invalid(
+                "FIRE time step must be finite and positive".into(),
+            ));
+        }
+        if let Some(check) = &self.saddle_check {
+            check.validate()?;
+        }
+        if let Some(artn) = &self.artn {
+            validate_artn(self.kind, artn)?;
+        }
+        crate::band::check_force_driven(&self.method)
     }
 
     /// Enable the ART nouveau push--relax protocol.
@@ -382,6 +458,7 @@ impl Default for MinModeConfig {
             krylov_dim: 12,
             force_tol: 1e-3,
             max_move: 0.2,
+            time_step: FIRE_OPENING_DT,
             method: Method::fire(rgmin::FireKind::V2),
             seed_curvature: false,
             saddle_check: Some(SaddleIndexCheck::default()),
@@ -468,8 +545,10 @@ const STOCK_ROTATION_TOL: f64 = 1e-4;
 
 /// eOn `dimer_torque_max`. After one rotation, a rotational force under
 /// this is finished (classic dimer, `torque_min` .. `torque_max`,
-/// `rotations_min` = 1). Lanczos reads it as the Ritz residual once it
-/// holds two vectors.
+/// `rotations_min` = 1). Lanczos reads it as the bound on the
+/// dimensionless residual once it holds two vectors: the Ritz residual
+/// divided by the absolute Ritz value, or the residual itself when that
+/// value is near zero.
 const TORQUE_MAX: f64 = 1.0;
 
 /// Scale of the step that replaces a capped FIRE move which left the
@@ -481,7 +560,7 @@ const TORQUE_MAX: f64 = 1.0;
 /// opening delay leaves `dt` unchanged (Guénolé, Nöhring, Vaid, Houllé,
 /// Xie, Prakash, and Bitzek, Comput. Mater. Sci. 175, 109584 (2020),
 /// doi:10.1016/j.commatsci.2020.109584, Algorithm 2; the initial `dt` is
-/// [`FIRE_OPENING_DT`]). When that move exceeds `max_move` the per-atom
+/// [`MinModeConfig::time_step`]). When that move exceeds `max_move` the per-atom
 /// cap truncates it, and the truncated move can leave the
 /// negative-curvature neighborhood. The replacement, taken from the last
 /// point that was still negative, is the empty-memory L-BFGS step
@@ -489,7 +568,7 @@ const TORQUE_MAX: f64 = 1.0;
 /// basin wider than `max_move` follows the integrator.
 const FIRE_EMPTY_SCALE: f64 = 0.01;
 
-/// FIRE's opening time step for the min-mode translation.
+/// Default [`MinModeConfig::time_step`].
 const FIRE_OPENING_DT: f64 = 1.0;
 
 /// Each replaced capped FIRE move restarts the integrator with `dt`
@@ -1226,9 +1305,9 @@ fn curvature_scale(curvature: f64) -> Option<f64> {
     (scale.is_finite() && scale > 0.0).then_some(scale)
 }
 
-/// Stiffness past which FIRE's opening timestep of 1 is unstable.
-/// Symplectic Euler wants `dt < 2/sqrt(|λ|)`, so `|λ| > 4` is already
-/// past that timestep.
+/// Stiffness past which FIRE's opening timestep `dt` is unstable, times
+/// `dt^2`. Symplectic Euler wants `dt < 2/sqrt(|λ|)`, so `|λ| > 4 / dt^2`
+/// is already past that timestep.
 const FIRE_CURVATURE_FLOOR: f64 = 4.0;
 /// Force evaluations with no real drop before a probe is allowed.
 /// A short plateau still belongs to FIRE. The vacancy cycle does not
@@ -1237,6 +1316,42 @@ const FIRE_STALL_STEPS: u32 = 2000;
 /// A drop smaller than this fraction of the best force is still a stall.
 /// Slow progress (a fraction of a percent per step) must not latch.
 const FIRE_STALL_DROP: f64 = 1e-4;
+
+/// Whether `|residual| / |curvature|` is at most `tol`.
+///
+/// `curvature` is the Ritz value. Dividing the residual by its absolute
+/// value cancels the energy and length units, so one `tol` means the
+/// same stop after a change of units. A curvature whose magnitude is at
+/// most 1e-14, the same guard as [`ritz_value_agreed`], has no usable
+/// scale: the residual is then compared with `tol` itself. The quotient
+/// is never formed. A non-finite residual, curvature, or tolerance does
+/// not agree.
+fn lanczos_residual_agreed(residual: f64, curvature: f64, tol: f64) -> bool {
+    if !(residual.is_finite() && curvature.is_finite() && tol.is_finite() && tol >= 0.0) {
+        return false;
+    }
+    let scale = curvature.abs();
+    if scale <= 1e-14 {
+        return residual <= tol;
+    }
+    residual <= tol * scale
+}
+
+/// Torque-window form of [`lanczos_residual_agreed`].
+///
+/// The ratio is strictly under `bound`. A curvature near zero uses the
+/// same 1e-14 guard: the residual is compared with `bound` itself, and
+/// the quotient is never formed.
+fn lanczos_residual_below(residual: f64, curvature: f64, bound: f64) -> bool {
+    if !(residual.is_finite() && curvature.is_finite() && bound.is_finite() && bound >= 0.0) {
+        return false;
+    }
+    let scale = curvature.abs();
+    if scale <= 1e-14 {
+        return residual < bound;
+    }
+    residual < bound * scale
+}
 
 /// Relative change of a Ritz value. A vanishing previous value only
 /// counts as agreement when the new value is inside the tolerance too,
@@ -1279,10 +1394,11 @@ pub type KrylovBlock = Vec<(Array1<f64>, Array1<f64>)>;
 /// Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys.
 /// 121, 9776 (2004), doi:10.1063/1.1809574, as eOn implements it: stop
 /// when the relative change in the lowest Ritz value falls under
-/// `rotation_tol`, or when the residual `beta |s|` does. A seed that
-/// is already the mode closes the Krylov on the first product. Under
-/// the torque window the estimate also stops once it holds two vectors
-/// and the residual is under [`TORQUE_MAX`], where the dimer stops.
+/// `rotation_tol`, or when the residual `beta |s|` divided by the
+/// absolute Ritz value does. A seed that is already the mode closes the
+/// Krylov on the first product. Under the torque window the estimate
+/// also stops once it holds two vectors and that ratio is under
+/// [`TORQUE_MAX`]. The dimer window stays an absolute rotational force.
 #[allow(clippy::too_many_arguments)]
 fn lanczos_mode<S: PointSurface>(
     surface: &Counted<'_, S>,
@@ -1377,17 +1493,20 @@ fn lanczos_mode<S: PointSurface>(
         // `rel_tol` replaces `rotation_tol` for that relative test.
         let agreed = lanczos_ritz_agreed(stop.rel_tol, config.rotation_tol, theta, ew_old);
         // The Ritz residual `H y - theta y` is the rotational force of
-        // the Ritz vector `y`, and `theta` its curvature: the dimer's
-        // force-error stop reads the same pair.
-        let residual_ok = residual <= config.rotation_tol
+        // the Ritz vector `y`, and `theta` its curvature. Dividing by
+        // `|theta|` makes the stop dimensionless, so a change of energy
+        // or length units does not move it. The curvature-aware length
+        // stop still reads the pair in curvature units.
+        let residual_ok = lanczos_residual_agreed(residual, theta, config.rotation_tol)
             || rotation_force_converged(residual, theta, stop.length, config.force_tol);
         // The first two vectors span the dimer's rotation plane {v, H v},
         // and their Ritz vector is the dimer rotated to the lowest
         // curvature in it (Zeng, Xiao, and Henkelman, J. Chem. Phys. 140,
-        // 044115 (2014), doi:10.1063/1.4862410). The window ends both
-        // estimates on the same rotational force. It is not a converged
-        // solve: the next estimate still spends its second product.
-        let windowed = stop.window && j >= 1 && residual < TORQUE_MAX;
+        // 044115 (2014), doi:10.1063/1.4862410). The Lanczos window uses
+        // the same ratio as the residual stop, strictly under 1. It is
+        // not a converged solve: the next estimate still spends its
+        // second product.
+        let windowed = stop.window && j >= 1 && lanczos_residual_below(residual, theta, TORQUE_MAX);
         let capped = alpha.len() == m;
         if residual_ok || agreed || windowed || capped || b <= 1e-12 {
             let mut mode = Array1::zeros(n);
@@ -1723,7 +1842,8 @@ pub struct MinModeSession {
     /// if the Rayleigh quotient agrees with the carried curvature to
     /// this fraction, and later products stop on the relative change of
     /// the lowest Ritz value. `None` keeps the stock test: the residual
-    /// and the relative Ritz change, both at `rotation_tol`.
+    /// divided by the absolute Ritz value, and the relative Ritz change,
+    /// both at `rotation_tol`.
     lanczos_rel_tol: Option<f64>,
     /// Classic dimer torque window. `None` turns it on when
     /// `rotation_tol` is at least the stock 1e-4.
@@ -1756,7 +1876,7 @@ pub struct MinModeSession {
     /// neighborhood; the step is replaced from [`CappedFireStep::origin`].
     capped_fire: Option<CappedFireStep>,
     /// FIRE time step the translation solver restarts with; below
-    /// [`FIRE_OPENING_DT`] after a capped move was replaced.
+    /// [`MinModeConfig::time_step`] after a capped move was replaced.
     fire_dt: f64,
     /// The translator has already taken a step, so a later FIRE move
     /// is the integrator's own.
@@ -1866,62 +1986,23 @@ impl MinModeSession {
         if !x.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("position"));
         }
-        if !(config.dr.is_finite() && config.dr > 0.0) {
-            return Err(SaddleError::Invalid(
-                "finite-difference step must be positive and finite".into(),
-            ));
-        }
-        if !(config.force_tol.is_finite() && config.force_tol >= 0.0) {
-            return Err(SaddleError::Invalid(
-                "force tolerance must be finite and non-negative".into(),
-            ));
-        }
-        if !(config.rotation_tol.is_finite()
-            && config.rotation_tol >= 0.0
-            && config.rotation_angle_tol.is_finite()
-            && config.rotation_angle_tol >= 0.0)
-        {
-            return Err(SaddleError::Invalid(
-                "rotation tolerances must be finite and non-negative".into(),
-            ));
-        }
-        if config.max_rotations == 0 {
-            return Err(SaddleError::Invalid(
-                "max_rotations must be at least 1".into(),
-            ));
-        }
-        if config.krylov_dim == 0 {
-            return Err(SaddleError::Invalid(
-                "Lanczos krylov dimension must be at least 1".into(),
-            ));
-        }
-        if !config.max_move.is_finite() {
-            return Err(SaddleError::Invalid(
-                "max_move must be finite; a non-positive value leaves the step uncapped".into(),
-            ));
-        }
-        if let Some(check) = &config.saddle_check {
-            check.validate()?;
-        }
-        if let Some(artn) = &config.artn {
-            validate_artn(config.kind, artn)?;
-        }
+        config.validate()?;
         let mode = checked_mode(mode)?;
         let artn = config.artn.as_ref().map(|_| ArtNState {
             push_direction: mode.clone(),
             basin_pushes: 0,
             activated: false,
         });
-        crate::band::check_force_driven(&config.method)?;
         let lbfgs_guards = true;
         let solver = build_solver(
             &config.method,
             x.len(),
             config.max_move,
-            FIRE_OPENING_DT,
+            config.time_step,
             false,
             lbfgs_guards,
         );
+        let fire_dt = config.time_step;
         Ok(Self {
             config,
             force_gate: ForceGate::LinfNorm,
@@ -1944,7 +2025,7 @@ impl MinModeSession {
             lanczos_ready: false,
             lanczos_carry: None,
             capped_fire: None,
-            fire_dt: FIRE_OPENING_DT,
+            fire_dt,
             solver_stepped: false,
             lbfgs_seeded: false,
             fire_curvature: true,
@@ -2048,8 +2129,9 @@ impl MinModeSession {
     /// so a translation does not wait for a tight residual. A set
     /// tolerance also leaves the inferred torque window out; only
     /// [`MinModeSession::set_torque_window`] with `Some(true)` adds it.
-    /// `None` restores the stock residual and the relative Ritz change,
-    /// both at `rotation_tol`, and the inferred window.
+    /// `None` restores the stock test: the residual divided by the
+    /// absolute Ritz value, and the relative Ritz change, both at
+    /// `rotation_tol`, and the inferred window.
     pub fn set_lanczos_rel_tol(&mut self, tol: Option<f64>) -> Result<(), SaddleError> {
         if let Some(tol) = tol
             && !(tol.is_finite() && tol > 0.0)
@@ -2071,10 +2153,11 @@ impl MinModeSession {
 
     /// Turn the classic dimer torque window on or off apart from
     /// `rotation_tol`. With the window on, a rotation also stops after
-    /// one iteration once the rotational force is under 1 (eOn
+    /// one iteration once the rotational force is under one (eOn
     /// `torque_max`), and a Lanczos estimate stops once two vectors
-    /// leave the Ritz residual, the rotational force of the Ritz
-    /// vector, under 1. `None`, the default, keeps the window on for a
+    /// leave the Ritz residual divided by the absolute Ritz value under
+    /// one. A Ritz value near zero compares that residual with one
+    /// directly. `None`, the default, keeps the window on for a
     /// dimer exactly when its angle test is disabled and `rotation_tol`
     /// is at least the stock 1e-4. Lanczos keeps the window only while
     /// no [`MinModeSession::set_lanczos_rel_tol`] is set.
@@ -2203,7 +2286,7 @@ impl MinModeSession {
     fn set_fire_dt(&mut self, dt: f64) -> Result<(), SaddleError> {
         let config = rgmin::FireConfig::ase()
             .with_dt(dt)
-            .with_dt_max(2.5 * FIRE_OPENING_DT);
+            .with_dt_max(2.5 * self.config.time_step);
         self.solver
             .set_fire_config(config)
             .map_err(|e| SaddleError::Solver(e.to_string()))?;
@@ -2223,9 +2306,9 @@ impl MinModeSession {
 
     fn forget_search(&mut self) {
         self.solver.forget();
-        if self.fire_dt != FIRE_OPENING_DT {
+        if self.fire_dt != self.config.time_step {
             // Only a FIRE session lowers fire_dt, so the restore cannot fail.
-            let _ = self.set_fire_dt(FIRE_OPENING_DT);
+            let _ = self.set_fire_dt(self.config.time_step);
         }
         self.dimer_rotation.clear();
         self.clear_cg();
@@ -2945,7 +3028,8 @@ impl MinModeSession {
     /// already small and the perpendicular force is not, so a cap of
     /// 0.2 steps across that well and the force stalls near 1. The
     /// probe is used only after a long stretch with no drop in force
-    /// or energy, only when `|λ|` is past [`FIRE_CURVATURE_FLOOR`],
+    /// or energy, only when `|λ|` is past [`FIRE_CURVATURE_FLOOR`]
+    /// over the square of [`MinModeConfig::time_step`],
     /// and only for a step no longer than 0.05 that does not raise
     /// the energy. After that stall the probe stays in place while
     /// the curvature remains steep, so the opening timestep cannot
@@ -2958,7 +3042,8 @@ impl MinModeSession {
         mode: &Array1<f64>,
         curvature: f64,
     ) -> Result<Option<(Array1<f64>, PointEval)>, SaddleError> {
-        if !(curvature.is_finite() && curvature < -FIRE_CURVATURE_FLOOR) {
+        let floor = FIRE_CURVATURE_FLOOR / (self.config.time_step * self.config.time_step);
+        if !(curvature.is_finite() && curvature < -floor) {
             if self.fire_stall_count >= FIRE_STALL_STEPS {
                 self.fire_stall_count = 0;
                 self.fire_stall_force = f64::NAN;
@@ -3749,7 +3834,7 @@ impl MinModeSession {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtNConfig, MinModeConfig, MinModeKind, MinModeSession, PointSurface,
+        ArtNConfig, MinModeConfig, MinModeKind, MinModeSession, PointSurface, SaddleIndexCheck,
         rotation_force_converged, rotation_force_error, translated_gradient,
     };
     use crate::error::SaddleError;
@@ -4113,6 +4198,145 @@ mod tests {
     }
 
     #[test]
+    fn minimum_mode_fire_opens_at_the_configured_timestep() {
+        let mut session = MinModeSession::new(
+            MinModeConfig::default().with_time_step(0.25),
+            array![0.0, 0.0, 0.0],
+            array![1.0, 0.0, 0.0],
+        )
+        .unwrap();
+        assert_eq!(session.fire_dt, 0.25);
+        session.set_fire_dt(0.125).unwrap();
+        session.forget_search();
+        assert_eq!(session.fire_dt, 0.25);
+        for time_step in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            match MinModeSession::new(
+                MinModeConfig::default().with_time_step(time_step),
+                array![0.0, 0.0, 0.0],
+                array![1.0, 0.0, 0.0],
+            )
+            .err()
+            {
+                Some(SaddleError::Invalid(message)) => {
+                    assert_eq!(message, "FIRE time step must be finite and positive");
+                }
+                other => panic!("unexpected time step result: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn minimum_mode_config_validation_rejects_each_field_with_its_own_message() {
+        MinModeConfig::default().validate().unwrap();
+        let lanczos = || MinModeConfig::default().with_kind(MinModeKind::Lanczos);
+        let bad_artn = |artn: ArtNConfig| lanczos().with_artn(artn);
+        let cases: Vec<(MinModeConfig, &str)> = vec![
+            (
+                MinModeConfig::default().with_dr(0.0),
+                "finite-difference step must be positive and finite",
+            ),
+            (
+                MinModeConfig::default().with_dr(f64::NAN),
+                "finite-difference step must be positive and finite",
+            ),
+            (
+                MinModeConfig::default().with_force_tol(-1.0e-3),
+                "force tolerance must be finite and non-negative",
+            ),
+            (
+                MinModeConfig::default().with_force_tol(f64::INFINITY),
+                "force tolerance must be finite and non-negative",
+            ),
+            (
+                MinModeConfig::default().with_rotation_tol(-1.0e-4),
+                "rotation tolerances must be finite and non-negative",
+            ),
+            (
+                MinModeConfig::default().with_rotation_angle_tol(f64::NAN),
+                "rotation tolerances must be finite and non-negative",
+            ),
+            (
+                MinModeConfig::default().with_max_rotations(0),
+                "max_rotations must be at least 1",
+            ),
+            (
+                MinModeConfig::default().with_krylov_dim(0),
+                "Lanczos krylov dimension must be at least 1",
+            ),
+            (
+                MinModeConfig::default().with_max_move(f64::NAN),
+                "max_move must be finite",
+            ),
+            (
+                MinModeConfig::default().with_time_step(0.0),
+                "FIRE time step must be finite and positive",
+            ),
+            (
+                MinModeConfig::default().with_time_step(f64::NEG_INFINITY),
+                "FIRE time step must be finite and positive",
+            ),
+            (
+                MinModeConfig::default()
+                    .with_saddle_check(SaddleIndexCheck::default().with_block(0)),
+                "saddle-index check needs",
+            ),
+            (
+                bad_artn(ArtNConfig::default().with_basin_push(0.0)),
+                "ARTn basin push must be positive and finite",
+            ),
+            (
+                MinModeConfig::default().with_method(Method::Bfgs),
+                "tests the oracle value",
+            ),
+        ];
+        for (config, expected) in cases {
+            match config.validate() {
+                Err(SaddleError::Invalid(message)) => {
+                    assert!(message.contains(expected), "{message} lacks {expected}");
+                }
+                other => panic!("unexpected validation result for {expected}: {other:?}"),
+            }
+        }
+        for artn in [
+            ArtNConfig::default().with_eigenvalue_threshold(0.1),
+            ArtNConfig::default().with_relaxation_step(f64::NAN),
+            ArtNConfig::default().with_lanczos_actions(0),
+            ArtNConfig::default().with_curvature_floor(0.0),
+        ] {
+            assert!(matches!(
+                MinModeConfig::default()
+                    .with_kind(MinModeKind::Lanczos)
+                    .with_artn(artn)
+                    .validate(),
+                Err(SaddleError::Invalid(_))
+            ));
+        }
+        assert!(matches!(
+            MinModeConfig::default()
+                .with_kind(MinModeKind::Dimer)
+                .with_artn(ArtNConfig::default())
+                .validate(),
+            Err(SaddleError::Invalid(message)) if message.contains("requires the Lanczos")
+        ));
+    }
+
+    #[test]
+    fn minimum_mode_config_validation_keeps_an_uncapped_max_move() {
+        MinModeConfig::default()
+            .with_max_move(0.0)
+            .validate()
+            .unwrap();
+        MinModeConfig::default()
+            .with_max_move(-1.0)
+            .validate()
+            .unwrap();
+        MinModeConfig::default()
+            .with_force_tol(0.0)
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
     fn improved_dimer_skips_trial_evaluation_inside_angle_tol() {
         let angle = 2.0_f64.to_radians();
         let mut session = MinModeSession::new(
@@ -4357,6 +4581,25 @@ mod tests {
         assert_abs_diff_eq!(lanczos.mode.dot(&dimer.mode).abs(), 1.0, epsilon = 1e-8);
         assert!(torque(&lanczos.mode) > 0.1 && torque(&lanczos.mode) < 1.0);
         assert!(!ready, "a windowed estimate is not a converged solve");
+    }
+
+    #[test]
+    fn lanczos_residual_agreement_is_relative_and_guards_a_vanishing_ritz_value() {
+        assert!(super::lanczos_residual_agreed(1.0e-6, -2.0, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(3.0e-4, -2.0, 1.0e-4));
+        assert!(super::lanczos_residual_agreed(1.0e-4, 0.0, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(2.0e-4, 0.0, 1.0e-4));
+        assert!(super::lanczos_residual_agreed(1.0e-4, 1.0e-15, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(1.0e-4, 1.0e-12, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(0.0, f64::NAN, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(f64::NAN, -1.0, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(0.0, -1.0, f64::NAN));
+        assert!(super::lanczos_residual_below(0.5, -2.0, 1.0));
+        assert!(!super::lanczos_residual_below(2.5, -2.0, 1.0));
+        assert!(!super::lanczos_residual_below(2.0, -2.0, 1.0));
+        assert!(super::lanczos_residual_below(0.5, 0.0, 1.0));
+        assert!(!super::lanczos_residual_below(1.0, 0.0, 1.0));
+        assert!(!super::lanczos_residual_below(0.0, f64::INFINITY, 1.0));
     }
 
     #[test]

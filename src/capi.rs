@@ -219,7 +219,12 @@ pub struct RgsaddleMinModeConfig {
     pub method: i32,
     /// Finite-difference displacement, in the host's length unit.
     pub dr: f64,
-    /// The rotation stops when the rotational force falls under this value.
+    /// Rotation stop. A dimer reads this as the rotational force in the
+    /// host's curvature units. Lanczos reads it as a dimensionless
+    /// tolerance: the lowest Ritz residual divided by the absolute Ritz
+    /// value, and, with no host relative tolerance, the relative change
+    /// of that value. A Ritz value near zero compares the residual with
+    /// this number directly.
     pub rotation_tol: f64,
     /// Most dimer rotations, or Lanczos actions, in one estimate.
     pub max_rotations: i64,

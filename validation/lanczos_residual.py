@@ -8,10 +8,12 @@ Ritz pair (theta, s) of T_j and y = Q_j s,
     A y - theta y = beta_j q_{j+1} (e_j . s),   so   |A y - theta y| = beta_j |s_j|.
 
 The rotational force of the dimer is the same quantity, |H v - (v.H v) v|
-for unit v, which is why rgsaddle stops Lanczos on beta_j |s_j| <=
-rotation_tol. This script checks the tridiagonal Ritz pairs
-symbolically and the identity numerically, at 50 digits, on a random
-symmetric matrix through every Krylov dimension.
+for unit v. Lanczos stops when beta_j |s_j| divided by the absolute Ritz
+value is at most rotation_tol. A Ritz value near zero compares that
+residual with rotation_tol directly, so the stop never divides by zero.
+This script checks the tridiagonal Ritz pairs symbolically and the
+identity numerically, at 50 digits, on a random symmetric matrix through
+every Krylov dimension.
 """
 
 if not __debug__:
