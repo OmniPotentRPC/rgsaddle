@@ -53,6 +53,8 @@ def locked_packages(lock: str) -> dict[tuple[str, str], set[str]]:
         elif platform and (match := re.match(r"      - conda: \S+/([^/]+)\.conda$", line)):
             name = match.group(1).rsplit("-", 2)[0]
             packages[(environment, platform)].add(name)
+        elif platform and line.strip() == "- pypi: ./":
+            packages[(environment, platform)].add("rgsaddle")
     return packages
 
 
@@ -77,6 +79,105 @@ def test_every_gate_environment_locks_capnp(platform):
     assert environments == {"default", "python"}
     for environment in sorted(environments):
         assert "capnproto" in packages[(environment, platform)], environment
+
+
+TEST_EXTRA = {
+    "ase",
+    "hypothesis",
+    "numpy",
+    "nanobind",
+    "pytest",
+    "pytest-run-parallel",
+    "pytest-timeout",
+    "rgsaddle",
+    "scikit-build-core",
+}
+
+
+def task_commands(manifest: dict) -> list[str]:
+    commands = []
+
+    def take(tasks: object) -> None:
+        if not isinstance(tasks, dict):
+            return
+        for value in tasks.values():
+            if isinstance(value, str):
+                commands.append(value)
+            elif isinstance(value, dict) and isinstance(value.get("cmd"), str):
+                commands.append(value["cmd"])
+
+    take(manifest.get("tasks"))
+    features = manifest.get("feature", {})
+    if isinstance(features, dict):
+        for feature in features.values():
+            if isinstance(feature, dict):
+                take(feature.get("tasks"))
+    return commands
+
+
+def test_python_test_extra_is_a_locked_path_dependency():
+    manifest = tomllib.loads((ROOT / "pixi.toml").read_text(encoding="utf-8"))
+    python = manifest["feature"]["python"]
+    dependency = python["pypi-dependencies"]["rgsaddle"]
+    assert dependency["path"] == "."
+    assert dependency["editable"] is True
+    assert dependency["extras"] == ["test"]
+    assert python["pypi-options"]["no-build-isolation"] == ["rgsaddle"]
+    for name in (
+        "ase",
+        "hypothesis",
+        "numpy",
+        "nanobind",
+        "pytest-run-parallel",
+        "scikit-build-core",
+    ):
+        assert name in python["dependencies"]
+    for command in task_commands(manifest):
+        assert "pip install" not in command
+        assert "uv pip" not in command
+        assert "conda install" not in command
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_python_environment_locks_the_test_extra(platform):
+    packages = locked_packages((ROOT / "pixi.lock").read_text(encoding="utf-8"))
+    assert TEST_EXTRA <= packages[("python", platform)]
+
+
+def test_locked_path_records_the_test_extra():
+    lock = (ROOT / "pixi.lock").read_text(encoding="utf-8")
+    match = re.search(r"(?m)^- pypi: \./\n(?:  .+\n)+", lock)
+    assert match is not None
+    record = match.group(0)
+    assert "name: rgsaddle" in record
+    assert "ase==3.29.0 ; extra == 'test'" in record
+
+
+def test_gate_commands_do_not_resolve_outside_the_lock():
+    plan = json.loads((GATE_DIR / "plan.json").read_text(encoding="utf-8"))
+    manifest = tomllib.loads((ROOT / "pixi.toml").read_text(encoding="utf-8"))
+    for command in task_commands(manifest):
+        if re.search(r"\bcargo\s+(build|test|clippy)\b", command):
+            assert "--locked" in command, command
+    for leg in plan["legs"].values():
+        for command in leg["commands"]:
+            argv = command["argv"]
+            if argv[:2] == ["pixi", "run"]:
+                assert "--locked" in argv, argv
+            if any(
+                argv[index] == "cargo" and argv[index + 1] in {"build", "test", "clippy"}
+                for index in range(len(argv) - 1)
+            ):
+                assert "--locked" in argv, argv
+    workflow = (ROOT / ".github" / "workflows" / "gate.yml").read_text(encoding="utf-8")
+    uses = re.findall(r"uses:\s*(\S+)", workflow)
+    assert uses
+    for item in uses:
+        pin = item.rsplit("@", 1)[-1]
+        assert re.fullmatch(r"[0-9a-f]{40}", pin), item
+    assert "pixi-version: v0.84.2" in workflow
+    assert "locked: true" in workflow
+    assert "pixi run --locked check-gate" in workflow
 
 
 def write_executable(path: pathlib.Path, text: str) -> None:

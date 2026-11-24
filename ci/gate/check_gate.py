@@ -72,7 +72,7 @@ def main() -> int:
         sys.stderr.write("".join(diffs))
         print(
             f"generated gate files differ from {SOURCE}; "
-            "edit the source and run pixi run gen-gate",
+            "edit the source and run pixi run --locked gen-gate",
             file=sys.stderr,
         )
         return 1

@@ -27,12 +27,24 @@ platforms = ["linux-64", "linux-aarch64"]
 python = ">=3.10,<3.14"
 pytest = "*"
 pytest-timeout = "*"
+pytest-run-parallel = ">=0.4"
+hypothesis = ">=6"
+numpy = ">=1.24"
+ase = "==3.29.0"
+nanobind = "==3.1.0"
+scikit-build-core = ">=1.1,<2"
 rust = ">=1.88"
 
+[feature.python.pypi-options]
+no-build-isolation = ["rgsaddle"]
+
+[feature.python.pypi-dependencies]
+rgsaddle = { path = ".", editable = true, extras = ["test"] }
+
 [feature.python.tasks]
-python-build = "python -m pip install ."
+python-build = "python -c 'import rgsaddle'"
 python-test = { cmd = "pytest tests/python/ -q --timeout=120", depends-on = ["python-build"] }
-gate-python-build = "python -m pip install '.[test]'"
+gate-python-build = "python -c 'import rgsaddle'"
 gate-python-test = "RGSADDLE_REQUIRE_ASE=1 python -m pytest tests/python -ra --timeout=180 -o faulthandler_timeout=120"
 gate-selftest = "python -m pytest ci/gate -ra -p no:cacheprovider"
 

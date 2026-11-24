@@ -29,6 +29,8 @@ jobs:
       uses: prefix-dev/setup-pixi@82d477f15f3a381dbcc8adc1206ce643fe110fb7
       with:
         cache: true
+        locked: true
+        pixi-version: v0.84.2
     - id: gate
       name: Run gate
       run: |-
@@ -77,8 +79,10 @@ jobs:
     - uses: prefix-dev/setup-pixi@82d477f15f3a381dbcc8adc1206ce643fe110fb7
       with:
         cache: true
+        locked: true
+        pixi-version: v0.84.2
     - name: Check generated gate files
-      run: pixi run check-gate
+      run: pixi run --locked check-gate
 name: Reproducible build and test gate
 on:
   pull_request: null

@@ -207,9 +207,9 @@ def pixi_leg(plan: dict[str, object]) -> LegResult:
     summaries = [str(counts) for result in results for counts in result.tests]
     artefacts = [
         f"pixi version: {version_line(['pixi', '--version'])}",
-        f"Rust toolchain: {version_line(['pixi', 'run', 'rustc', '--version'])}",
-        f"Cargo toolchain: {version_line(['pixi', 'run', 'cargo', '--version'])}",
-        f"Python version: {version_line(['pixi', 'run', '-e', 'python', 'python', '--version'])}",
+        f"Rust toolchain: {version_line(['pixi', 'run', '--locked', 'rustc', '--version'])}",
+        f"Cargo toolchain: {version_line(['pixi', 'run', '--locked', 'cargo', '--version'])}",
+        f"Python version: {version_line(['pixi', 'run', '--locked', '-e', 'python', 'python', '--version'])}",
         "module list: not used by the pixi leg",
         "test summary: " + ("; ".join(summaries) if summaries else "none found"),
     ]

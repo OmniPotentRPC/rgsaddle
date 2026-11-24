@@ -1,5 +1,5 @@
 # This is the source of both ci/gate/plan.json and
-# .github/workflows/gate.yml. Run `pixi run gen-gate` after editing it.
+# .github/workflows/gate.yml. Run `pixi run --locked gen-gate` after editing it.
 let gate_matrix = [
   { arch = "x86_64", runner = "ubuntu-24.04", leg = "eessi" },
   { arch = "aarch64", runner = "ubuntu-24.04-arm", leg = "eessi" },
@@ -37,57 +37,57 @@ let plan = {
       commands = [
         {
           name = "Cargo build (all features)",
-          argv = ["pixi", "run", "gate-cargo-build"],
+          argv = ["pixi", "run", "--locked", "gate-cargo-build"],
           kind = "build",
         },
         {
           name = "Cargo test (all features)",
-          argv = ["pixi", "run", "gate-cargo-test"],
+          argv = ["pixi", "run", "--locked", "gate-cargo-test"],
           kind = "test",
         },
         {
           name = "Clippy",
-          argv = ["pixi", "run", "gate-clippy"],
+          argv = ["pixi", "run", "--locked", "gate-clippy"],
           kind = "lint",
         },
         {
           name = "Rustfmt",
-          argv = ["pixi", "run", "gate-rustfmt"],
+          argv = ["pixi", "run", "--locked", "gate-rustfmt"],
           kind = "lint",
         },
         {
           name = "C ABI build",
-          argv = ["pixi", "run", "gate-capi-build"],
+          argv = ["pixi", "run", "--locked", "gate-capi-build"],
           kind = "build",
         },
         {
           name = "C ABI tests",
-          argv = ["pixi", "run", "gate-capi-test"],
+          argv = ["pixi", "run", "--locked", "gate-capi-test"],
           kind = "test",
         },
         {
           name = "C ABI Meson subproject",
-          argv = ["pixi", "run", "gate-capi-subproject"],
+          argv = ["pixi", "run", "--locked", "gate-capi-subproject"],
           kind = "test",
         },
         {
           name = "C ABI pkg-config consumer",
-          argv = ["pixi", "run", "gate-capi-pkgconfig"],
+          argv = ["pixi", "run", "--locked", "gate-capi-pkgconfig"],
           kind = "test",
         },
         {
           name = "Python extension build",
-          argv = ["pixi", "run", "-e", "python", "gate-python-build"],
+          argv = ["pixi", "run", "--locked", "-e", "python", "gate-python-build"],
           kind = "build",
         },
         {
           name = "Python tests",
-          argv = ["pixi", "run", "-e", "python", "gate-python-test"],
+          argv = ["pixi", "run", "--locked", "-e", "python", "gate-python-test"],
           kind = "test",
         },
         {
           name = "Gate self tests",
-          argv = ["pixi", "run", "-e", "python", "gate-selftest"],
+          argv = ["pixi", "run", "--locked", "-e", "python", "gate-selftest"],
           kind = "test",
         },
       ],
@@ -129,8 +129,8 @@ let workflow = {
       runs-on = "ubuntu-24.04",
       steps = [
         { uses = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" },
-        { uses = "prefix-dev/setup-pixi@82d477f15f3a381dbcc8adc1206ce643fe110fb7", with = { cache = true } },
-        { name = "Check generated gate files", run = "pixi run check-gate" },
+        { uses = "prefix-dev/setup-pixi@82d477f15f3a381dbcc8adc1206ce643fe110fb7", with = { cache = true, locked = true, "pixi-version" = "v0.84.2" } },
+        { name = "Check generated gate files", run = "pixi run --locked check-gate" },
       ],
     },
     gate = {
@@ -158,7 +158,7 @@ let workflow = {
           name = "Set up pixi",
           "if" = "matrix.leg == 'pixi'",
           uses = "prefix-dev/setup-pixi@82d477f15f3a381dbcc8adc1206ce643fe110fb7",
-          with = { cache = true },
+          with = { cache = true, locked = true, "pixi-version" = "v0.84.2" },
         },
         {
           name = "Run gate",

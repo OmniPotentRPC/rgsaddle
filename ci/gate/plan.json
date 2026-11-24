@@ -40,6 +40,7 @@
           "argv": [
             "pixi",
             "run",
+            "--locked",
             "gate-cargo-build"
           ],
           "kind": "build",
@@ -49,6 +50,7 @@
           "argv": [
             "pixi",
             "run",
+            "--locked",
             "gate-cargo-test"
           ],
           "kind": "test",
@@ -58,6 +60,7 @@
           "argv": [
             "pixi",
             "run",
+            "--locked",
             "gate-clippy"
           ],
           "kind": "lint",
@@ -67,6 +70,7 @@
           "argv": [
             "pixi",
             "run",
+            "--locked",
             "gate-rustfmt"
           ],
           "kind": "lint",
@@ -76,6 +80,7 @@
           "argv": [
             "pixi",
             "run",
+            "--locked",
             "gate-capi-build"
           ],
           "kind": "build",
@@ -85,6 +90,7 @@
           "argv": [
             "pixi",
             "run",
+            "--locked",
             "gate-capi-test"
           ],
           "kind": "test",
@@ -94,6 +100,7 @@
           "argv": [
             "pixi",
             "run",
+            "--locked",
             "gate-capi-subproject"
           ],
           "kind": "test",
@@ -103,6 +110,7 @@
           "argv": [
             "pixi",
             "run",
+            "--locked",
             "gate-capi-pkgconfig"
           ],
           "kind": "test",
@@ -112,6 +120,7 @@
           "argv": [
             "pixi",
             "run",
+            "--locked",
             "-e",
             "python",
             "gate-python-build"
@@ -123,6 +132,7 @@
           "argv": [
             "pixi",
             "run",
+            "--locked",
             "-e",
             "python",
             "gate-python-test"
@@ -134,6 +144,7 @@
           "argv": [
             "pixi",
             "run",
+            "--locked",
             "-e",
             "python",
             "gate-selftest"

@@ -4155,16 +4155,18 @@ The two-dimensional reflected Hessian `diag(-a, b)` has eigenvalues of positive 
 Install pixi, then generate and check the committed gate files:
 
 ```sh
-pixi run gen-gate
-pixi run check-gate
+pixi run --locked gen-gate
+pixi run --locked check-gate
 ```
 
-`gen-gate` writes `.github/workflows/gate.yml` and `ci/gate/plan.json` from `ci/gate/plan.ncl`. `check-gate` exports the source to a temporary directory and compares it with the committed files without rewriting them. It exits 1 and prints a diff when either side changed alone, so edit `plan.ncl` rather than the workflow.
+`gen-gate` writes `.github/workflows/gate.yml` and `ci/gate/plan.json` from `ci/gate/plan.ncl`. `check-gate` exports the source to a temporary directory and compares it with the committed files without rewriting them. It exits 1 and prints a diff when either side changed alone, so edit `plan.ncl` rather than the workflow. `--locked` refuses to solve again when `pixi.lock` is stale.
+
+The python environment installs this checkout as an editable path dependency with the `test` extra. ASE, Hypothesis, numpy, pytest-run-parallel, nanobind, and scikit-build-core are conda dependencies of that environment, so the solve pins them in `pixi.lock`. The build task imports `rgsaddle`. No task installs from the network.
 
 Run the gate's own tests:
 
 ```sh
-pixi run -e python gate-selftest
+pixi run --locked -e python gate-selftest
 ```
 
 Run the portable leg. The report path is relative to the checkout:
