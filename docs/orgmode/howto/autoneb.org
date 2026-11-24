@@ -44,17 +44,7 @@ Construction fills the band to ~n_simul + 2~ by cutting the longest segment, one
 
 The peak-weighted gap of a segment is the absolute value of ~(E[j+1] - E[j]) * (E[j+1] + E[j] - 2 E_min) / (2 (E_max - E_min))~. ~f_R~ is the longest length over the endpoint separation. ~g_R~ is the largest weight over ~(E_max - E_min)~. The longest segment is cut when ~g_R~ is not positive or ~f_R / g_R~ exceeds ~space_energy_ratio~. Otherwise the largest weight is cut. Ties keep the lower index, including ~+0.0~ against ~-0.0~.
 
-Climbing uses ~BandConfig::climbing~. The default is
-~CiConfig::after(0.5)~: the climbing image arms when the largest force
-component falls below the absolute threshold 0.5 in the host's force
-units. Its relative trigger factor is 0. Buildup leaves climbing off.
-The climbing window and, when ~full_band~ is set, the full band stop at
-~BandConfig::force_tol~. The default leaves ~full_band~ off and stops
-after the climbing window, as ASE and the paper do. The extra stage costs
-calls: on the same budget comparison its median was 30 on the double
-well, 315 from B to C, and 285 from A to B, and it raised the two-barrier
-call ratio to 1.70 over 31 paired seeds. A pair with a censored side is
-dropped.
+Climbing uses ~BandConfig::climbing~: ~BandConfig::default()~ sets ~CiConfig::after(0.5)~, with trigger factor 0 and trigger force 0.5, and ~None~ falls back to trigger factor 0.5 and trigger force 0 when ~climb~ is on. The climbing window and, when ~full_band~ is set, the full band stop at ~BandConfig::force_tol~. Buildup leaves climbing off. The default leaves ~full_band~ off and stops after the climbing window, as ASE and the paper do. The extra stage costs calls: on the same budget comparison its median was 30 on the double well, 315 from B to C, and 285 from A to B, and it raised the two-barrier call ratio to 1.70 over 31 paired seeds. A pair with a censored side is dropped.
 
 * How it differs from ASE
 The inserted image is the minimum-image midpoint. The fill from two endpoints cuts one midpoint at a time, while ASE places ~n_simul~ images in one interpolate. The Müller-Brown comparison uses FIRE 1.0, ASE's original FIRE, with this crate's step cap of 2.5 times the starting step. Both codes then insert at index 2 and then at index 1.
