@@ -224,23 +224,31 @@ static int minmode_rotations(RgsaddleMinMode *session) {
 }
 
 static int test_minmode_rotation_angle_defaults_and_torque_window(void) {
-  /* Zero means stop-off only before minor 63. Later minors keep the new rule. */
-  RgsaddleMinMode *legacy = new_dimer_session(1e-8, 62, 0, 0.0);
-  RgsaddleMinMode *defaulted = new_dimer_session(1e-8, 63, 0, 0.0);
+  /* Minor 62 is the last minor that reads a zero rotation_angle_tol as
+     stop off. From minor 63 a zero value keeps the default angle stop
+     unless RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL is set. The
+     legacy session is that last minor, not the current minor minus one. */
+  RgsaddleMinMode *legacy = new_dimer_session(1e-8, 62u, 0, 0.0);
+  RgsaddleMinMode *introduced = new_dimer_session(1e-8, 63u, 0, 0.0);
+  RgsaddleMinMode *defaulted = new_dimer_session(1e-8, RGSADDLE_ABI_MINOR, 0, 0.0);
   RgsaddleMinMode *explicit_zero = new_dimer_session(
       1e-8, RGSADDLE_ABI_MINOR, RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL, 0.0);
   RgsaddleMinMode *nonzero = new_dimer_session(1e-8, RGSADDLE_ABI_MINOR, 0, 1e-2);
-  CHECK(legacy != NULL && defaulted != NULL && explicit_zero != NULL && nonzero != NULL,
+  CHECK(legacy != NULL && introduced != NULL && defaulted != NULL && explicit_zero != NULL &&
+            nonzero != NULL,
         "minmode create for angle-stop tests");
   const int legacy_rotations = minmode_rotations(legacy);
+  const int introduced_rotations = minmode_rotations(introduced);
   const int default_rotations = minmode_rotations(defaulted);
   const int explicit_zero_rotations = minmode_rotations(explicit_zero);
   const int nonzero_rotations = minmode_rotations(nonzero);
-  CHECK(legacy_rotations > 0 && default_rotations > 0 && explicit_zero_rotations > 0 &&
-            nonzero_rotations > 0,
+  CHECK(legacy_rotations > 0 && introduced_rotations > 0 && default_rotations > 0 &&
+            explicit_zero_rotations > 0 && nonzero_rotations > 0,
         "minmode estimate returns rotations");
-  CHECK(legacy_rotations > default_rotations, "legacy minor keeps zero as stop-off");
-  CHECK(legacy_rotations == explicit_zero_rotations, "explicit zero keeps stop-off");
+  CHECK(legacy_rotations > introduced_rotations, "minor 63 keeps the default angle stop");
+  CHECK(introduced_rotations == default_rotations, "later minors keep the minor 63 angle stop");
+  CHECK(legacy_rotations > default_rotations, "legacy minor keeps zero as stop off");
+  CHECK(legacy_rotations == explicit_zero_rotations, "explicit zero keeps stop off");
   CHECK(nonzero_rotations <= legacy_rotations, "nonzero keeps angle stop on");
   CHECK(rgsaddle_minmode_set_torque_window(defaulted, -1) == RGSADDLE_OK,
         "set_torque_window -1");
@@ -249,6 +257,7 @@ static int test_minmode_rotation_angle_defaults_and_torque_window(void) {
   CHECK(rgsaddle_minmode_set_torque_window(defaulted, 1) == RGSADDLE_OK,
         "set_torque_window 1");
   rgsaddle_minmode_free(legacy);
+  rgsaddle_minmode_free(introduced);
   rgsaddle_minmode_free(defaulted);
   rgsaddle_minmode_free(explicit_zero);
   rgsaddle_minmode_free(nonzero);

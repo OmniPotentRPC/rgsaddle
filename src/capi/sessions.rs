@@ -4339,9 +4339,10 @@ mod torque_window_abi_tests {
             unsafe { report.assume_init() }.rotations
         };
 
-        // A minor below `MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR` keeps
-        // the legacy meaning of 0.0: angle stop off. The checks pin that
-        // boundary instead of `RGSADDLE_ABI_MINOR`.
+        // `MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR - 1` is the last minor
+        // that reads a zero rotation_angle_tol as stop off. From
+        // `MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR` a zero value keeps the
+        // Rust default angle stop unless the explicit flag is set.
         let legacy = session_of_with_rotation_angle(
             0,
             MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR - 1,
@@ -4349,14 +4350,15 @@ mod torque_window_abi_tests {
             0,
             0.0,
         );
-        // The introducing minor with 0.0 and no flag keeps the Rust default angle stop.
-        let defaulted = session_of_with_rotation_angle(
+        let introduced = session_of_with_rotation_angle(
             0,
             MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR,
             1e-8,
             0,
             0.0,
         );
+        // The current minor with 0.0 and no flag keeps the Rust default angle stop.
+        let defaulted = session_of_with_rotation_angle(0, RGSADDLE_ABI_MINOR, 1e-8, 0, 0.0);
         // The current minor with the explicit flag and 0.0 keeps the stop off.
         let explicit_zero = session_of_with_rotation_angle(
             0,
@@ -4369,10 +4371,13 @@ mod torque_window_abi_tests {
         let explicit_nonzero = session_of_with_rotation_angle(0, RGSADDLE_ABI_MINOR, 1e-8, 0, 1e-2);
 
         let legacy_rotations = estimate(legacy);
+        let introduced_rotations = estimate(introduced);
         let defaulted_rotations = estimate(defaulted);
         let explicit_zero_rotations = estimate(explicit_zero);
         let explicit_nonzero_rotations = estimate(explicit_nonzero);
 
+        assert!(legacy_rotations > introduced_rotations);
+        assert_eq!(introduced_rotations, defaulted_rotations);
         assert!(legacy_rotations > defaulted_rotations);
         assert_eq!(legacy_rotations, explicit_zero_rotations);
         assert!(explicit_nonzero_rotations <= legacy_rotations);
@@ -4380,6 +4385,7 @@ mod torque_window_abi_tests {
 
         unsafe {
             rgsaddle_minmode_free(legacy);
+            rgsaddle_minmode_free(introduced);
             rgsaddle_minmode_free(defaulted);
             rgsaddle_minmode_free(explicit_zero);
             rgsaddle_minmode_free(explicit_nonzero);
