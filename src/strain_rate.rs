@@ -1484,7 +1484,9 @@ pub struct VineyardReport {
     pub n_saddle_modes: usize,
     /// Difference `ln det'(D_min) - ln det'(D_sad)` across the kept modes.
     pub log_det_ratio: f64,
-    /// Monte Carlo / SLQ standard error on `prefactor_hz`, when stochastic.
+    /// Monte Carlo probe standard error on `prefactor_hz`, when stochastic.
+    ///
+    /// This excludes bias from truncating the Lanczos quadrature.
     pub std_err: Option<f64>,
     /// Number of surface or operator evaluations used.
     pub evaluations: usize,
@@ -1646,6 +1648,9 @@ pub fn vineyard_prefactor_lanczos(
 /// Both `min_op` and `sad_op` must represent positive-definite mass-weighted
 /// Hessians on the subspace orthogonal to any unstable mode (the unstable mode
 /// of `sad_op` is extracted and deflated automatically).
+///
+/// The returned [`VineyardReport::std_err`] measures probe variance only and
+/// excludes truncation bias from the finite Lanczos quadrature.
 #[allow(clippy::too_many_arguments)]
 pub fn vineyard_prefactor_slq<A: HessianAction, B: HessianAction>(
     min_op: &mut A,
@@ -1732,9 +1737,37 @@ pub fn vineyard_prefactor(
             "Vineyard mass must be finite and positive".into(),
         ));
     }
-    let extra = min_lambda.len().saturating_sub(sad_lambda.len()) as f64;
-    let unit = vineyard_prefactor_weighted(min_lambda, sad_lambda)?;
-    let hertz = unit / mass_amu.sqrt().powf(extra);
+    if min_lambda.is_empty() {
+        return Err(SaddleError::Invalid(
+            "Vineyard needs at least one positive minimum eigenvalue".into(),
+        ));
+    }
+    if min_lambda.len() < sad_lambda.len() {
+        return Err(SaddleError::Invalid(
+            "the saddle product is longer than the minimum product".into(),
+        ));
+    }
+    let mut log_ratio = 0.0;
+    for lambda in min_lambda {
+        if !(lambda.is_finite() && *lambda > 0.0) {
+            return Err(SaddleError::Invalid(
+                "minimum eigenvalues in the Vineyard product must be positive".into(),
+            ));
+        }
+        log_ratio += 0.5 * lambda.ln();
+    }
+    for lambda in sad_lambda {
+        if !(lambda.is_finite() && *lambda > 0.0) {
+            return Err(SaddleError::Invalid(
+                "saddle eigenvalues in the Vineyard product must be positive".into(),
+            ));
+        }
+        log_ratio -= 0.5 * lambda.ln();
+    }
+    let extra = (min_lambda.len() - sad_lambda.len()) as f64;
+    log_ratio -= 0.5 * extra * mass_amu.ln();
+    log_ratio -= extra * (2.0 * std::f64::consts::PI).ln();
+    let hertz = log_ratio.exp() * angular_scale_rad_s().powf(extra);
     if !hertz.is_finite() || hertz <= 0.0 {
         return Err(SaddleError::NonFinite("Vineyard prefactor"));
     }
