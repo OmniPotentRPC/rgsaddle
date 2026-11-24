@@ -772,6 +772,112 @@ ConnectReportPy connect_python(nb::callable fn, nb::ndarray<const double, nb::nd
                          report.hessian_index, report.evaluations};
 }
 
+nb::ndarray<nb::numpy, double> copy_matrix(const std::vector<double> &values, std::size_t rows,
+                                           std::size_t cols);
+
+int32_t projection_code(const std::string &name);
+
+[[noreturn]] void status_error(rgsaddle_status_t status);
+
+struct AutonebReportPy {
+  int status = 0;
+  double max_force = 0.0;
+  std::int64_t ci_index = -1;
+  std::int64_t surface_rows = 0;
+  std::int64_t n_images = 0;
+  std::int64_t iteration = 0;
+  std::vector<double> positions;
+  std::size_t dof = 0;
+};
+
+AutonebReportPy autoneb_run_py(nb::callable fn, Matrix positions, double k, bool climb,
+                               std::int64_t n_simul, std::int64_t n_max, double force_tol,
+                               double local_force_tol, std::int64_t local_max_steps,
+                               std::int64_t climb_max_steps, const std::string &projection,
+                               const std::string &tangent, bool remove_translation,
+                               double space_energy_ratio, double max_move, bool idpp, nb::handle cell,
+                               nb::handle fixed) {
+  if (positions.shape(0) < 2 || positions.shape(1) <= 0 || positions.shape(1) % 3 != 0) {
+    throw nb::value_error("positions must be (images >= 2, 3N)");
+  }
+  if (tangent != "simple" && tangent != "improved" && tangent != "improvedtangent") {
+    throw nb::value_error("tangent must be improved, improvedtangent, or simple");
+  }
+  const auto n_init = static_cast<std::int64_t>(positions.shape(0));
+  const auto dof = static_cast<std::size_t>(positions.shape(1));
+  const auto n_atoms = static_cast<std::int64_t>(dof / 3);
+  std::vector<double> box;
+  if (!cell.is_none()) {
+    auto view = nb::cast<Matrix>(cell);
+    if (view.shape(0) != 3 || view.shape(1) != 3) {
+      throw nb::value_error("cell must be 3x3");
+    }
+    box.assign(view.data(), view.data() + 9);
+  }
+  std::vector<std::uint8_t> mask;
+  if (!fixed.is_none()) {
+    auto view =
+        nb::cast<nb::ndarray<const std::uint8_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>>(fixed);
+    if (static_cast<std::int64_t>(view.shape(0)) != n_atoms) {
+      throw nb::value_error("fixed must hold one entry per atom");
+    }
+    mask.assign(view.data(), view.data() + view.shape(0));
+  }
+  rgsaddle_autoneb_config_t config{};
+  config.version.major = RGSADDLE_ABI_MAJOR;
+  config.version.minor = RGSADDLE_ABI_MINOR;
+  config.flags = 0;
+  if (climb) {
+    config.flags |= RGSADDLE_AUTONEB_CLIMB;
+  }
+  if (idpp) {
+    config.flags |= RGSADDLE_AUTONEB_IDPP;
+  }
+  if (!remove_translation) {
+    config.flags |= RGSADDLE_AUTONEB_KEEP_TRANSLATION;
+  }
+  config.projection = projection_code(projection);
+  config.tangent = tangent == "simple" ? RGSADDLE_TANGENT_SIMPLE : RGSADDLE_TANGENT_IMPROVED;
+  config.n_simul = n_simul;
+  config.n_max = n_max;
+  config.local_max_steps = local_max_steps;
+  config.climb_max_steps = climb_max_steps;
+  config.k = k;
+  config.force_tol = force_tol;
+  config.local_force_tol = local_force_tol;
+  config.max_move = max_move;
+  config.space_energy_ratio = space_energy_ratio;
+  std::vector<double> out(static_cast<std::size_t>(n_max) * dof, 0.0);
+  rgsaddle_autoneb_report_t report{};
+  rgbind::CallContext ctx;
+  ConnectCallback state{&fn, &ctx};
+  rgsaddle_status_t status = RGSADDLE_OK;
+  {
+    nb::gil_scoped_release release;
+    status = rgsaddle_autoneb_run(&config, n_init, n_atoms, positions.data(),
+                                  box.empty() ? nullptr : box.data(),
+                                  mask.empty() ? nullptr : mask.data(), out.data(), &report,
+                                  connect_python_surface, &state);
+  }
+  if (ctx.has_error()) {
+    ctx.rethrow_if_set();
+  }
+  if (status != RGSADDLE_OK) {
+    std::string last = rgsaddle_py_last_error();
+    rgsaddle_py_set_last_error("");
+    if (last.empty()) {
+      const char *name = rgsaddle_status_name(status);
+      last = name == nullptr || name[0] == '\0' ? "autoneb failed" : name;
+    }
+    throw nb::value_error(last.c_str());
+  }
+  if (report.n_images > 0 && static_cast<std::size_t>(report.n_images) < out.size() / dof) {
+    out.resize(static_cast<std::size_t>(report.n_images) * dof);
+  }
+  return AutonebReportPy{report.status, report.max_force, report.ci_index, report.surface_rows,
+                         report.n_images, report.iteration, std::move(out), dof};
+}
+
 nb::ndarray<nb::numpy, double> copy_vector(const std::vector<double> &values) {
   const std::size_t n = values.empty() ? 1 : values.size();
   auto *raw = new double[n];
@@ -2209,6 +2315,43 @@ NB_MODULE(_core, m) {
       "and (rows, 3N) gradients in input order. Call counts count geometries. "
       "beads=0 skips the rate and leaves log_rate_over_reactant as NaN. A calculator exception "
       "propagates. An unconverged search raises with the C status.");
+
+  nb::class_<AutonebReportPy>(m, "AutonebReport")
+      .def_ro("status", &AutonebReportPy::status, "1 when the last stage converged, otherwise 0.")
+      .def_ro("max_force", &AutonebReportPy::max_force, "Largest force component of the last stage.")
+      .def_ro("ci_index", &AutonebReportPy::ci_index, "Climbing image, or -1.")
+      .def_ro("surface_rows", &AutonebReportPy::surface_rows,
+              "Rows passed to the surface. One row is one force call.")
+      .def_ro("n_images", &AutonebReportPy::n_images, "Images in the finished band, endpoints included.")
+      .def_ro("iteration", &AutonebReportPy::iteration, "Steps of the last stage.")
+      .def_prop_ro(
+          "positions",
+          [](const AutonebReportPy &self) {
+            const auto rows = static_cast<std::size_t>(std::max(self.n_images, std::int64_t{0}));
+            return copy_matrix(self.positions, rows == 0 ? 1 : rows, self.dof == 0 ? 1 : self.dof);
+          },
+          nb::rv_policy::move, "Copy of the finished band, shaped (n_images, 3N).");
+
+  m.def(
+      "autoneb_run", &autoneb_run_py, nb::arg("surface"), nb::arg("positions").noconvert(),
+      nb::arg("k") = 0.1, nb::arg("climb") = true, nb::arg("n_simul") = static_cast<std::int64_t>(3),
+      nb::arg("n_max") = static_cast<std::int64_t>(7), nb::arg("force_tol") = 0.025,
+      nb::arg("local_force_tol") = 0.025, nb::arg("local_max_steps") = static_cast<std::int64_t>(10000),
+      nb::arg("climb_max_steps") = static_cast<std::int64_t>(10000), nb::arg("projection") = "neb",
+      nb::arg("tangent") = "improved", nb::arg("remove_translation") = false,
+      nb::arg("space_energy_ratio") = 0.5, nb::arg("max_move") = 0.2, nb::arg("idpp") = false,
+      nb::arg("cell") = nb::none(), nb::arg("fixed") = nb::none(),
+      nb::sig("def autoneb_run(surface: collections.abc.Callable[..., tuple[numpy.typing.NDArray[numpy.float64], "
+              "numpy.typing.NDArray[numpy.float64]]], positions: numpy.typing.NDArray[numpy.float64], "
+              "k: float = 0.1, climb: bool = True, n_simul: int = 3, n_max: int = 7, "
+              "force_tol: float = 0.025, local_force_tol: float = 0.025, local_max_steps: int = 10000, "
+              "climb_max_steps: int = 10000, projection: str = 'neb', tangent: str = 'improved', "
+              "remove_translation: bool = False, space_energy_ratio: float = 0.5, max_move: float = 0.2, "
+              "idpp: bool = False, cell: numpy.typing.NDArray[numpy.float64] | None = None, "
+              "fixed: numpy.typing.NDArray[numpy.uint8] | None = None) -> AutonebReport"),
+      "Run AutoNEB to completion. positions is (n_init >= 2, 3N). "
+      "surface(x) receives (rows, 3N) and returns (energies, gradients). One row is one force call. "
+      "The search stays on the calling thread.");
 
   nb::class_<SessionReport>(m, "SessionReport")
       .def_ro("status", &SessionReport::status, "0 while running, 1 when converged.")

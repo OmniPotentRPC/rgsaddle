@@ -1,0 +1,1 @@
+~rgsaddle.ase.AutoNEB~ follows the ~ase.mep.AutoNEB~ call shape, and ~rgsaddle_autoneb_run~ is the run-to-completion C entry point behind it.

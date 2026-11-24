@@ -545,6 +545,7 @@ The feature macro `RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS` advertises
 modes. Each reports `-1` for a path-only or failed solve.
 
 From minor 60, `rgsaddle_band_set_refine` installs or clears the per-step L-BFGS refine stepper, and `rgsaddle_band_is_refining` reports whether the last first-order step used it. A host checks `rgsaddle_abi_version()` for minor 60 or newer. The worked example is `tests/band_refine.rs`.
+`rgsaddle_autoneb_run` grows an AutoNEB band to completion. `rgsaddle_autoneb_config_t` and `rgsaddle_autoneb_report_t` are the inputs and the result. `RGSADDLE_AUTONEB_CLIMB`, `RGSADDLE_AUTONEB_IDPP`, and `RGSADDLE_AUTONEB_KEEP_TRANSLATION` are the flag bits. The callback stays on the calling thread.
 The request flags are `RGSADDLE_REQ_ONE_IMAGE` (bit 0) and `RGSADDLE_REQ_CLIMBING_IMAGE` (bit 1).
 From a band config at minor 22, the refinement's one-image requests also set bit 1.
 Their `image` is then the climbing image's band index.
@@ -592,7 +593,7 @@ The importable package is `rgsaddle`. `rgsaddle._core` is the nanobind extension
 | `rgsaddle.saddle_index` | Standalone point saddle-index certification on a callback surface, returning `SaddleIndex` (`certified`, `index`, `converged`, `curvatures`, `evaluations`, `total_evaluations`, `escapes`) |
 | `rgsaddle.reparametrize` | Equal-arc-length reparametrization of a path with `scheme`"linear"` or `"not-a-knot"` (`"spline"=) |
 | `rgsaddle._core` | Extension symbols: `ClaimSlot` (`__enter__`, `__exit__`), `MinMode` (`estimate`, `step`, `set_position`, `position`, `mode`, `saddle_index`, `set_saddle_check`), `SellaSaddle` (`step`, `position`), `version`, `project_band`, `dyneb_mask`, `halve_raised_energy`, `trust_update`, `RGSADDLE_FORCE_L2`, `RGSADDLE_FORCE_LINF`, `RGSADDLE_FORCE_MAX_ATOM`, `RGSADDLE_MINMODE_DIMER`, `RGSADDLE_MINMODE_LANCZOS`, `RGSADDLE_IRC_GS2`, `RGSADDLE_IRC_MOROKUMA`, `RGSADDLE_IRC_SELLA_SPHERE` |
-| `rgsaddle.ase.NEB`, `MinModeAtoms`, `Sella`, `saddle_index` | ASE drop-in wrappers for nudged elastic band (`interpolate`, `get_positions`, `set_positions`, `get_potential_energy`, `get_forces`, `saddle_index`), minimum-mode effective forces (`get_forces`), order-1 Sella optimization (`attach`, `run`), and saddle-index certification |
+| `rgsaddle.ase.NEB`, `AutoNEB`, `MinModeAtoms`, `Sella`, `saddle_index` | ASE drop-in wrappers for nudged elastic band (`interpolate`, `get_positions`, `set_positions`, `get_potential_energy`, `get_forces`, `saddle_index`), AutoNEB (`autoneb_run`, `AutonebReport`), minimum-mode effective forces (`get_forces`), order-1 Sella optimization (`attach`, `run`), and saddle-index certification |
 | `rgsaddle.connect` | Run-to-completion double-ended search. `surface(x)` is the one-image `(energy, gradient)` callback. `ConnectReport` holds `position`, `energy`, `force_norm`, `kind`, `hessian_index`, and `evaluations` |
 | `rgsaddle.lineb_solve` | Fixed-energy LI-NEB path and optional harmonic rate. `positions` is `(n_images, 3N)`, `atom_masses` one mass per atom, `molecular` selects coordinate expansion or molecule alignment, =beads=0= leaves `log_rate_over_reactant` as NaN. `LinebResult` holds `positions`, `action`, half periods, temperatures, call tallies, and the log rate |
 | `rgsaddle.Band` | Stepping NEB, simplified-string (=string=True=, `reparametrization`), and free-end adaptive NEB session. `step`, `run`, `positions`, `set_positions`, `evaluation`, `set_string`, `set_free_end`, `target_energy_residual`, `free_end_cuts`, `set_fixed_atoms`, `saddle_index`, `set_saddle_check`, `restart`, `reset` |
@@ -3909,6 +3910,7 @@ A solid-state band, the trust-region stepper, the simplified string method, and 
 A non-finite position, energy, force, `fmax`, or `scale_fmax` returns `RGSADDLE_NON_FINITE`.
 While the option is on, an interior image that a neighbour pulls back over its threshold is requested alone: `RGSADDLE_REQ_ONE_IMAGE` is set, `image` is that image's band index, `n_images` is the band length, and `RGSADDLE_REQ_CLIMBING_IMAGE` is not set.
 A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 65 before resolving either symbol.
+The run-to-completion AutoNEB of Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868. `rgsaddle_autoneb_run` grows a band from at least two images and writes `n_max` rows. `rgsaddle_autoneb_config_t` carries the spring `k`, the two force stops, the two step caps, `n_simul`, `n_max`, the projection, the tangent, and `space_energy_ratio`. `RGSADDLE_AUTONEB_CLIMB` arms the climb from the first evaluation of the climbing window. `RGSADDLE_AUTONEB_IDPP` places new images with the image-dependent pair potential. `RGSADDLE_AUTONEB_KEEP_TRANSLATION` leaves the mean Cartesian force in the window. `rgsaddle_autoneb_report_t` reports `status`, `max_force`, `ci_index` (-1 when there is none), `surface_rows`, `n_images`, and `iteration`. The surface callback is the band callback, and it is not entered from another thread. Python calls it as `autoneb_run` and reads `AutonebReport`. `rgsaddle.ase.AutoNEB` is the ASE-shaped wrapper. A host checks `rgsaddle_abi_version()` before resolving the symbol. The Rust types are `RgsaddleAutonebConfig` and `RgsaddleAutonebReport`.
 
 # Use the headers from a meson project (`docs/orgmode/howto/meson.org`)
 
@@ -4033,7 +4035,7 @@ A calculator exception, including `KeyboardInterrupt`, propagates out of `__call
 
 =lineb_solve(surface, positions, atom_masses, energy, opt_tol, perp_tol, molecular=False, max_steps=1000, beads=0, ...)= runs a fixed-energy LI-NEB path to completion and optionally the harmonic quantum TST rate (`howto/lineb`). `positions` is `(n_images, 3N)`. `atom_masses` holds one positive mass per atom: with =molecular=False= each mass expands to three coordinates, and with =molecular=True= the free molecule is quaternion-aligned. `surface(x)` is the same one-image callback as `connect`. The GIL is released around `rgsaddle_lineb_solve` and taken again inside the trampoline. A calculator exception propagates unchanged. =beads=0= skips the rate and leaves `log_rate_over_reactant` as NaN. An unconverged search raises with the existing non-success C status. `LinebResult` holds `positions`, `action`, both half periods and temperatures, `log_rate_over_reactant`, `iterations`, and the `optimizer_calls`, `measure_calls`, `dynamics_calls`, and `rate_calls` tallies.
 
-`rgsaddle.ase.NEB`, `SimplifiedString`, `GrowingString`, `MinModeAtoms`, and `Sella` are the ASE-shaped calls. `NEB`, `SimplifiedString`, and `GrowingString` read `FixAtoms` from the images into the band's fixed-atom mask: those atoms get zero force rows, `interpolate` leaves them on the first image, and every image must fix the same atoms. `SimplifiedString` runs the simplified string method of E, Ren, and Vanden-Eijnden [eSimplifiedImprovedString2007] with `'not-a-knot'` (or `'spline'`) or `'linear'` equal-arc-length reparametrization and an optional climbing image (`run(fmax, steps)` drives `rgsaddle.Band` under an ASE `Optimizer` subclass so `logfile`, `trajectory`, and attached observers run per step). `GrowingString` runs the growing string method of Peters, Heyden, Bell, and Chakraborty [petersGrowingStringMethod2004] from the endpoint images, handing off to `StringSession` once the fragments join. The migration page says where `NEB` follows ASE and where the endpoint-slope climb does not. IRC and AutoNEB stay on the Rust and C sessions.
+`rgsaddle.ase.NEB`, `AutoNEB`, `SimplifiedString`, `GrowingString`, `MinModeAtoms`, and `Sella` are the ASE-shaped calls. `NEB`, `SimplifiedString`, and `GrowingString` read `FixAtoms` from the images into the band's fixed-atom mask: those atoms get zero force rows, `interpolate` leaves them on the first image, and every image must fix the same atoms. `NEB.interpolate` takes `method` `linear` or `idpp` and `mic`. `idpp` calls `idpp_path`. `DyNEB` freezes images that are already under `fmax`; `NEB` does not, unless =dynamic_relaxation=True= is passed and the `FutureWarning` is accepted. `AutoNEB` runs `autoneb_run` and returns an `AutonebReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`). `DimerControl` and `MinModeTranslate` are the dimer parameter object and the optimizer that takes one `MinMode.step`. `SimplifiedString` runs the simplified string method of E, Ren, and Vanden-Eijnden [eSimplifiedImprovedString2007] with `'not-a-knot'` (or `'spline'`) or `'linear'` equal-arc-length reparametrization and an optional climbing image (`run(fmax, steps)` drives `rgsaddle.Band` under an ASE `Optimizer` subclass so `logfile`, `trajectory`, and attached observers run per step). `GrowingString` runs the growing string method of Peters, Heyden, Bell, and Chakraborty [petersGrowingStringMethod2004] from the endpoint images, handing off to `StringSession` once the fragments join. The migration page says where `NEB` follows ASE and where the endpoint-slope climb, the `aseneb` name, and the plain `eb` projection do not. IRC stays on the Rust and C sessions.
 
 `_core.halve_raised_energy(previous, trial, step)` returns `(raised, new_step)`. A trial more than 1e-4 above `previous` halves `step`. `_core.trust_update(radius, predicted, actual, step_norm, sigma_inc, sigma_dec, rho_inc, rho_dec, delta_min)` is the Sella radius after those energy changes. A prediction below 1e-14 in absolute value returns `radius`. Neither call evaluates a surface.
 
@@ -4076,6 +4078,8 @@ The spring constant defaults to 0.1, ASE's value. A `BandSession` still defaults
 `FixAtoms` on the images is read into the band's fixed-atom mask, as `rgsaddle_band_set_fixed_atoms` takes it from C. The fixed atoms get zero force rows, keep the mean force even with `remove_rotation_and_translation=True`, and stay where the first image has them through `interpolate()`. Every image must fix the same atoms. Other constraints act through `get_forces()` as before.
 
 `dynamic_relaxation`, `fmax`, and `scale_fmax` on `NEB` raise `NotImplementedError`. `DyNEB` takes them: an image under `fmax` is left in place, `scale_fmax` loosens that test with the distance from the highest-energy image, and the default band is unchanged. A variable cell in a periodic direction raises `NotImplementedError` as well.
+
+`AutoNEB` reads `prefix000.traj` and `prefix001.traj` and grows the band with `autoneb_run`. The constructor arguments match `ase.mep.AutoNEB`. The steps are the band's FIRE solver. `maxstep` is read from the optimizer class signature when that parameter has a default. `smooth_curve=True`, a non-FIRE optimizer, and `method` `spline` or `string` raise `NotImplementedError`. The final images are written back to `prefixNNN.traj`. Per-iteration trajectory files are not written. The initial fill matches ASE when `n_simul` is 1 or 3.
 
 ## From ASE's dimer and from Sella
 `rgsaddle.ase.MinModeAtoms(atoms, mode=...)` estimates a dimer or Lanczos mode and returns the effective force. Above the well the perpendicular force is dropped. Below it the force along the mode is reflected. An ASE optimizer can drive that object.
@@ -5189,6 +5193,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_samd_position`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_samd_free`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_idpp_path`. Purpose: Image dependent pair potential initial path. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_autoneb_run`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_ocineb_create`. Purpose: Climbing-image band that hands the climbing image to a min-mode climb. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_ocineb_step`. Purpose: One band step, one alignment, or one P-RFO climb step. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_ocineb_positions`. Purpose: Copy the current band out (n_images * 3 * n_atoms doubles). Parameters: the declaration. Units: the caller's.
@@ -5317,6 +5322,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_sella_saddle_config_t`. Purpose: Sella order-1 (P-RFO + trust).
 - `rgsaddle_constraints_config_t`. Purpose: Empty Constraints chart.
 - `rgsaddle_samd_config_t`. Purpose: Sella BDP thermostat.
+- `rgsaddle_autoneb_config_t`. Purpose: Run-to-completion AutoNEB.
+- `rgsaddle_autoneb_report_t`. Purpose: Result of rgsaddle_autoneb_run.
 - `rgsaddle_ocineb_phase_t`. Purpose: Phase of one OCI-NEB host step.
 - `rgsaddle_ocineb_config_t`. Purpose: Hand-off parameters.
 - `rgsaddle_ocineb_report_t`. Purpose: One OCI-NEB step.
@@ -5359,6 +5366,9 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `RGSADDLE_REQ_ONE_IMAGE`. Purpose: Request flags bit 0.
 - `RGSADDLE_REQ_CLIMBING_IMAGE`. Purpose: Request flags bit 1, ABI minor 23.
 - `RGSADDLE_VERSION_INIT`. Purpose: Macro constant in include/rgsaddle.h.
+- `RGSADDLE_AUTONEB_CLIMB`. Purpose: AutoNEB flag bit 0.
+- `RGSADDLE_AUTONEB_IDPP`. Purpose: AutoNEB flag bit 1.
+- `RGSADDLE_AUTONEB_KEEP_TRANSLATION`. Purpose: AutoNEB flag bit 2.
 - `RGSADDLE_STENCIL_MIN`. Purpose: Macro constant in include/rgsaddle.h.
 - `RGSADDLE_STENCIL_DIMER`. Purpose: Macro constant in include/rgsaddle.h.
 - `RGSADDLE_STENCIL_LANCZOS`. Purpose: Macro constant in include/rgsaddle.h.

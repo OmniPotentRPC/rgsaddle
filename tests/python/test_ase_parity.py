@@ -1,0 +1,134 @@
+"""Same script, ASE's class and rgsaddle's, on a cheap calculator.
+
+Force-call counts are printed. They are not a speed claim.
+"""
+
+from __future__ import annotations
+
+import os
+
+import numpy as np
+import pytest
+
+if os.environ.get("RGSADDLE_REQUIRE_ASE") != "1":
+    pytest.importorskip("ase")
+from ase import Atoms
+from ase.calculators.calculator import Calculator
+from ase.mep.autoneb import AutoNEB as AseAutoNEB
+from ase.optimize import FIRE
+
+from rgsaddle.ase import AutoNEB
+
+# Müller-Brown saddle between minima B and C, from the AutoNEB example.
+_SADDLE_XY = np.array([0.212, 0.293])
+
+
+def _muller(x, y):  # type: ignore[no-untyped-def]
+    a = np.array([-200.0, -100.0, -170.0, 15.0])
+    aa = np.array([-1.0, -1.0, -6.5, 0.7])
+    b = np.array([0.0, 0.0, 11.0, 0.6])
+    c = np.array([-10.0, -10.0, -6.5, 0.7])
+    x0 = np.array([1.0, 0.0, -0.5, -1.0])
+    y0 = np.array([0.0, 0.5, 1.5, 1.0])
+    energy = 0.0
+    gx = 0.0
+    gy = 0.0
+    for i in range(4):
+        dx = x - x0[i]
+        dy = y - y0[i]
+        weight = a[i] * np.exp(aa[i] * dx * dx + b[i] * dx * dy + c[i] * dy * dy)
+        energy += weight
+        gx += weight * (2.0 * aa[i] * dx + b[i] * dy)
+        gy += weight * (b[i] * dx + 2.0 * c[i] * dy)
+    return float(energy), float(gx), float(gy)
+
+
+class MullerBrown(Calculator):
+    implemented_properties = ["energy", "forces"]
+    calls = 0
+
+    def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
+        Calculator.calculate(self, atoms, properties, system_changes)
+        MullerBrown.calls += 1
+        x, y = (float(atoms.positions[0, 0]), float(atoms.positions[0, 1]))
+        energy, gx, gy = _muller(x, y)
+        forces = np.zeros((len(atoms), 3))
+        forces[0, 0] = -gx
+        forces[0, 1] = -gy
+        self.results = {"energy": energy, "forces": forces}
+
+
+class TightFIRE(FIRE):
+    def __init__(self, atoms, maxstep=0.05, **kwargs):  # type: ignore[no-untyped-def]
+        super().__init__(atoms, maxstep=maxstep, **kwargs)
+
+
+def test_autoneb_saddle_matches() -> None:
+    start = np.array([-0.05001082, 0.46669410, 0.0])
+    end = np.array([0.62349940, 0.02803776, 0.0])
+
+    def run(cls, root):  # type: ignore[no-untyped-def]
+        MullerBrown.calls = 0
+        prefix = os.path.join(root, "neb")
+        os.makedirs(root, exist_ok=True)
+        from ase.io import write
+
+        for index, xyz in enumerate((start, end)):
+            atoms = Atoms("H", positions=[xyz])
+            atoms.calc = MullerBrown()
+            atoms.get_potential_energy()
+            write(f"{prefix}{index:03d}.traj", atoms)
+
+        def attach(images):  # type: ignore[no-untyped-def]
+            for atoms in images:
+                atoms.calc = MullerBrown()
+
+        band = cls(
+            attach,
+            prefix,
+            n_simul=3,
+            n_max=7,
+            fmax=[0.5, 0.05],
+            maxsteps=[40, 80],
+            k=5.0,
+            climb=True,
+            method="improvedtangent",
+            optimizer=TightFIRE,
+            remove_rotation_and_translation=False,
+            space_energy_ratio=0.5,
+            parallel=False,
+            smooth_curve=False,
+            interpolate_method="linear",
+        )
+        band.run()
+        energies = []
+        positions = []
+        for atoms in band.all_images:
+            atoms.calc = MullerBrown()
+            energies.append(float(atoms.get_potential_energy()))
+            positions.append(atoms.positions[0, :2].copy())
+        interior = list(range(1, len(energies) - 1))
+        peak = max(interior, key=lambda i: energies[i])
+        print(
+            f"AutoNEB {cls.__name__} calls={MullerBrown.calls} "
+            f"peak={positions[peak]} energy={energies[peak]:.6f}"
+        )
+        return np.asarray(positions[peak]), energies[peak], MullerBrown.calls
+
+    import tempfile
+
+    ase_saddle, ase_energy, ase_calls = run(AseAutoNEB, tempfile.mkdtemp(prefix="ase-autoneb-"))
+    our_saddle, our_energy, our_calls = run(AutoNEB, tempfile.mkdtemp(prefix="rgsaddle-autoneb-"))
+    assert np.linalg.norm(ase_saddle - _SADDLE_XY) < 0.05
+    assert np.linalg.norm(our_saddle - _SADDLE_XY) < 0.05
+    assert our_energy == pytest.approx(ase_energy, abs=1.0)
+    assert ase_calls > 0 and our_calls > 0
+    with pytest.raises(NotImplementedError):
+        AutoNEB(
+            lambda images: None,
+            "unused",
+            n_simul=3,
+            n_max=7,
+            smooth_curve=True,
+        )
+

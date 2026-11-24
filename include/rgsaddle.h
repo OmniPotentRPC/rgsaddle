@@ -1242,6 +1242,74 @@ rgsaddle_status_t rgsaddle_idpp_path(int64_t n_images, int64_t n_atoms,
                                      int64_t max_iterations, double grad_tol,
                                      double max_move, double *out);
 
+/**
+ * AutoNEB flag bit 0. The climb stage reflects the
+ * climbing image. Clear to stop after the insertions.
+ */
+#define RGSADDLE_AUTONEB_CLIMB (1ull << 0)
+/**
+ * AutoNEB flag bit 1. New images are relaxed on the
+ * image-dependent pair potential. Clear for a straight minimum-image
+ * midpoint.
+ */
+#define RGSADDLE_AUTONEB_IDPP (1ull << 1)
+/**
+ * AutoNEB flag bit 2. The window keeps the mean
+ * Cartesian force. Clear removes it, as the band does by default.
+ */
+#define RGSADDLE_AUTONEB_KEEP_TRANSLATION (1ull << 2)
+
+/**
+ * Run-to-completion AutoNEB.
+ *
+ * Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016).
+ * The host supplies the endpoints and any intermediate guesses in
+ * `positions` (`n_init` rows of `3 * n_atoms`). The search grows the
+ * band to `n_max` images, endpoints included, relaxing a window of
+ * `n_simul + 2` images between insertions. `out_positions` holds
+ * `n_max` rows; the report's `n_images` says how many were written.
+ * `cell` is a row-major 3x3 lattice or NULL. `fixed` is NULL or
+ * `n_atoms` bytes, 1 for a fixed atom. The surface is the band
+ * callback: one call may carry several images. Threads stay at one,
+ * so the callback is not entered concurrently.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int32_t projection; /**< rgsaddle_projection_t */
+  int32_t tangent;    /**< rgsaddle_tangent_t */
+  int64_t n_simul;
+  int64_t n_max;
+  int64_t local_max_steps;
+  int64_t climb_max_steps;
+  double k;
+  double force_tol;
+  double local_force_tol;
+  double max_move;
+  double space_energy_ratio;
+} rgsaddle_autoneb_config_t;
+
+/** Result of rgsaddle_autoneb_run. The session stamps version and flags. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int32_t status; /**< 1 when the last stage converged, otherwise 0. */
+  int32_t reserved;
+  double max_force;
+  int64_t ci_index; /**< Climbing image, or -1. */
+  int64_t surface_rows;
+  int64_t n_images;
+  int64_t iteration;
+} rgsaddle_autoneb_report_t;
+
+rgsaddle_status_t rgsaddle_autoneb_run(const rgsaddle_autoneb_config_t *config,
+                                       int64_t n_init, int64_t n_atoms,
+                                       const double *positions,
+                                       const double *cell, const uint8_t *fixed,
+                                       double *out_positions,
+                                       rgsaddle_autoneb_report_t *report,
+                                       rgsaddle_surface_fn surface, void *user);
+
 typedef struct RgsaddleOcineb RgsaddleOcineb;
 
 /** Phase of one OCI-NEB host step. ABI minor 20. */

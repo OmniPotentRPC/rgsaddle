@@ -1044,6 +1044,238 @@ class SingleCalculatorNEB(NEB):
         super().__init__(images, *args, **kwargs)
 
 
+def _refuse_parallel_world(world: Any) -> None:
+    """Accept a serial communicator. A world with more than one rank is refused."""
+    if world is None:
+        return
+    size = getattr(world, "size", None)
+    if size is None:
+        return
+    if int(size) != 1:
+        raise NotImplementedError("this AutoNEB evaluates images on the calling thread")
+
+
+def _pair_of(value: Any, name: str) -> tuple[float, float] | None:
+    """Two-stage ``(build, climb)`` number, or None when ``value`` is scalar."""
+    if isinstance(value, (list, tuple, np.ndarray)):
+        values = [float(v) for v in np.asarray(value, dtype=np.float64).reshape(-1)]
+        if len(values) != 2:
+            raise ValueError(f"{name}: expected one number or a pair, got {len(values)}")
+        return values[0], values[1]
+    return None
+
+
+class AutoNEB:
+    """AutoNEB over endpoint images stored as ``prefix000.traj``.
+
+    Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016),
+    doi:10.1063/1.4961868. The growth, the spring rescaling, and the
+    window relaxation run in the Rust core. The constructor arguments
+    match ``ase.mep.AutoNEB``. Image-parallel MPI is refused. The
+    optimizer must be FIRE or a subclass of it: the steps are the
+    band's FIRE solver, and ``maxstep`` on that class is the per-atom
+    cap when the signature names it. ``smooth_curve=True`` is refused.
+    Final images are written back to ``prefixNNN.traj``.
+    """
+
+    def __init__(
+        self,
+        attach_calculators: Any,
+        prefix: Any,
+        n_simul: int,
+        n_max: int,
+        iter_folder: str = "AutoNEB_iter",
+        fmax: Any = 0.025,
+        maxsteps: Any = 10000,
+        k: float = 0.1,
+        climb: bool = True,
+        method: str = "eb",
+        optimizer: Any = None,
+        remove_rotation_and_translation: bool = False,
+        space_energy_ratio: float = 0.5,
+        world: Any = None,
+        parallel: bool = True,
+        smooth_curve: bool = False,
+        interpolate_method: str = "idpp",
+    ) -> None:
+        del iter_folder
+        if smooth_curve:
+            raise NotImplementedError("smooth_curve is not this AutoNEB")
+        if interpolate_method not in ("idpp", "linear"):
+            raise ValueError("interpolate_method must be idpp or linear")
+        if method in ("spline", "string"):
+            raise NotImplementedError(
+                "AutoNEB method must be improvedtangent, aseneb, eb, or dneb"
+            )
+        if method not in ("improvedtangent", "aseneb", "eb", "dneb"):
+            raise NotImplementedError(
+                "AutoNEB method must be improvedtangent, aseneb, eb, or dneb"
+            )
+        _refuse_parallel_world(world)
+        if parallel and world is not None and int(getattr(world, "size", 1)) != 1:
+            raise NotImplementedError("this AutoNEB evaluates images on the calling thread")
+        self.attach_calculators = attach_calculators
+        self.prefix = str(prefix)
+        self.n_simul = int(n_simul)
+        self.n_max = int(n_max)
+        self.climb = bool(climb)
+        self.fmax = fmax
+        self.maxsteps = maxsteps
+        self.k = float(k)
+        self.method = method
+        self.remove_rotation_and_translation = bool(remove_rotation_and_translation)
+        self.space_energy_ratio = float(space_energy_ratio)
+        self.parallel = bool(parallel)
+        self.world = world
+        self.smooth_curve = False
+        self.interpolate_method = interpolate_method
+        self.optimizer = optimizer
+        self.all_images: list[Any] = []
+        self.iteration = 0
+        self.surface_rows = 0
+        self.ci: int | None = None
+
+    def run(self) -> list[Any]:
+        """Grow and relax the band. Returns the images, endpoints included."""
+        from ase.io import read, write
+
+        from rgsaddle._core import autoneb_run
+
+        self._load(read)
+        if len(self.all_images) < 2:
+            raise ValueError("AutoNEB needs the two endpoints")
+        template = self.all_images[0]
+        pool: list[Any] = []
+
+        def surface(x: Float64) -> tuple[Float64, Float64]:
+            rows = int(x.shape[0])
+            fresh: list[Any] = []
+            while len(pool) < rows:
+                image = template.copy()
+                pool.append(image)
+                fresh.append(image)
+            if fresh:
+                self.attach_calculators(fresh)
+            natoms = len(template)
+            energies = np.empty(rows, dtype=np.float64)
+            gradients = np.empty((rows, natoms * 3), dtype=np.float64)
+            for index in range(rows):
+                atoms = pool[index]
+                atoms.set_positions(
+                    np.asarray(x[index], dtype=np.float64).reshape(natoms, 3),
+                    apply_constraint=False,
+                )
+                energies[index] = float(atoms.get_potential_energy())
+                gradients[index] = -np.ascontiguousarray(
+                    atoms.get_forces(), dtype=np.float64
+                ).reshape(-1)
+            return energies, gradients
+
+        positions = _image_positions(self.all_images)
+        local_fmax, force_tol = _staged(self.fmax, 0.025)
+        local_steps, climb_steps = _staged_int(self.maxsteps, 10000)
+        report = autoneb_run(
+            surface,
+            positions,
+            k=self.k,
+            climb=self.climb,
+            n_simul=self.n_simul,
+            n_max=self.n_max,
+            force_tol=force_tol,
+            local_force_tol=local_fmax,
+            local_max_steps=local_steps,
+            climb_max_steps=climb_steps,
+            projection=self.method,
+            tangent="improved",
+            remove_translation=self.remove_rotation_and_translation,
+            space_energy_ratio=self.space_energy_ratio,
+            max_move=_optimizer_maxstep(self.optimizer),
+            idpp=self.interpolate_method == "idpp",
+            cell=_periodic_cell(self.all_images),
+            fixed=_fixed_atoms(self.all_images),
+        )
+        finished = np.asarray(report.positions, dtype=np.float64)
+        count = int(report.n_images)
+        natoms = len(template)
+        coords = finished.reshape(count, natoms, 3)
+        self.all_images = []
+        for index in range(count):
+            image = template.copy()
+            image.set_positions(coords[index], apply_constraint=False)
+            self.all_images.append(image)
+        self.attach_calculators(self.all_images)
+        self.surface_rows = int(report.surface_rows)
+        self.ci = None if int(report.ci_index) < 0 else int(report.ci_index)
+        for index, image in enumerate(self.all_images):
+            write(f"{self.prefix}{index:03d}.traj", image)
+        return self.all_images
+
+    def _load(self, read: Any) -> None:
+        import os
+
+        if not os.path.isfile(f"{self.prefix}000.traj"):
+            raise OSError(f"No file with name {self.prefix}000.traj was found")
+        index_exists = [
+            i for i in range(self.n_max) if os.path.isfile(f"{self.prefix}{i:03d}.traj")
+        ]
+        if len(index_exists) < 2:
+            raise OSError("AutoNEB needs a start point and an end point")
+        for index, found in enumerate(index_exists):
+            if index != found:
+                raise OSError("AutoNEB files must be ordered sequentially without gaps")
+        self.all_images = [read(f"{self.prefix}{i:03d}.traj") for i in index_exists]
+        self.iteration = 0
+
+    def get_energies(self) -> list[float]:
+        """Potential energy of each image. A missing calculator result is NaN."""
+        energies = []
+        for image in self.all_images:
+            try:
+                energies.append(float(image.get_potential_energy()))
+            except RuntimeError:
+                energies.append(float("nan"))
+        return energies
+
+
+def _staged(value: Any, default: float) -> tuple[float, float]:
+    pair = _pair_of(value, "fmax")
+    if pair is None:
+        number = float(value)
+        return number, number
+    return pair
+
+
+def _staged_int(value: Any, default: int) -> tuple[int, int]:
+    del default
+    pair = _pair_of(value, "maxsteps")
+    if pair is None:
+        number = int(value)
+        return number, number
+    return int(pair[0]), int(pair[1])
+
+
+def _optimizer_maxstep(optimizer: Any) -> float:
+    """FIRE's per-atom cap, from the class signature when it names ``maxstep``."""
+    if optimizer is None:
+        return 0.2
+    import inspect
+
+    try:
+        from ase.optimize import FIRE
+    except ImportError as err:
+        raise NotImplementedError("AutoNEB optimizer is FIRE") from err
+    if not (optimizer is FIRE or (isinstance(optimizer, type) and issubclass(optimizer, FIRE))):
+        raise NotImplementedError("AutoNEB steps with the band FIRE solver; pass FIRE")
+    try:
+        signature = inspect.signature(optimizer.__init__)
+    except (TypeError, ValueError):
+        return 0.2
+    parameter = signature.parameters.get("maxstep")
+    if parameter is None or parameter.default is inspect.Signature.empty:
+        return 0.2
+    return float(parameter.default)
+
+
 def _effective_force(forces: Float64, mode: Float64, curvature: float) -> Float64:
     """ASE force after the minimum-mode translation of the gradient."""
     flat = np.asarray(forces, dtype=np.float64).reshape(-1)
