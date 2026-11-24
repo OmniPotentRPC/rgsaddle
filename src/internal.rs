@@ -930,6 +930,90 @@ mod tests {
         assert!((rz.value(shifted.view()).unwrap() - c0).abs() < 1e-10);
     }
 
+    fn collinear() -> (Array2<f64>, [[f64; 3]; 3]) {
+        let rows = [[-0.9, 0.0, 0.0], [0.1, 0.0, 0.0], [1.3, 0.0, 0.0]];
+        let mut refpos = Array2::zeros((3, 3));
+        for i in 0..3 {
+            for d in 0..3 {
+                refpos[(i, d)] = rows[i][d];
+            }
+        }
+        (refpos, rows)
+    }
+
+    /// A collinear fragment has no preferred twist about its own axis, so
+    /// the top eigenvalue of the Kabsch F-matrix is doubly degenerate. The
+    /// quaternion must be the member of that eigenspace closest to the
+    /// identity, which carries no twist, instead of whatever vector the
+    /// Jacobi sweep returns first. The eigenvalues grow with the square of
+    /// the fragment size, so the check runs over coordinates from 1e-8 to
+    /// 1e4: an absolute degeneracy gap lumps every eigenvalue of the small
+    /// fragments together and reads their turn as no rotation at all.
+    #[test]
+    fn rotation_of_a_collinear_fragment_has_no_twist() {
+        let (_, rows) = collinear();
+        let th = 0.3;
+        for scale in [1e-8, 1e-5, 1e-2, 1.0, 1e4] {
+            let fixed = scaled_rows(&rows, scale);
+            let refpos = Array2::from_shape_fn((3, 3), |(i, d)| fixed[i][d]);
+            let turned: Vec<[f64; 3]> = fixed.iter().map(|&p| rot_z(p, th)).collect();
+            let x = pack_cart(&turned);
+            let rx = Rotation::new(vec![0, 1, 2], CartAxis::X, refpos.clone()).unwrap();
+            let ry = Rotation::new(vec![0, 1, 2], CartAxis::Y, refpos.clone()).unwrap();
+            let rz = Rotation::new(vec![0, 1, 2], CartAxis::Z, refpos).unwrap();
+            let (vx, vy, vz) = (
+                rx.value(x.view()).unwrap(),
+                ry.value(x.view()).unwrap(),
+                rz.value(x.view()).unwrap(),
+            );
+            assert!(
+                (vz + th).abs() < 1e-8,
+                "scale {scale}: rotation Z = {vz}, expected {}",
+                -th
+            );
+            assert!(
+                vx.abs() < 1e-8,
+                "scale {scale}: twist about the fragment axis: {vx}"
+            );
+            assert!(
+                vy.abs() < 1e-8,
+                "scale {scale}: spurious tilt out of the plane: {vy}"
+            );
+            let q = rz.quaternion(x.view()).unwrap();
+            let expected = [(0.5 * th).cos(), 0.0, 0.0, -(0.5 * th).sin()];
+            for (got, want) in q.iter().zip(expected) {
+                assert!(
+                    (got - want).abs() < 1e-8,
+                    "scale {scale}: quaternion {q:?}, expected {expected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rotation_gradient_of_a_collinear_fragment_matches_central_difference() {
+        let (_, rows) = collinear();
+        let th = 0.2;
+        for scale in [1e-2, 1.0, 1e3] {
+            let fixed = scaled_rows(&rows, scale);
+            let refpos = Array2::from_shape_fn((3, 3), |(i, d)| fixed[i][d]);
+            let turned: Vec<[f64; 3]> = fixed.iter().map(|&p| rot_z(p, th)).collect();
+            let x = pack_cart(&turned);
+            let rz = Rotation::new(vec![0, 1, 2], CartAxis::Z, refpos).unwrap();
+            let g = rz.gradient(x.view()).unwrap();
+            let gfd = fd_grad(|v| rz.value(v).unwrap(), &x, 1e-6 * scale);
+            let err = seam_nrm2(&(&g - &gfd)) * scale;
+            assert!(
+                err < 2e-5,
+                "scale {scale}: collinear rotation gradient err={err} anal={g:?} fd={gfd:?}"
+            );
+            assert!(
+                seam_nrm2(&g) * scale > 0.1,
+                "scale {scale}: gradient vanished: {g:?}"
+            );
+        }
+    }
+
     #[test]
     fn displacement_retract_stays_on_the_set() {
         let refpos = array![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
