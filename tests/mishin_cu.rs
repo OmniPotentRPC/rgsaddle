@@ -3172,6 +3172,204 @@ fn env_csv(key: &str, default: &str) -> Vec<String> {
         .collect()
 }
 
+/// Temperatures from `RGSADDLE_TEMPS`, or `default` when that variable is unset.
+/// A set value that is empty, whitespace only, or splits into zero temperatures
+/// panics with an error that names `RGSADDLE_TEMPS`.
+fn env_temperatures(default: &str) -> Vec<f64> {
+    const KEY: &str = "RGSADDLE_TEMPS";
+    match std::env::var(KEY) {
+        Ok(text) if text.is_empty() => panic!("{KEY} is set but empty"),
+        Ok(text) if text.trim().is_empty() => panic!("{KEY} is set but whitespace only"),
+        Ok(text) => {
+            let temperatures = parse_temperature_list(&text);
+            if temperatures.is_empty() {
+                panic!("{KEY} splits into zero temperatures");
+            }
+            temperatures
+        }
+        Err(_) => {
+            let temperatures = parse_temperature_list(default);
+            assert!(
+                !temperatures.is_empty(),
+                "{KEY} default splits into zero temperatures"
+            );
+            temperatures
+        }
+    }
+}
+
+fn parse_temperature_list(text: &str) -> Vec<f64> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+            item.parse::<f64>()
+                .unwrap_or_else(|_| panic!("RGSADDLE_TEMPS temperature {item:?} is not a number"))
+        })
+        .collect()
+}
+
+static TEMPERATURE_ENV: Mutex<()> = Mutex::new(());
+
+fn temperature_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEMPERATURE_ENV
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+}
+
+fn set_temperature_env(value: Option<&str>) {
+    // The temperature tests hold `TEMPERATURE_ENV` across this write.
+    match value {
+        Some(text) => unsafe { std::env::set_var("RGSADDLE_TEMPS", text) },
+        None => unsafe { std::env::remove_var("RGSADDLE_TEMPS") },
+    }
+}
+
+struct TemperatureEnvReset {
+    previous: Option<String>,
+}
+
+impl Drop for TemperatureEnvReset {
+    fn drop(&mut self) {
+        set_temperature_env(self.previous.as_deref());
+    }
+}
+
+const TEMPERATURE_OUTPUTS: &[&str] = &[
+    "benchmarks/defect_pair_cu.csv",
+    "benchmarks/defect_pair_cu.json",
+    "benchmarks/defect_pair_shells.csv",
+    "benchmarks/defect_pair_lattice.csv",
+    "benchmarks/defect_pair_cu_notes.txt",
+    "benchmarks/defect_pair_viv.csv",
+    "benchmarks/defect_pair_census.csv",
+    "benchmarks/defect_pair_census_volume.csv",
+    "benchmarks/defect_pair_converged_volume.csv",
+    "benchmarks/defect_pair_isolated.csv",
+    "benchmarks/defect_pair_network.csv",
+];
+
+const TEMPERATURE_READERS: &[&str] = &[
+    "defect_pair_cu_catalogue",
+    "defect_pair_recombination_scan",
+    "defect_pair_census",
+    "assemble_converged recorded=false",
+    "assemble_converged recorded=true",
+    "defect_pair_isolated_rates",
+    "defect_pair_network",
+];
+
+fn temperature_reader(index: usize) {
+    match index {
+        0 => defect_pair_cu_catalogue(),
+        1 => defect_pair_recombination_scan(),
+        2 => defect_pair_census(),
+        3 => assemble_converged(false),
+        4 => assemble_converged(true),
+        5 => defect_pair_isolated_rates(),
+        6 => defect_pair_network(),
+        _ => unreachable!("temperature reader"),
+    }
+}
+
+struct OutputWatch {
+    path: PathBuf,
+    before: Option<Vec<u8>>,
+}
+
+impl OutputWatch {
+    fn capture(rel: &str) -> Self {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+        let before = std::fs::read(&path).ok();
+        Self { path, before }
+    }
+
+    fn assert_unchanged(&self) {
+        let now = std::fs::read(&self.path).ok();
+        assert_eq!(now, self.before, "output changed: {}", self.path.display());
+    }
+}
+
+impl Drop for OutputWatch {
+    fn drop(&mut self) {
+        let now = std::fs::read(&self.path).ok();
+        if now == self.before {
+            return;
+        }
+        match &self.before {
+            Some(bytes) => {
+                let _ = std::fs::write(&self.path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<String>() {
+        return text.clone();
+    }
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        return (*text).to_string();
+    }
+    "non-string panic".to_string()
+}
+
+fn assert_temps_refused(value: &str, expected: &str) {
+    let _lock = temperature_env_lock();
+    let _reset = TemperatureEnvReset {
+        previous: std::env::var("RGSADDLE_TEMPS").ok(),
+    };
+    set_temperature_env(Some(value));
+    let outputs: Vec<OutputWatch> = TEMPERATURE_OUTPUTS
+        .iter()
+        .map(|rel| OutputWatch::capture(rel))
+        .collect();
+    for (index, name) in TEMPERATURE_READERS.iter().enumerate() {
+        let result = std::panic::catch_unwind(|| temperature_reader(index));
+        for output in &outputs {
+            output.assert_unchanged();
+        }
+        match result {
+            Ok(()) => panic!("{name} reported success for {value:?}"),
+            Err(payload) => {
+                let message = panic_message(payload.as_ref());
+                assert_eq!(message, expected, "{name}");
+            }
+        }
+    }
+}
+
+#[test]
+fn empty_rgsaddle_temps_errors_and_keeps_output() {
+    assert_temps_refused("", "RGSADDLE_TEMPS is set but empty");
+}
+
+#[test]
+fn whitespace_rgsaddle_temps_errors_and_keeps_output() {
+    assert_temps_refused(" \t\n ", "RGSADDLE_TEMPS is set but whitespace only");
+}
+
+#[test]
+fn separator_rgsaddle_temps_errors_and_keeps_output() {
+    assert_temps_refused(",", "RGSADDLE_TEMPS splits into zero temperatures");
+}
+
+#[test]
+fn rgsaddle_temps_list_still_works() {
+    let _lock = temperature_env_lock();
+    let _reset = TemperatureEnvReset {
+        previous: std::env::var("RGSADDLE_TEMPS").ok(),
+    };
+    set_temperature_env(Some("300,500,700"));
+    assert_eq!(
+        env_temperatures("300,400,500,600,700"),
+        vec![300.0, 500.0, 700.0]
+    );
+}
+
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
         .ok()
@@ -4233,6 +4431,7 @@ fn asymmetry_lines(entries: &[rgsaddle::RateEntry]) -> Vec<String> {
 #[test]
 #[ignore = "release Mishin Cu defect-pair catalogue; writes benchmarks/defect_pair_cu.csv"]
 fn defect_pair_cu_catalogue() {
+    let temperatures = env_temperatures("300,400,500,600,700");
     let started = Instant::now();
     let explicit = std::env::var("RGSADDLE_REPEATS").ok();
     let mut sizes: Vec<usize> = if explicit.is_some() {
@@ -4243,10 +4442,6 @@ fn defect_pair_cu_catalogue() {
     } else {
         vec![8, 10]
     };
-    let temperatures: Vec<f64> = env_csv("RGSADDLE_TEMPS", "300,400,500,600,700")
-        .iter()
-        .map(|item| item.parse().expect("temperature"))
-        .collect();
     let max_shells = env_usize("RGSADDLE_MAX_SHELLS", 0);
     let tries = env_usize("RGSADDLE_TRIES", 8);
     let samples = env_usize("RGSADDLE_SAMPLES", 32);
@@ -4585,14 +4780,11 @@ fn pair_recombination_does_not_depend_on_the_optimizer() {
 #[test]
 #[ignore = "recombination scan followed to 1e-3 eV/A by ODE12r and steepest descent; writes benchmarks/defect_pair_shells.csv"]
 fn defect_pair_recombination_scan() {
+    let temperatures = env_temperatures("300,400,500,600,700");
     let started = Instant::now();
     let sizes: Vec<usize> = env_csv("RGSADDLE_REPEATS", "8,10")
         .iter()
         .map(|item| item.parse().expect("repeats"))
-        .collect();
-    let temperatures: Vec<f64> = env_csv("RGSADDLE_TEMPS", "300,400,500,600,700")
-        .iter()
-        .map(|item| item.parse().expect("temperature"))
         .collect();
     let copper = FastCopper::new();
     let flow = pair_relax();
@@ -4750,12 +4942,9 @@ fn census_done(text: &str) -> std::collections::HashSet<(i64, String)> {
 #[test]
 #[ignore = "flow census of every axis orbit in the 8788-atom cell on the Table 1 lattices"]
 fn defect_pair_census() {
+    let temperatures = env_temperatures("300,500,700");
     let started = Instant::now();
     let repeats = 13usize;
-    let temperatures: Vec<f64> = env_csv("RGSADDLE_TEMPS", "300,500,700")
-        .iter()
-        .map(|item| item.parse().expect("temperature"))
-        .collect();
     let copper = FastCopper::new();
     let flow = pair_relax();
     let check = pair_flow_check();
@@ -12183,6 +12372,7 @@ fn md_channel_jumps(temperature: f64) -> Option<f64> {
 /// which separates the two changes. The recorded 300 and 500 K isolated
 /// rows carry no kappa error, so that variant has no draws.
 fn assemble_converged(recorded: bool) {
+    let temperatures = env_temperatures("300,500,700");
     let started = Instant::now();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks");
     let census = std::fs::read_to_string(root.join("defect_pair_census.csv")).expect("census");
@@ -12207,10 +12397,6 @@ fn assemble_converged(recorded: bool) {
     let mut out = String::from(
         "temperature_K,estimator,volume_over_Omega,sigma,spontaneous_sites,R_eff_A,demkowicz_8788,note\n",
     );
-    let temperatures: Vec<f64> = env_csv("RGSADDLE_TEMPS", "300,500,700")
-        .iter()
-        .map(|item| item.parse().expect("temperature"))
-        .collect();
     for temperature in temperatures {
         let a = demkowicz_lattice(temperature);
         let fractions = census_fractions(&census, temperature);
@@ -12703,6 +12889,7 @@ fn isolated_rate(copper: &FastCopper, checkpoint: &Mutex<File>, hop: &str, tempe
 #[test]
 #[ignore = "isolated-dumbbell translation and rotation PAFI rates from converged end states"]
 fn defect_pair_isolated_rates() {
+    let temperatures = env_temperatures("300,500,700");
     let started = Instant::now();
     let copper = FastCopper::new();
     let path =
@@ -12712,8 +12899,7 @@ fn defect_pair_isolated_rates() {
     }
     let prior = std::fs::read_to_string(&path).expect("isolated");
     let mut jobs = Vec::new();
-    for temperature in env_csv("RGSADDLE_TEMPS", "300,500,700") {
-        let temperature: f64 = temperature.parse().expect("temperature");
+    for temperature in temperatures {
         for hop in env_csv("RGSADDLE_HOPS", "translate,rotate") {
             let direction = if hop == "rotate" {
                 "tangential"
@@ -14119,12 +14305,9 @@ fn isolated_network_moves() -> [(&'static str, rgsaddle::PairConfig, rgsaddle::V
 #[test]
 #[ignore = "near-shell saddles of every symmetry-distinct hop in the 8788-atom cell on the Table 1 lattices"]
 fn defect_pair_network() {
+    let temperatures = env_temperatures("300,500,700");
     let started = Instant::now();
     let repeats = 13usize;
-    let temperatures: Vec<f64> = env_csv("RGSADDLE_TEMPS", "300,500,700")
-        .iter()
-        .map(|item| item.parse().expect("temperature"))
-        .collect();
     let limit: usize = env_csv("RGSADDLE_HOP_LIMIT", "100000")[0]
         .parse()
         .expect("hop limit");
