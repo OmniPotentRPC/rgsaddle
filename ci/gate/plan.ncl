@@ -8,7 +8,7 @@ let gate_matrix = [
 ] in
 let plan = {
   schema = 1,
-  max_cpus = 1,
+  max_cpus = 8,
   eessi = {
     stack_version = "2026.06",
     compiler = "GCCcore/15.2.0",
