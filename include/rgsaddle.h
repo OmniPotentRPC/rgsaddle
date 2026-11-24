@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 65u
+#define RGSADDLE_ABI_MINOR 67u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1243,7 +1243,7 @@ rgsaddle_status_t rgsaddle_idpp_path(int64_t n_images, int64_t n_atoms,
                                      double max_move, double *out);
 
 /**
- * Translation rotation internal coordinates with splicing, ABI minor 63.
+ * Translation rotation internal coordinates with splicing, ABI minor 67.
  *
  * `initial` and `out` must be non-null buffers owned by the caller, each
  * holding `n_images * 3 * n_atoms` doubles in image-major order. `initial`

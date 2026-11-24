@@ -47,7 +47,7 @@ solver error.  Periodic AutoNEB rejects TRICS because rotations and the
 diagnostic require unwrapped free-space coordinates.
 
 * C
-ABI minor 63 adds =rgsaddle_trics_path=.  The caller supplies an initial path
+ABI minor 67 adds =rgsaddle_trics_path=.  The caller supplies an initial path
 from linear interpolation, =rgsaddle_idpp_path=, or another source.  Input and
 output each hold =n_images * 3 * n_atoms= doubles in image-major order.
 

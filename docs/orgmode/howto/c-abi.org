@@ -1,7 +1,7 @@
 #+TITLE: Use the C and C++ interfaces
 #+OPTIONS: toc:nil num:nil
 
-~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 65. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session. A meson project takes the headers from the top-level ~meson.build~; see @@rst::doc:`the meson how-to <meson>`@@.
+~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 67. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session. A meson project takes the headers from the top-level ~meson.build~; see @@rst::doc:`the meson how-to <meson>`@@.
 
 A surface callback returns ~rgsaddle_status_t~ and receives one ~rgsaddle_surface_request_t~. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, ~RGSADDLE_NOT_EQUILIBRATED~ and ~RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES~ report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -18,7 +18,7 @@ Band and minimum-mode force norms are selected by ~rgsaddle_band_set_force_gate~
 
 ~rgsaddle_idpp_path~ (ABI minor 19) writes an initial path. ~n_images~ counts the endpoints and must be at least 3. ~reactant~ and ~product~ each hold ~3 * n_atoms~ doubles. ~out~ holds ~n_images * 3 * n_atoms~ doubles, image-major. ~cell~ is a row-major 3x3 lattice, or NULL in free space. A singular cell returns ~RGSADDLE_INVALID_PARAMETER~. Interior images are relaxed toward interpolated minimum-image pair distances. ~max_iterations~, ~grad_tol~, and ~max_move~ are the per-image L-BFGS stop. The call does not evaluate a surface.
 
-~rgsaddle_trics_path~ (ABI minor 63) refines an initial free-space path.
+~rgsaddle_trics_path~ (ABI minor 67) refines an initial free-space path.
 ~initial~ and ~out~ each hold ~n_images * 3 * n_atoms~ doubles.
 The inversion, diagnostic, and splice arguments correspond to
 =TricsConfig=, and every length among them is in angstrom.
