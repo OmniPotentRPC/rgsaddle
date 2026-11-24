@@ -118,7 +118,10 @@ impl Strain {
         }
     }
 
-    /// Symmetric 3×3 strain tensor.
+    /// Stored 3×3 strain tensor, returned without further symmetrization.
+    ///
+    /// [`Self::from_tensor`] symmetrizes its input. The named shear
+    /// constructors store their documented one-sided entries verbatim.
     pub fn tensor(self) -> M3 {
         self.tensor
     }

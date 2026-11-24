@@ -49,11 +49,11 @@ pub enum Equality {
         /// Required value returned by `coord`.
         target: f64,
     },
-    /// Fix a caller-defined linear Cartesian displacement.
+    /// Fix the quadratic Cartesian displacement `dx^T W dx`.
     Displacement {
-        /// Normalized displacement coordinate.
+        /// Quadratic displacement coordinate.
         coord: Displacement,
-        /// Required projection onto `coord`, in the frame's length unit.
+        /// Required value of the quadratic form, in squared length units.
         target: f64,
     },
     /// Host-supplied pair. Evaluation is the Wilson bond, not vocn.
