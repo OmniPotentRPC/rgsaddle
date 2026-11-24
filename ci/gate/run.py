@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PLAN_PATH = ROOT / "ci" / "gate" / "plan.json"
+EESSI_ROOT = pathlib.Path("/cvmfs/software.eessi.io")
 FORBIDDEN_OUTPUT = re.compile(
     r"(?m)(?:^|\s)(?:error(?:\[|:|\s)|FAILED(?:\s|$)|panicked(?:\s|$))"
 )
@@ -99,15 +100,19 @@ def test_counts(output: str) -> list[str]:
     return counts
 
 
+def shell_argv(script: str) -> list[str]:
+    # A login shell rereads the profile files, which reset PATH and drop
+    # tools such as eb-local that the caller put on it.
+    return ["bash", "--noprofile", "--norc", "-c", script]
+
+
 def execute_commands(
     commands: list[dict[str, object]], prefix: str = ""
 ) -> list[CommandResult]:
     results: list[CommandResult] = []
     for command in commands:
         argv = [str(value) for value in command["argv"]]
-        actual = (
-            ["bash", "-lc", f"{prefix}\n{shlex.join(argv)}"] if prefix else argv
-        )
+        actual = shell_argv(f"{prefix}\n{shlex.join(argv)}") if prefix else argv
         returncode, output = run_capture(actual)
         kind = str(command["kind"])
         results.append(
@@ -179,13 +184,13 @@ def select_rust_module(output: str, prefix: str, suffix: str) -> str | None:
 def eessi_leg(plan: dict[str, object]) -> LegResult:
     config = plan["eessi"]
     stack = str(config["stack_version"])
-    init = pathlib.Path(
-        f"/cvmfs/software.eessi.io/versions/{stack}/init/lmod/bash"
-    )
+    init = EESSI_ROOT / "versions" / stack / "init" / "lmod" / "bash"
+    modules = EESSI_ROOT / "init" / "modules"
+    eb_local = shutil.which("eb-local")
     missing = []
     if not init.is_file():
         missing.append(str(init))
-    if shutil.which("eb-local") is None:
+    if eb_local is None:
         missing.append("eb-local")
     if missing:
         return LegResult(
@@ -202,10 +207,10 @@ def eessi_leg(plan: dict[str, object]) -> LegResult:
 
     module_probe = (
         f"source {shlex.quote(str(init))}\n"
-        "module use /cvmfs/software.eessi.io/init/modules\n"
+        f"module use {shlex.quote(str(modules))}\n"
         "module -t avail Rust 2>&1"
     )
-    probe_code, module_output = run_capture(["bash", "-lc", module_probe])
+    probe_code, module_output = run_capture(shell_argv(module_probe))
     rust_module = select_rust_module(
         module_output,
         str(config["rust_module_prefix"]),
@@ -229,15 +234,15 @@ def eessi_leg(plan: dict[str, object]) -> LegResult:
 
     setup = (
         f"source {shlex.quote(str(init))}\n"
-        "module use /cvmfs/software.eessi.io/init/modules\n"
+        f"module use {shlex.quote(str(modules))}\n"
         "unset LD_LIBRARY_PATH\n"
         f"export EESSI_VERSION={shlex.quote(stack)}\n"
-        f'eval "$(eb-local dev {shlex.quote(rust_module)})"'
+        f'eval "$({shlex.quote(eb_local)} dev {shlex.quote(rust_module)})"'
     )
     commands = plan["legs"]["eessi"]["commands"]
     results = execute_commands(commands, prefix=setup)
     list_code, loaded_modules = run_capture(
-        ["bash", "-lc", f"{setup}\nmodule -t list 2>&1"]
+        shell_argv(f"{setup}\nmodule -t list 2>&1")
     )
     module_list = "; ".join(
         line.strip()
@@ -245,11 +250,7 @@ def eessi_leg(plan: dict[str, object]) -> LegResult:
         if re.fullmatch(r"[A-Za-z0-9+_.-]+/[A-Za-z0-9+_.-]+", line.strip())
     )
     version_code, version_output = run_capture(
-        [
-            "bash",
-            "-lc",
-            f"{setup}\nrustc --version\ncargo --version\ngcc --version",
-        ]
+        shell_argv(f"{setup}\nrustc --version\ncargo --version\ngcc --version")
     )
     tool_versions = [
         line.strip()
