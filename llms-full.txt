@@ -159,7 +159,7 @@ The top-level `meson.build` provides the headers as the dependency `rgsaddle-hea
 
 ## Choose linear, IDPP, or TRICS initialization
 `howto/path-initialization` compares the generic `PathInitializer` choices,
-shows how TRICS refines a linear or IDPP seed, and covers AutoNEB insertion.
+shows how TRICS refines a linear or IDPP seed, and gives the C entry point.
 
 ## Pick tangents, springs, projections
 | Kind             | Variants                                                             |
@@ -562,6 +562,7 @@ Their `image` is then the climbing image's band index.
 `rgsaddle_idpp_path` writes the image-dependent pair potential initial path with its endpoints.
 It takes a row-major cell or NULL.
 From minor 64, `rgsaddle_geodesic_config_default`, `rgsaddle_geodesic_path`, and `rgsaddle_geodesic_morse` interpolate a path in a redundant coordinate chart (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303). `rgsaddle_geodesic_path` takes a host chart. `rgsaddle_geodesic_morse` uses Eq. (7) with alpha 1.7 and beta 0.01. A NULL config selects the defaults, including an image cap of 32, so it requires `n_images` of at least 32. A supplied cap above `n_images` is `RGSADDLE_INVALID_PARAMETER`.
+From minor 63, `rgsaddle_trics_path` refines an image-major unwrapped Cartesian path in translation-rotation internal coordinates with splicing and writes the refined path to `out` (which may alias `initial` for in-place refinement). Its length controls are in angstrom and `length_per_angstrom` converts the caller's coordinates.
 `rgsaddle_ocineb_step` reports the hand-off phase (band, tangent alignment, or minimum-mode translation).
 `rgsaddle_connect` runs the double-ended search of `connect` to completion on two endpoint arrays and a host surface.
 The surface writes energy and the Cartesian gradient for one image.
@@ -3761,6 +3762,77 @@ translation and the number of equivalent reaction paths consistently on
 both sides of the comparison. Convert the inverse time unit to inverse
 seconds before comparing with a published rate.
 
+# Choose a path initializer (`docs/orgmode/howto/path-initialization.org`)
+
+> Choosing linear, IDPP, or TRICS path initializers across NEB, AutoNEB, and C
+
+Use `PathInitializer` when a driver needs the same choice as NEB or Gaussian
+process NEB.  It accepts two endpoint geometries and returns an image-major
+Cartesian path.
+
+## Choose the method
+| Initializer | Choose it when | Important limit |
+| --- | --- | --- |
+| `Linear` | The endpoint mapping is already good and no atom collision or large group rotation lies between the endpoints. | It does not preserve molecular geometry. |
+| `Idpp` | Pair-distance interpolation is enough to remove collisions. | Each image is relaxed independently. |
+| `Trics` | Bonds, bends, torsions, or fragment rotations should change in molecular internal coordinates, especially when one coordinate chart becomes singular. | Coordinates must be unwrapped and nonperiodic. |
+
+TRICS refines a seed path.  `TricsSeed::Linear` is the default.
+`TricsSeed::Idpp` first creates an IDPP path and then applies the TRICS
+diagnostic, segmented interpolation, and splicing.
+
+```rust
+use rgsaddle::{
+    IdppConfig, PathInitializer, TricsSeed, TricsStartConfig,
+    initialize_path,
+};
+
+let start = TricsStartConfig::default()
+    .with_seed(TricsSeed::Idpp(IdppConfig::default()));
+let path = initialize_path(
+    reactant.view(),
+    product.view(),
+    9,
+    None,
+    &PathInitializer::Trics(start),
+)?;
+```
+
+Pass `path` to `BandSession::new` or to a Gaussian process NEB host.  The
+initializer has no potential energy callback and does not evaluate a surface.
+The direct `trics_path` function accepts an existing path from any source.
+
+## AutoNEB
+Select TRICS for every inserted AutoNEB image with
+`AutoNebTuning::default().with_trics(TricsStartConfig::default())`, leaving
+`interpolant` at its default.  AutoNEB samples a
+seven-image TRICS segment and takes its midpoint.  If iterative inversion of
+that local segment fails or produces a degenerate midpoint, insertion returns a
+solver error.  Periodic AutoNEB rejects TRICS because rotations and the
+diagnostic require unwrapped free-space coordinates.
+
+## C
+ABI minor 63 adds `rgsaddle_trics_path`.  The caller supplies an initial path
+from linear interpolation, `rgsaddle_idpp_path`, or another source.  Input and
+output each hold `n_images * 3 * n_atoms` doubles in image-major order.
+
+```c
+rgsaddle_status_t status = rgsaddle_trics_path(
+    n_images, n_atoms, initial,
+    50, 1.0e-8, 0.1,
+    1, 0.0018, 1000,
+    1.0, output);
+```
+
+The tolerances and the move cap are in angstrom.  Pass the length of one
+angstrom in the caller's coordinates as the argument before `output`, here
+1.0 for a path in angstrom and 0.1 for nanometres.  In Rust the same value is
+`TricsConfig::length_per_angstrom`.
+
+The C function uses geometry-only bond inference.  Rust callers that know the
+topology can set `TricConfig::bonds` explicitly.  Python does not expose an
+IDPP path initializer, so there is no separate Python TRICS wrapper.
+
 # Read a molecular frame (`docs/orgmode/howto/io.org`)
 
 > Reading and writing CON frames and restart bands
@@ -3801,6 +3873,21 @@ Band and minimum-mode force norms are selected by `rgsaddle_band_set_force_gate`
 `rgsaddle_ocineb_create` (ABI minor 20) builds the climbing-image band that hands the climbing image to a minimum-mode search. `rgsaddle_ocineb_step` is one band move, one alignment of the band tangent with the lowest mode, or one minimum-mode translation, and `rgsaddle_ocineb_report_t` names that phase. `n_images` is at least 3. The alignment tolerance must be at least 1/sqrt(2). A solid-state band is refused. `rgsaddle_ocineb_positions` copies the band, `rgsaddle_ocineb_reset` drops the hand-off state, and `rgsaddle_ocineb_free` releases the session. From minor 21 the hand-off is the band's own refinement with these controls: the trigger is on the climbing image's largest per-atom force, `rgsaddle_minmode_config_t` supplies only the mode estimate, including the same version-gated `rotation_angle_tol` interpretation as `rgsaddle_minmode_create`, and a `RGSADDLE_OCINEB_MINMODE` step is one P-RFO climb step. `RGSADDLE_BAND_NO_MIN_MODE` is not read here. The climbing image's requests reach the point surface as one geometry with `image = -1` and without `RGSADDLE_REQ_CLIMBING_IMAGE`.
 
 `rgsaddle_idpp_path` (ABI minor 19) writes an initial path. `n_images` counts the endpoints and must be at least 3. `reactant` and `product` each hold `3 * n_atoms` doubles. `out` holds `n_images * 3 * n_atoms` doubles, image-major. `cell` is a row-major 3x3 lattice, or NULL in free space. A singular cell returns `RGSADDLE_INVALID_PARAMETER`. Interior images are relaxed toward interpolated minimum-image pair distances. `max_iterations`, `grad_tol`, and `max_move` are the per-image L-BFGS stop. The call does not evaluate a surface.
+
+`rgsaddle_trics_path` (ABI minor 63) refines an initial free-space path.
+`initial` and `out` each hold `n_images * 3 * n_atoms` doubles.
+The inversion, diagnostic, and splice arguments correspond to
+`TricsConfig`, and every length among them is in angstrom.
+`length_per_angstrom` is the length of one angstrom in the caller's
+coordinates, 1.0 for angstrom and 0.1 for nanometres; a path in other units
+is converted before the work and back before it is written.  A non-positive
+or non-finite value returns `RGSADDLE_INVALID_PARAMETER`.  The call does not
+evaluate a surface.  A diagnostic maze
+with no stable route, a coordinate singularity that damped inversion cannot
+pass, or an inversion or splice that does not converge returns
+`RGSADDLE_SOLVER`.  See
+`howto/path-initialization` for the Rust selector and the published splice
+tolerance.
 
 `rgsaddle_connect` (ABI minor 18) is the run-to-completion double-ended search. Stamp `rgsaddle_connect_config_t` with the ABI version. `max_calls` is a positive iteration cap and `force_tol` is the Euclidean stop. A nonzero `quench_nodes` minimizes a node created by a split before the next segment. `left` and `right` each hold `3 * n_atoms` positions, and `position` receives the returned geometry. The surface is called with one image and writes the energy and the Cartesian gradient. `rgsaddle_connect_report_t` carries the energy, the Euclidean gradient norm, the kind (`s`, `u`, or `f`), the Hessian index, and the evaluation count. The count includes finite differences that decide a step or an index. The Lanczos acceptance estimates the next curvature with two actions and does not build a dense Hessian. The COMPASS fallback does, and that Hessian is counted.
 
@@ -4917,6 +5004,143 @@ simulation-cell convention described by Daan Frenkel and Berend Smit,
 /Understanding Molecular Simulation/, 2nd edition, Academic Press (2002),
 doi:10.1016/B978-0-12-267351-1.X5000-7.
 
+# Translation rotation internal coordinates with splicing (`docs/orgmode/explanation/trics.org`)
+
+> Translation-rotation internal coordinates, stability diagnostic maze, and segment splicing
+
+TRICS constructs a molecular path in internal coordinates while changing
+coordinate systems before an angle or dihedral becomes singular.  The method
+is due to Park, Song, and Wang.  The implementation follows the algorithmic
+ideas in the BSD licensed geomeTRIC reference implementation without
+including its source.
+
+## Translation rotation internal coordinates
+For a fragment, the primitive vector \(p(x)\) contains bond distances,
+angles, dihedrals, three mean translations, and three rotations relative to
+the reference geometry.  Its Wilson matrix and metric are
+
+\[
+B_p ` \frac{\partial p}{\partial x}, \qquad G_p ` B_p B_p^{\mathsf T}.
+\]
+
+Let \(U\) contain the eigenvectors of \(G_p\) whose eigenvalues pass the
+configured absolute rank threshold.  The nonredundant TRIC coordinates and
+their Wilson matrix are
+
+\[
+q ` U^{\mathsf T}p, \qquad B_q ` U^{\mathsf T}B_p.
+\]
+
+The translation and rotation coordinates keep disconnected fragments in the
+same coordinate construction.  Fragment rotations are scaled by the
+fragment radius of gyration.  Ordinary angles switch to two linear bend
+directions at 155 degrees, matching the angular warning threshold.  Out of
+plane primitives complete suitable three connected centers.
+
+Bonds extended through every linear angle at either end form atom lines.  A
+torsion about a line is a dihedral whose two central atoms lie on the line
+and whose terminal atoms are bonded off it, so the twist of an allene is
+carried across its linear center.  No dihedral is built with a linear angle,
+and a line with no atoms bonded off both ends, such as acetylene, carries no
+dihedral at all.
+
+## Stability diagnostic
+A separate TRIC system \(Q_i\) is built at each initial image \(x_i\).  The
+diagnostic matrix evaluates each system on every image,
+
+\[
+D_{ij} = \max_{\alpha \in Q_i} d_\alpha(x_j).
+\]
+
+Here \(d_\alpha\) is zero for a regular primitive, one for a warning, two for
+an unstable angular primitive, and three or above for imminent failure.
+Distances, translations, and rotations are regular unless their geometry is
+invalid.  Dihedrals use adjacent angle boundaries of 155, 165, and 175
+degrees.  Linear bends use absolute cosine boundaries of 0.8, 0.6, and 0.4.
+Out of plane coordinates use 0.95, 0.98, and 0.99 for each adjacent angle
+and add the two scores, so their diagnostic can reach six.
+
+Entries at or below `diagnostic_threshold` form an internal coordinate maze.
+The selection prunes dead ends, drives square cars from both the left and
+right edges, minimizes the number of segments, and then chooses the largest
+successful car.  The splice width is the next even integer nearest one tenth
+of the image count, bounded from two through six.  Short segments are merged
+before each segment is expanded by half that width.
+
+## Segment interpolation and inversion
+Inside one stable interval, the internal displacement is divided uniformly,
+
+\[
+q(t_k) = q(0) + t_k\Delta q,\qquad
+t_k = \frac{k}{n-1}.
+\]
+
+Each image is recovered iteratively.  With internal residual \(r\), one
+Cartesian update is
+
+\[
+\Delta x = B_q^{\mathsf T}
+           (B_q B_q^{\mathsf T})^{-1}r.
+\]
+
+The largest atom move is bounded by `TricInversionConfig::max_atom_move`.
+An update that increases the residual, or that lands where a primitive or
+its Wilson row is singular, is rejected and retried at half damping.
+Accepted updates increase damping by a factor of 1.2 up to one.  Five
+consecutive rejected updates, a damped step below tolerance, or reaching the
+iteration cap above tolerance returns a solver error.  A start geometry or
+segment endpoint at which the system is singular is also a solver error,
+as is a diagnostic maze with no stable route.
+Following the reference implementation, the aligned Cartesian endpoint must
+be within 0.01 Angstrom.  The implementation tries the reverse direction and
+alternate stable coordinate systems when a candidate does not converge.
+
+## Splicing and concatenation
+Write \(\chi_s(x_a,x_b,t_a,t_b;t)\) for interpolation at \(t\) in segment
+system \(s\).  For two overlapping segments, their endpoint iteration is
+
+\[
+x_a \leftarrow \chi_1(x_b,x_1,t_b,1;t_a), \qquad
+x_b \leftarrow \chi_0(x_0,x_a,0,t_a;t_b).
+\]
+
+For splice width \(L\), the paired Cartesian geometries are the left
+segment's \(-L\) and \(-1\) images and the right segment's 0 and \(L-1\)
+images.  All neighboring pairs are updated from the preceding iteration.
+Splice damping starts at one, decreases by a factor of 0.8 to a floor of 0.2
+after a nondecreasing mismatch, and resets to one after three decreases.
+Iteration stops when the maximum Cartesian displacement of any atom between
+overlapping segment endpoints is at most
+`TricsConfig::splice_tolerance`.  Its default is
+`TRICS_SPLICE_TOLERANCE_ANGSTROM`, \(1.8\times10^{-3}\) Angstrom.
+
+The final path takes images from the left segment up to the midpoint of each
+overlap and from the right segment after it.  If one system is stable across
+the whole path, TRICS interpolates once and skips the splice iteration.
+Three images split into two segments of two images that share the middle
+image.  Neither segment has an interior image to place, so TRICS returns
+`SaddleError::Solver` (`RGSADDLE_SOLVER` from C) and does not return the
+unrefined path.  A path of four or more images still splices, because its
+segments then overlap by two images.
+
+The coordinate construction is kept in `rgsaddle::trics` behind an
+engine-independent Cartesian boundary.  It can therefore serve future
+geometry optimizers without coupling `rgsaddle` to a potential engine or
+changing `rgmin`.
+
+## Length unit
+Every absolute length threshold is stated in angstrom: the splice tolerance,
+the inversion move cap and residual, and the 0.01 Angstrom endpoint agreement
+above.  `TricsConfig::length_per_angstrom` is the length of one angstrom in
+the caller's coordinates (1 by default, 0.1 for nanometres, about 1.8897 for
+bohr).  `trics_path` divides the path by it before the work and multiplies
+the result by it afterwards, and returns the first and last image exactly as
+given, so a path in any unit needs only that one option.  The finite
+difference step of the primitive derivatives is a fraction of the size of the
+atoms it moves and does not depend on the unit.  The Kabsch rotation inside
+the rotation coordinates treats two eigenvalues as equal when they differ by
+a fixed fraction of the largest, so it does not depend on the unit either.
+
 # Architecture (`docs/orgmode/reference/architecture.org`)
 
 > Crate architecture and module boundaries
@@ -5212,6 +5436,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_samd_position`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_samd_free`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_idpp_path`. Purpose: Image dependent pair potential initial path. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_trics_path`. Purpose: Translation rotation internal coordinates with splicing, ABI minor 63. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_ocineb_create`. Purpose: Climbing-image band that hands the climbing image to a min-mode climb. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_ocineb_step`. Purpose: One band step, one alignment, or one P-RFO climb step. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_ocineb_positions`. Purpose: Copy the current band out (n_images * 3 * n_atoms doubles). Parameters: the declaration. Units: the caller's.

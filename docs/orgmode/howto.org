@@ -25,7 +25,7 @@ The top-level =meson.build= provides the headers as the dependency =rgsaddle-hea
 
 * Choose linear, IDPP, or TRICS initialization
 =howto/path-initialization= compares the generic =PathInitializer= choices,
-shows how TRICS refines a linear or IDPP seed, and covers AutoNEB insertion.
+shows how TRICS refines a linear or IDPP seed, and gives the C entry point.
 
 * Pick tangents, springs, projections
 | Kind             | Variants                                                             |

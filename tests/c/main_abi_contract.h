@@ -345,6 +345,13 @@ typedef rgsaddle_status_t (*abi19_signature_rgsaddle_idpp_path)(int64_t n_images
                                      double grad_tol, double max_move, double *out);
 _Static_assert(_Generic(&rgsaddle_idpp_path, abi19_signature_rgsaddle_idpp_path: 1, default: 0), "rgsaddle_idpp_path signature");
 
+typedef rgsaddle_status_t (*abi63_signature_rgsaddle_trics_path)(
+    int64_t n_images, int64_t n_atoms, const double *initial,
+    int64_t max_inversion_iterations, double inversion_tolerance,
+    double max_move, int32_t diagnostic_threshold, double splice_tolerance,
+    int64_t max_splice_iterations, double length_per_angstrom, double *out);
+_Static_assert(_Generic(&rgsaddle_trics_path, abi63_signature_rgsaddle_trics_path: 1, default: 0), "rgsaddle_trics_path signature");
+
 typedef RgsaddleOcineb *(*abi20_signature_rgsaddle_ocineb_create)(
     const rgsaddle_band_config_t *band, const rgsaddle_minmode_config_t *minmode,
     const rgsaddle_ocineb_config_t *config, int64_t n_images, int64_t n_atoms,
