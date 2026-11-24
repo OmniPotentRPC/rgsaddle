@@ -507,7 +507,6 @@ fn vineyard_prefactor_has_one_factor_of_frequency() {
 }
 
 #[test]
-#[ignore = "contract test: enabled with the joint Vineyard implementation"]
 fn vineyard_rejects_more_than_one_missing_saddle_mode() {
     let error = vineyard_prefactor(&[1.0, 2.0], &[], 1.0).unwrap_err();
     assert!(error.to_string().contains("exactly one"));
