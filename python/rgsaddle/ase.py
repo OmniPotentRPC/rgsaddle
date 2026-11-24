@@ -1070,15 +1070,17 @@ def _pair_of(value: Any, name: str) -> tuple[float, float] | None:
 class AutoNEBReport:
     """Outcome of :meth:`AutoNEB.run`.
 
-    ``status`` is 1 when the last stage met its force stop and 0 when it
-    ran out of steps, and ``converged`` is that test. ``max_force`` is the
-    largest force component of the last stage, in the calculator's force
-    units. ``iteration`` counts the steps of the last stage.
-    ``ci_index`` is the climbing image or -1, ``surface_rows`` counts the
-    force calls, and ``n_images`` includes the endpoints. ``positions`` is
-    the finished band, shaped ``(n_images, 3N)``, and ``images`` holds the
-    same band as ``Atoms`` with the calculators attached. These are the
-    fields of :class:`rgsaddle._core.AutonebReport` plus ``images``.
+    The fields are ``status``, ``max_force``, ``ci_index``,
+    ``surface_rows``, ``n_images``, ``iteration``, ``positions``, and
+    ``images``. ``status`` is 1 when the last stage met its force stop
+    and 0 when it ran out of steps, and ``converged`` is that test.
+    ``max_force`` is the largest force component of the last stage, in
+    the calculator's force units. ``iteration`` counts the steps of the
+    last stage. ``ci_index`` is the climbing image or -1,
+    ``surface_rows`` counts the force calls, and ``n_images`` includes
+    the endpoints. ``positions`` is the finished band, shaped
+    ``(n_images, 3N)``, and ``images`` holds the same band as ``Atoms``
+    with the calculators attached.
     """
 
     status: int
@@ -1109,12 +1111,13 @@ class AutoNEB:
     which is the value ASE applies. ``smooth_curve=True`` is refused.
     Final images are written back to ``prefixNNN.traj``.
 
-    ``run`` returns an :class:`AutoNEBReport`, whose ``images`` are the
-    finished band. ``status`` and ``max_force`` tell a caller whether the
-    last stage converged, because ASE's own ``run`` returns nothing and
-    an exhausted step budget is not an error. ``all_images``,
-    ``iteration``, ``status``, ``max_force``, ``surface_rows``, and ``ci``
-    hold the same values after the call.
+    ``run`` returns an :class:`AutoNEBReport`: ``status``, ``max_force``,
+    ``ci_index``, ``surface_rows``, ``n_images``, ``iteration``,
+    ``positions``, and ``images``. ``status`` and ``max_force`` tell a
+    caller whether the last stage converged, because ASE's own ``run``
+    returns nothing and an exhausted step budget is not an error.
+    ``all_images``, ``iteration``, ``status``, ``max_force``,
+    ``surface_rows``, and ``ci`` hold the same values after the call.
     """
 
     def __init__(
@@ -1183,9 +1186,9 @@ class AutoNEB:
     def run(self) -> AutoNEBReport:
         """Grow and relax the band, then report how the last stage ended.
 
-        The report carries ``status``, ``max_force``, and ``iteration`` of
-        the last stage, and ``images``, the finished band with its
-        endpoints.
+        Returns an :class:`AutoNEBReport` with ``status``, ``max_force``,
+        ``ci_index``, ``surface_rows``, ``n_images``, ``iteration``,
+        ``positions``, and ``images``.
         """
         from ase.io import read, write
 
