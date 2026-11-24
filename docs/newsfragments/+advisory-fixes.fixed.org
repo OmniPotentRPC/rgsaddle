@@ -1,0 +1,8 @@
+The LAMMPS lambda path reads the live session potential when =lammpc_session_md_potential_energy= is absent, and a lambda of one does not require the mixing hook.
+=LammpsHyperplaneSampler= reports =excluded_modes= as constrained directions, so those modes reduce =free_dimensions=.
+=HarmonicExpansion::hessian_vector= returns a non finite error when its direction is not finite.
+The crystal identity check rejects a lattice translation.
+The status switch test selects its compiler through the =cc= crate and writes the binary in a temporary directory.
+Python maps =NOT_EQUILIBRATED= and =INSUFFICIENT_EFFECTIVE_SAMPLES= to the C values.
+=RGSADDLE_NON_FINITE= and =RGSADDLE_ABI_MISMATCH= are documented. The ABI minor is unchanged.
+The min mode position length comparison uses one signed type.
