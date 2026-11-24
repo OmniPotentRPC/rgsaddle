@@ -213,25 +213,7 @@ impl Rotation {
 
     fn f_eigen(&self, x: ArrayView1<f64>) -> Result<(f64, [f64; 4]), crate::SaddleError> {
         let f = self.f_matrix(x)?;
-        let (evals, evecs) = jacobi4(f);
-        let mut imax = 0;
-        for i in 1..4 {
-            if evals[i] > evals[imax] {
-                imax = i;
-            }
-        }
-        let mut q = [
-            evecs[0][imax],
-            evecs[1][imax],
-            evecs[2][imax],
-            evecs[3][imax],
-        ];
-        if q[0] < 0.0 {
-            for v in &mut q {
-                *v = -*v;
-            }
-        }
-        Ok((evals[imax], q))
+        Ok(max_kabsch_quaternion(&f))
     }
 
     fn f_matrix(&self, x: ArrayView1<f64>) -> Result<[[f64; 4]; 4], crate::SaddleError> {
@@ -589,79 +571,109 @@ fn asinc_deriv(x: f64) -> f64 {
     (asinc(x + h) - asinc(x - h)) / (2.0 * h)
 }
 
+/// Gap under which two eigenvalues of the Kabsch F-matrix count as equal.
+///
+/// The F-matrix is quadratic in the coordinates, so its eigenvalues scale
+/// with the square of the fragment size. The gap is therefore relative to
+/// the largest eigenvalue magnitude and the same fragment read in any
+/// length unit selects the same eigenspace.
+fn degeneracy_tolerance(evals: &[f64; 4]) -> f64 {
+    1e-10
+        * evals
+            .iter()
+            .fold(0.0_f64, |scale, value| scale.max(value.abs()))
+}
+
+fn max_kabsch_quaternion(f: &[[f64; 4]; 4]) -> (f64, [f64; 4]) {
+    let (evals, evecs) = jacobi4(*f);
+    let mut imax = 0;
+    for i in 1..4 {
+        if evals[i] > evals[imax] {
+            imax = i;
+        }
+    }
+    let lam = evals[imax];
+    let tol = degeneracy_tolerance(&evals);
+    let mut q = [0.0; 4];
+    for j in 0..4 {
+        if (lam - evals[j]).abs() <= tol {
+            let weight = evecs[0][j];
+            for (qi, row) in q.iter_mut().zip(&evecs) {
+                *qi += weight * row[j];
+            }
+        }
+    }
+    let norm = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if norm > 1e-12 {
+        for qi in &mut q {
+            *qi /= norm;
+        }
+    } else {
+        q = [
+            evecs[0][imax],
+            evecs[1][imax],
+            evecs[2][imax],
+            evecs[3][imax],
+        ];
+    }
+    if q[0] < 0.0 {
+        for v in &mut q {
+            *v = -*v;
+        }
+    }
+    (lam, q)
+}
+
 /// Rightmost-eigenvector JVP: `pinv(λI - F) (dF q - (q^T dF q) q)`.
 fn eigvec_jvp(f: &[[f64; 4]; 4], lam: f64, q: &[f64; 4], df: &[[f64; 4]; 4]) -> [f64; 4] {
+    let (evals, evecs) = jacobi4(*f);
+    let tol = degeneracy_tolerance(&evals);
     let mut dfq = [0.0; 4];
     for i in 0..4 {
         for (dfij, qj) in df[i].iter().zip(q) {
             dfq[i] += dfij * qj;
         }
     }
-    let mut ldot = 0.0;
-    for i in 0..4 {
-        ldot += q[i] * dfq[i];
-    }
-    let mut rhs = [0.0; 4];
-    for i in 0..4 {
-        rhs[i] = dfq[i] - ldot * q[i];
-    }
-    // `(λI - F + q q^T)` is invertible on the complement of `q`.
-    let mut a = [[0.0; 4]; 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            a[i][j] = -f[i][j] + q[i] * q[j];
+    let mut dq = [0.0; 4];
+    let mut g_e0 = [0.0; 4];
+    for (j, &eval) in evals.iter().enumerate() {
+        let gap = lam - eval;
+        if gap <= tol {
+            continue;
         }
-        a[i][i] += lam;
+        let vj = [evecs[0][j], evecs[1][j], evecs[2][j], evecs[3][j]];
+        let v_dot_dfq = vj[0] * dfq[0] + vj[1] * dfq[1] + vj[2] * dfq[2] + vj[3] * dfq[3];
+        let coeff = v_dot_dfq / gap;
+        let coeff_e0 = vj[0] / gap;
+        for i in 0..4 {
+            dq[i] += coeff * vj[i];
+            g_e0[i] += coeff_e0 * vj[i];
+        }
     }
-    let mut dq = solve4(a, rhs);
-    let mut proj = 0.0;
-    for i in 0..4 {
-        proj += dq[i] * q[i];
+    if q[0].abs() > 1e-10 {
+        let mut df_ge0 = [0.0; 4];
+        for i in 0..4 {
+            for (dfij, gk) in df[i].iter().zip(&g_e0) {
+                df_ge0[i] += dfij * gk;
+            }
+        }
+        for (j, &eval) in evals.iter().enumerate() {
+            if (lam - eval).abs() <= tol {
+                let vj = [evecs[0][j], evecs[1][j], evecs[2][j], evecs[3][j]];
+                let proj =
+                    (vj[0] * df_ge0[0] + vj[1] * df_ge0[1] + vj[2] * df_ge0[2] + vj[3] * df_ge0[3])
+                        / q[0];
+                for i in 0..4 {
+                    dq[i] += proj * vj[i];
+                }
+            }
+        }
     }
+    let proj = dq[0] * q[0] + dq[1] * q[1] + dq[2] * q[2] + dq[3] * q[3];
     for i in 0..4 {
         dq[i] -= proj * q[i];
     }
     dq
-}
-
-fn solve4(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> [f64; 4] {
-    for k in 0..4 {
-        let mut piv = k;
-        for i in (k + 1)..4 {
-            if a[i][k].abs() > a[piv][k].abs() {
-                piv = i;
-            }
-        }
-        if a[piv][k].abs() < 1e-16 {
-            continue;
-        }
-        if piv != k {
-            a.swap(k, piv);
-            b.swap(k, piv);
-        }
-        let pivot_row = a[k];
-        let pivot_rhs = b[k];
-        for (row, rhs) in a.iter_mut().zip(b.iter_mut()).skip(k + 1) {
-            let f = row[k] / pivot_row[k];
-            for (value, pivot) in row.iter_mut().zip(pivot_row).skip(k) {
-                *value -= f * pivot;
-            }
-            *rhs -= f * pivot_rhs;
-        }
-    }
-    let mut x = [0.0; 4];
-    for i in (0..4).rev() {
-        let mut acc = b[i];
-        for (aij, xj) in a[i].iter().zip(x.iter()).skip(i + 1) {
-            acc -= aij * xj;
-        }
-        x[i] = if a[i][i].abs() < 1e-16 {
-            0.0
-        } else {
-            acc / a[i][i]
-        };
-    }
-    x
 }
 
 pub(crate) fn jacobi4(mut a: [[f64; 4]; 4]) -> ([f64; 4], [[f64; 4]; 4]) {
@@ -676,7 +688,13 @@ pub(crate) fn jacobi4(mut a: [[f64; 4]; 4]) -> ([f64; 4], [[f64; 4]; 4]) {
                 off += value * value;
             }
         }
-        if off.sqrt() <= 1e-15 {
+        let size = a
+            .iter()
+            .flatten()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt();
+        if off.sqrt() <= 1e-15 * size.min(1.0) {
             break;
         }
         for p in 0..4 {
@@ -931,5 +949,70 @@ mod tests {
         let w = d.transport(&x, &y, &v);
         let w_h = d.project(&y, &w);
         assert!(seam_nrm2(&(&w - &w_h)) < 1e-12);
+    }
+
+    fn scaled_rows(rows: &[[f64; 3]], scale: f64) -> Vec<[f64; 3]> {
+        rows.iter()
+            .map(|p| [p[0] * scale, p[1] * scale, p[2] * scale])
+            .collect()
+    }
+
+    /// The Kabsch eigenspace is selected by a gap relative to the F-matrix
+    /// size, so the same fragment turned by the same angle reads the same
+    /// rotation and quaternion whether its coordinates are of order 1e-6,
+    /// 1, or 1e6.
+    #[test]
+    fn kabsch_rotation_does_not_depend_on_the_length_scale() {
+        let rows = [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.2, 0.0],
+            [0.0, 1.5, 0.3],
+            [0.1, -0.4, 1.1],
+        ];
+        let th = 0.35;
+        let mut reference_quaternion = None;
+        for scale in [1e-10, 1e-6, 1e-3, 1.0, 1e3, 1e6] {
+            let fixed = scaled_rows(&rows, scale);
+            let turned: Vec<[f64; 3]> = fixed.iter().map(|&p| rot_z(p, th)).collect();
+            let refpos = Array2::from_shape_fn((4, 3), |(i, d)| fixed[i][d]);
+            let x = pack_cart(&turned);
+            let rz = Rotation::new(vec![0, 1, 2, 3], CartAxis::Z, refpos).unwrap();
+            let value = rz.value(x.view()).unwrap();
+            assert!(
+                (value + th).abs() < 1e-8,
+                "scale {scale}: rotation Z = {value}, expected {}",
+                -th
+            );
+            let q = rz.quaternion(x.view()).unwrap();
+            let expected = [(0.5 * th).cos(), 0.0, 0.0, -(0.5 * th).sin()];
+            for (got, want) in q.iter().zip(expected) {
+                assert!(
+                    (got - want).abs() < 1e-8,
+                    "scale {scale}: quaternion {q:?}, expected {expected:?}"
+                );
+            }
+            match reference_quaternion {
+                None => reference_quaternion = Some(q),
+                Some(first) => {
+                    for (got, want) in q.iter().zip(first) {
+                        assert!(
+                            (got - want).abs() < 1e-8,
+                            "scale {scale}: quaternion {q:?} differs from {first:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A fragment whose largest F eigenvalue is a single value must not be
+    /// treated as degenerate because its coordinates are small.
+    #[test]
+    fn degeneracy_tolerance_follows_the_matrix_scale() {
+        let evals = [4.0, 1.0, -2.0, -3.0];
+        let small = evals.map(|value| value * 1e-12);
+        assert!(degeneracy_tolerance(&small) < 1e-12 * 4.0 * 1e-9);
+        assert!(degeneracy_tolerance(&small) / degeneracy_tolerance(&evals) < 1.1e-12);
+        assert_eq!(degeneracy_tolerance(&[0.0; 4]), 0.0);
     }
 }
