@@ -141,24 +141,22 @@ def _count_on_this_thread(
 
 def test_force_call_counts_stay_on_their_thread() -> None:
     """A class counter reads zero when another thread resets it."""
-    for calc_cls, left, right in (
-        (MullerBrown, 1, 6),
-    ):
-        phase = threading.Barrier(2)
-        seen_left: list[int] = []
-        seen_right: list[int] = []
-        first = threading.Thread(
-            target=_count_on_this_thread, args=(calc_cls, left, phase, seen_left)
-        )
-        second = threading.Thread(
-            target=_count_on_this_thread, args=(calc_cls, right, phase, seen_right)
-        )
-        first.start()
-        second.start()
-        first.join()
-        second.join()
-        assert seen_left == [left], calc_cls.__name__
-        assert seen_right == [right], calc_cls.__name__
+    left, right = 1, 6
+    phase = threading.Barrier(2)
+    seen_left: list[int] = []
+    seen_right: list[int] = []
+    first = threading.Thread(
+        target=_count_on_this_thread, args=(MullerBrown, left, phase, seen_left)
+    )
+    second = threading.Thread(
+        target=_count_on_this_thread, args=(MullerBrown, right, phase, seen_right)
+    )
+    first.start()
+    second.start()
+    first.join()
+    second.join()
+    assert seen_left == [left]
+    assert seen_right == [right]
 
 
 class TightFIRE(FIRE):
@@ -217,9 +215,88 @@ def test_autoneb_runs_with_fire() -> None:
         smooth_curve=False,
         interpolate_method="linear",
     )
-    images = band.run()
-    assert len(images) >= 2
-    assert np.isfinite([float(image.get_potential_energy()) for image in images]).all()
+    report = band.run()
+    assert len(report.images) >= 2
+    assert np.isfinite([float(image.get_potential_energy()) for image in report.images]).all()
+
+
+class DoubleWell(Calculator):
+    """E = (x^2 - 1)^2 + 2 y^2 + 2 z^2. Minima at x = -1, 1 and a saddle at the origin."""
+
+    implemented_properties = ["energy", "forces"]
+
+    def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
+        Calculator.calculate(self, atoms, properties, system_changes)
+        x, y, z = (float(v) for v in atoms.positions[0])
+        self.results = {
+            "energy": (x * x - 1.0) ** 2 + 2.0 * y * y + 2.0 * z * z,
+            "forces": np.array([[-4.0 * x * (x * x - 1.0), -4.0 * y, -4.0 * z]]),
+        }
+
+
+def _double_well_band(tmp_path, fmax, maxsteps):  # type: ignore[no-untyped-def]
+    from ase.io import write
+
+    prefix = str(tmp_path / "neb")
+    for index, xyz in enumerate(([-1.1, 0.3, 0.0], [0.9, -0.2, 0.0])):
+        atoms = Atoms("H", positions=[xyz])
+        atoms.calc = DoubleWell()
+        write(f"{prefix}{index:03d}.traj", atoms)
+
+    def attach(images):  # type: ignore[no-untyped-def]
+        for image in images:
+            image.calc = DoubleWell()
+
+    return AutoNEB(
+        attach,
+        prefix,
+        n_simul=1,
+        n_max=5,
+        fmax=fmax,
+        maxsteps=maxsteps,
+        k=5.0,
+        climb=True,
+        method="improvedtangent",
+        optimizer=FIRE,
+        parallel=False,
+        interpolate_method="linear",
+    )
+
+
+def test_autoneb_run_reports_a_converged_stage(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    band = _double_well_band(tmp_path, fmax=[5e-2, 1e-3], maxsteps=[400, 400])
+    report = band.run()
+    assert report.status == 1
+    assert report.converged
+    assert 0.0 <= report.max_force <= 1e-3
+    assert 0 < report.iteration <= 400
+    assert report.n_images == 5 == len(report.images)
+    assert report.positions.shape == (5, 3)
+    assert report.surface_rows > 0
+    assert report.images is band.all_images
+    assert np.allclose(
+        [image.positions[0] for image in report.images], report.positions, atol=1e-12
+    )
+    saddle = report.images[report.ci_index].positions[0]
+    assert np.linalg.norm(saddle) < 0.05
+    assert band.status == report.status
+    assert band.max_force == report.max_force
+    assert band.iteration == report.iteration
+    assert band.surface_rows == report.surface_rows
+    assert band.ci == report.ci_index
+
+
+def test_autoneb_run_reports_an_exhausted_step_budget(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    band = _double_well_band(tmp_path, fmax=[1e-12, 1e-12], maxsteps=[2, 2])
+    report = band.run()
+    assert report.status == 0
+    assert not report.converged
+    assert report.max_force > 1e-12
+    assert report.iteration == 2
+    assert band.iteration == report.iteration == 2
+    assert band.status == 0
+    assert band.max_force == report.max_force
+    assert len(report.images) == report.n_images
 
 
 def test_autoneb_saddle_matches() -> None:

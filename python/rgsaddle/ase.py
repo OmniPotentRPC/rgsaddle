@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -1065,6 +1066,35 @@ def _pair_of(value: Any, name: str) -> tuple[float, float] | None:
     return None
 
 
+@dataclass(frozen=True)
+class AutoNEBReport:
+    """Outcome of :meth:`AutoNEB.run`.
+
+    ``status`` is 1 when the last stage met its force stop and 0 when it
+    ran out of steps, and ``converged`` is that test. ``max_force`` is the
+    largest force component of the last stage, in the calculator's force
+    units. ``iteration`` counts the steps of the last stage.
+    ``ci_index`` is the climbing image or -1, ``surface_rows`` counts the
+    force calls, and ``n_images`` includes the endpoints. ``positions`` is
+    the finished band, shaped ``(n_images, 3N)``, and ``images`` holds the
+    same band as ``Atoms`` with the calculators attached. These are the
+    fields of :class:`rgsaddle._core.AutonebReport` plus ``images``.
+    """
+
+    status: int
+    max_force: float
+    ci_index: int
+    surface_rows: int
+    n_images: int
+    iteration: int
+    positions: Float64
+    images: list[Any]
+
+    @property
+    def converged(self) -> bool:
+        return self.status == 1
+
+
 class AutoNEB:
     """AutoNEB over endpoint images stored as ``prefix000.traj``.
 
@@ -1078,6 +1108,13 @@ class AutoNEB:
     None uses the optimizer's documented ``defaults['maxstep']``,
     which is the value ASE applies. ``smooth_curve=True`` is refused.
     Final images are written back to ``prefixNNN.traj``.
+
+    ``run`` returns an :class:`AutoNEBReport`, whose ``images`` are the
+    finished band. ``status`` and ``max_force`` tell a caller whether the
+    last stage converged, because ASE's own ``run`` returns nothing and
+    an exhausted step budget is not an error. ``all_images``,
+    ``iteration``, ``status``, ``max_force``, ``surface_rows``, and ``ci``
+    hold the same values after the call.
     """
 
     def __init__(
@@ -1138,11 +1175,18 @@ class AutoNEB:
         self.optimizer = optimizer
         self.all_images: list[Any] = []
         self.iteration = 0
+        self.status = 0
+        self.max_force = float("nan")
         self.surface_rows = 0
         self.ci: int | None = None
 
-    def run(self) -> list[Any]:
-        """Grow and relax the band. Returns the images, endpoints included."""
+    def run(self) -> AutoNEBReport:
+        """Grow and relax the band, then report how the last stage ended.
+
+        The report carries ``status``, ``max_force``, and ``iteration`` of
+        the last stage, and ``images``, the finished band with its
+        endpoints.
+        """
         from ase.io import read, write
 
         from rgsaddle._core import autoneb_run
@@ -1210,11 +1254,23 @@ class AutoNEB:
             image.set_positions(coords[index], apply_constraint=False)
             self.all_images.append(image)
         self.attach_calculators(self.all_images)
+        self.iteration = int(report.iteration)
+        self.status = int(report.status)
+        self.max_force = float(report.max_force)
         self.surface_rows = int(report.surface_rows)
         self.ci = None if int(report.ci_index) < 0 else int(report.ci_index)
         for index, image in enumerate(self.all_images):
             write(f"{self.prefix}{index:03d}.traj", image)
-        return self.all_images
+        return AutoNEBReport(
+            status=self.status,
+            max_force=self.max_force,
+            ci_index=int(report.ci_index),
+            surface_rows=self.surface_rows,
+            n_images=count,
+            iteration=self.iteration,
+            positions=finished,
+            images=self.all_images,
+        )
 
     def _load(self, read: Any) -> None:
         import os
