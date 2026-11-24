@@ -17,20 +17,11 @@ from ase.calculators.calculator import Calculator
 from ase.mep.autoneb import AutoNEB as AseAutoNEB
 from ase.optimize import FIRE
 
-from rgsaddle.ase import AutoNEB, _periodic_cell
+from rgsaddle._core import autoneb_run
+from rgsaddle.ase import AutoNEB
 
 # Müller-Brown saddle between minima B and C, from the AutoNEB example.
 _SADDLE_XY = np.array([0.212, 0.293])
-
-
-class Flat(Calculator):
-    """Zero energy and force, for tests that only place atoms."""
-
-    implemented_properties = ["energy", "forces"]
-
-    def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
-        Calculator.calculate(self, atoms, properties, system_changes)
-        self.results = {"energy": 0.0, "forces": np.zeros((len(atoms), 3))}
 
 
 def _muller(x, y):  # type: ignore[no-untyped-def]
@@ -143,56 +134,21 @@ def test_autoneb_saddle_matches() -> None:
         )
 
 
-_PERIODIC_CASES = {
-    "slab": ([[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 10.0]], [True, True, False]),
-    "wire": ([[4.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]], [True, False, False]),
-    "skewed_slab": ([[4.0, 0.0, 0.0], [2.0, 3.5, 0.0], [1.0, 1.0, 10.0]], [True, True, False]),
-}
+@pytest.mark.parametrize("n_max", [-1, -(2**40), 1, 2**62])
+def test_autoneb_run_validates_n_max_before_allocating(n_max: int) -> None:
+    calls: list[int] = []
+
+    def surface(x):  # type: ignore[no-untyped-def]
+        calls.append(int(x.shape[0]))
+        return np.zeros(x.shape[0]), np.zeros_like(x)
+
+    positions = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    with pytest.raises(ValueError, match="n_max"):
+        autoneb_run(surface, positions, n_simul=1, n_max=n_max)
+    assert calls == []
 
 
-def _hopping(cell, pbc, ends):  # type: ignore[no-untyped-def]
-    """Two anchor atoms and an adatom that moves between ``ends``."""
-    images = []
-    for x, z in ends:
-        atoms = Atoms(
-            "H3",
-            positions=[[0.5, 1.0, 0.0], [2.0, 1.0, 0.0], [x, 1.0, z]],
-            cell=cell,
-            pbc=pbc,
-        )
-        atoms.calc = Flat()
-        images.append(atoms)
-    return images
-
-
-def test_periodic_cell_completes_the_open_axes() -> None:
-    cell, pbc = _PERIODIC_CASES["skewed_slab"]
-    images = _hopping(cell, pbc, [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
-    built = _periodic_cell(images)
-    assert built is not None
-    assert abs(np.linalg.det(built)) > 1.0
-    assert np.allclose(built[:2], np.asarray(cell)[:2])
-    # The open row is normal to both periodic rows and longer than the images span.
-    assert np.allclose(built[2] @ built[0], 0.0, atol=1e-9)
-    assert np.allclose(built[2] @ built[1], 0.0, atol=1e-9)
-    assert np.linalg.norm(built[2]) > 10.0
-
-    wire = _hopping(*_PERIODIC_CASES["wire"], [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
-    built = _periodic_cell(wire)
-    assert built is not None
-    assert abs(np.linalg.det(built)) > 1.0
-    assert np.allclose(built[0], [4.0, 0.0, 0.0])
-    assert abs(built[1] @ built[0]) < 1e-9 and abs(built[2] @ built[0]) < 1e-9
-    assert abs(built[1] @ built[2]) < 1e-9
-
-    free = _hopping(cell, [False, False, False], [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
-    assert _periodic_cell(free) is None
-    full = _hopping(cell, [True, True, True], [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
-    assert np.allclose(_periodic_cell(full), np.asarray(cell))
-
-
-def test_periodic_cell_refuses_dependent_periodic_vectors() -> None:
-    flat = [[4.0, 0.0, 0.0], [8.0, 0.0, 0.0], [0.0, 0.0, 10.0]]
-    images = _hopping(flat, [True, True, False], [(0.6, 1.0), (2.0, 1.0), (3.6, 1.0)])
-    with pytest.raises(ValueError, match="linearly independent"):
-        _periodic_cell(images)
+@pytest.mark.parametrize(("n_simul", "n_max"), [(3, -1), (3, 4), (0, 7), (-1, 7)])
+def test_autoneb_constructor_validates_the_image_counts(n_simul: int, n_max: int) -> None:
+    with pytest.raises(ValueError, match="n_max|n_simul"):
+        AutoNEB(lambda images: None, "unused", n_simul=n_simul, n_max=n_max)
