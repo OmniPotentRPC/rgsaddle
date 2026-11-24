@@ -1074,7 +1074,9 @@ class AutoNEB:
     match ``ase.mep.AutoNEB``. Image-parallel MPI is refused. The
     optimizer must be FIRE or a subclass of it: the steps are the
     band's FIRE solver, and ``maxstep`` on that class is the per-atom
-    cap when the signature names it. ``smooth_curve=True`` is refused.
+    cap. A numeric signature default is that number. A default of
+    None uses the optimizer's documented ``defaults['maxstep']``,
+    which is the value ASE applies. ``smooth_curve=True`` is refused.
     Final images are written back to ``prefixNNN.traj``.
     """
 
@@ -1257,25 +1259,55 @@ def _staged_int(value: Any) -> tuple[int, int]:
     return int(pair[0]), int(pair[1])
 
 
-def _optimizer_maxstep(optimizer: Any) -> float:
-    """FIRE's per-atom cap, from the class signature when it names ``maxstep``."""
-    if optimizer is None:
-        return 0.2
-    import inspect
+def _documented_maxstep(optimizer: type) -> float:
+    """The maxstep ASE applies when the signature default is None.
 
+    FIRE's constructor copies ``defaults['maxstep']`` onto the instance
+    in that case. A class that does not publish a real number there has
+    no cap to read.
+    """
+    documented = getattr(optimizer, "defaults", None)
+    step = documented.get("maxstep") if isinstance(documented, dict) else None
+    if isinstance(step, bool) or not isinstance(step, (int, float)):
+        raise NotImplementedError("the optimizer does not document a numeric maxstep")
+    return float(step)
+
+
+def _fire_optimizer(optimizer: Any) -> type:
     try:
         from ase.optimize import FIRE
     except ImportError as err:
         raise NotImplementedError("AutoNEB optimizer is FIRE") from err
-    if not (isinstance(optimizer, type) and issubclass(optimizer, FIRE)):
-        raise NotImplementedError("AutoNEB steps with the band FIRE solver; pass FIRE")
+    if optimizer is None:
+        return cast(type, FIRE)
+    if isinstance(optimizer, type) and issubclass(optimizer, FIRE):
+        return optimizer
+    raise NotImplementedError("AutoNEB steps with the band FIRE solver; pass FIRE")
+
+
+def _optimizer_maxstep(optimizer: Any) -> float:
+    """FIRE's per-atom cap.
+
+    A numeric signature default is that number. ASE 3.29 leaves
+    ``maxstep`` as None and applies ``defaults['maxstep']``. None uses
+    that documented default.
+    """
+    import inspect
+
+    optimizer = _fire_optimizer(optimizer)
     try:
         signature = inspect.signature(optimizer)
-    except (TypeError, ValueError):
-        return 0.2
+    except (TypeError, ValueError) as err:
+        raise NotImplementedError("the optimizer does not document a numeric maxstep") from err
     parameter = signature.parameters.get("maxstep")
-    if parameter is None or parameter.default is inspect.Signature.empty:
-        return 0.2
+    if (
+        parameter is None
+        or parameter.default is inspect.Signature.empty
+        or parameter.default is None
+    ):
+        return _documented_maxstep(optimizer)
+    if isinstance(parameter.default, bool) or not isinstance(parameter.default, (int, float)):
+        raise NotImplementedError("the optimizer does not document a numeric maxstep")
     return float(parameter.default)
 
 

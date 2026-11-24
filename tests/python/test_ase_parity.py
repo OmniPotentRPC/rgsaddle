@@ -5,6 +5,7 @@ Force-call counts are printed. They are not a speed claim.
 
 from __future__ import annotations
 
+import inspect
 import os
 import threading
 
@@ -17,6 +18,7 @@ from ase import Atoms
 from ase.calculators.calculator import Calculator
 from ase.mep.autoneb import AutoNEB as AseAutoNEB
 from ase.optimize import FIRE
+from ase.optimize.optimize import Optimizer
 
 from rgsaddle._core import autoneb_run
 from rgsaddle.ase import AutoNEB, _periodic_cell
@@ -60,6 +62,20 @@ class CountedCalculator(Calculator):
 
     def _count_call(self) -> None:
         type(self)._calls.increment()
+
+
+class Bowl(CountedCalculator):
+    implemented_properties = ["energy", "forces"]
+    _calls = ThreadCounter()
+
+    def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
+        Calculator.calculate(self, atoms, properties, system_changes)
+        self._count_call()
+        x, y = (float(atoms.positions[0, 0]), float(atoms.positions[0, 1]))
+        self.results = {
+            "energy": 0.5 * x * x + 2.0 * y * y,
+            "forces": np.array([[-x, -4.0 * y, 0.0]]),
+        }
 
 
 class Flat(Calculator):
@@ -148,6 +164,62 @@ def test_force_call_counts_stay_on_their_thread() -> None:
 class TightFIRE(FIRE):
     def __init__(self, atoms, maxstep=0.05, **kwargs):  # type: ignore[no-untyped-def]
         super().__init__(atoms, maxstep=maxstep, **kwargs)
+
+
+class DocumentedFIRE(FIRE):
+    """FIRE whose documented cap is not the stock 0.2."""
+
+    defaults = {"maxstep": 0.07}
+
+
+def test_autoneb_runs_with_fire() -> None:
+    """ASE 3.29 leaves ``maxstep`` as None and applies ``defaults['maxstep']``."""
+
+    from rgsaddle.ase import _optimizer_maxstep
+
+    assert inspect.signature(FIRE).parameters["maxstep"].default is None
+    documented = float(FIRE.defaults["maxstep"])
+    assert documented == pytest.approx(float(Optimizer.defaults["maxstep"]))
+    assert _optimizer_maxstep(FIRE) == pytest.approx(documented)
+    assert _optimizer_maxstep(None) == pytest.approx(documented)
+    assert _optimizer_maxstep(DocumentedFIRE) == pytest.approx(0.07)
+    assert _optimizer_maxstep(TightFIRE) == pytest.approx(0.05)
+
+    import tempfile
+
+    from ase.io import write
+
+    root = tempfile.mkdtemp(prefix="rgsaddle-fire-")
+    prefix = os.path.join(root, "neb")
+    for index, xyz in enumerate((np.array([-0.4, 0.0, 0.0]), np.array([0.4, 0.0, 0.0]))):
+        atoms = Atoms("H", positions=[xyz])
+        atoms.calc = Bowl()
+        atoms.get_potential_energy()
+        write(f"{prefix}{index:03d}.traj", atoms)
+
+    def attach(images):  # type: ignore[no-untyped-def]
+        for image in images:
+            image.calc = Bowl()
+
+    band = AutoNEB(
+        attach,
+        prefix,
+        n_simul=1,
+        n_max=3,
+        fmax=0.5,
+        maxsteps=2,
+        k=1.0,
+        climb=False,
+        method="improvedtangent",
+        optimizer=FIRE,
+        remove_rotation_and_translation=False,
+        parallel=False,
+        smooth_curve=False,
+        interpolate_method="linear",
+    )
+    images = band.run()
+    assert len(images) >= 2
+    assert np.isfinite([float(image.get_potential_energy()) for image in images]).all()
 
 
 def test_autoneb_saddle_matches() -> None:
