@@ -9,6 +9,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Added
 
+- C ABI minor 66 adds standard atomic mass lookup by atomic number or symbol and mass weighted finite difference Vineyard prefactors through `rgsaddle_atomic_mass`, `rgsaddle_atomic_mass_by_symbol`, `rgsaddle_vineyard_config_default`, and `rgsaddle_vineyard_fd`. The new wire structures are `rgsaddle_vineyard_config_t` and `rgsaddle_vineyard_report_t`.
 - `ThermodynamicDerivative` (`potential.full_minus_harmonic`) is a generic lambda thermodynamic-integration observable, with harmonic Taylor reference helpers, `ThermodynamicSurfaceSampler`, `ThermodynamicSampler`, a LAMMPS thermodynamic-reference configuration, and the C symbol `rgsaddle_thermodynamic_derivative_observable`.
 - An adaptive OH-TST hyperplane string shares constrained samples, runs a correlated pilot whose stride doubles until the autocorrelation time fits fourteen records, relaxes at production resolution, and reports a finite-temperature profile with measured geometry and quadrature errors. `TargetMet`, `SampleCap`, and `Unresolved` name the combined-error outcomes. Correlation-width batching is shared by every engine-backed hyperplane sample. Symmetry multiplicity is applied with `with_region` once inside the estimator.
 - `ArtNConfig` adds the opt-in ART nouveau basin-exit and activation protocol to `MinModeSession` and the point builder. C ABI minor 43 adds `rgsaddle_artn_config_t`, its default initializer, and the live-session setter.

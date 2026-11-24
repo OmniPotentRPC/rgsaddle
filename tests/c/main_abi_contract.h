@@ -681,4 +681,62 @@ typedef rgsaddle_status_t (*abi65_signature_rgsaddle_dyneb_mask)(
     double *forces, double fmax, double scale_fmax, uint8_t *frozen);
 _Static_assert(_Generic(&rgsaddle_dyneb_mask, abi65_signature_rgsaddle_dyneb_mask: 1, default: 0), "rgsaddle_dyneb_mask signature");
 
+_Static_assert(sizeof(rgsaddle_vineyard_config_t) == 48, "vineyard config size");
+_Static_assert(_Alignof(rgsaddle_vineyard_config_t) == 8, "vineyard config alignment");
+#define ABI66_VINEYARD_CONFIG_FIELD(field, offset, type)                         \
+  _Static_assert(offsetof(rgsaddle_vineyard_config_t, field) == (offset),        \
+                 "rgsaddle_vineyard_config_t." #field " offset");                \
+  _Static_assert(_Generic(((rgsaddle_vineyard_config_t *)0)->field, type: 1,     \
+                          default: 0),                                           \
+                 "rgsaddle_vineyard_config_t." #field " type")
+ABI66_VINEYARD_CONFIG_FIELD(version, 0, rgsaddle_version_t);
+ABI66_VINEYARD_CONFIG_FIELD(flags, 8, uint64_t);
+ABI66_VINEYARD_CONFIG_FIELD(step, 16, double);
+ABI66_VINEYARD_CONFIG_FIELD(difference, 24, int32_t);
+ABI66_VINEYARD_CONFIG_FIELD(reserved, 28, int32_t);
+ABI66_VINEYARD_CONFIG_FIELD(positive_tol, 32, double);
+ABI66_VINEYARD_CONFIG_FIELD(negative_tol, 40, double);
+#undef ABI66_VINEYARD_CONFIG_FIELD
+
+_Static_assert(sizeof(rgsaddle_vineyard_report_t) == 64, "vineyard report size");
+_Static_assert(_Alignof(rgsaddle_vineyard_report_t) == 8, "vineyard report alignment");
+#define ABI66_VINEYARD_REPORT_FIELD(field, offset, type)                         \
+  _Static_assert(offsetof(rgsaddle_vineyard_report_t, field) == (offset),        \
+                 "rgsaddle_vineyard_report_t." #field " offset");                \
+  _Static_assert(_Generic(((rgsaddle_vineyard_report_t *)0)->field, type: 1,     \
+                          default: 0),                                           \
+                 "rgsaddle_vineyard_report_t." #field " type")
+ABI66_VINEYARD_REPORT_FIELD(version, 0, rgsaddle_version_t);
+ABI66_VINEYARD_REPORT_FIELD(flags, 8, uint64_t);
+ABI66_VINEYARD_REPORT_FIELD(prefactor_hz, 16, double);
+ABI66_VINEYARD_REPORT_FIELD(nu0_thz, 24, double);
+ABI66_VINEYARD_REPORT_FIELD(unstable_eigenvalue, 32, double);
+ABI66_VINEYARD_REPORT_FIELD(n_min_modes, 40, int64_t);
+ABI66_VINEYARD_REPORT_FIELD(n_saddle_modes, 48, int64_t);
+ABI66_VINEYARD_REPORT_FIELD(evaluations, 56, int64_t);
+#undef ABI66_VINEYARD_REPORT_FIELD
+
+typedef rgsaddle_status_t (*abi66_signature_rgsaddle_atomic_mass)(int32_t z,
+                                                                  double *out);
+_Static_assert(_Generic(&rgsaddle_atomic_mass, abi66_signature_rgsaddle_atomic_mass: 1,
+                        default: 0),
+               "rgsaddle_atomic_mass signature");
+typedef rgsaddle_status_t (*abi66_signature_rgsaddle_atomic_mass_by_symbol)(
+    const char *symbol, double *out);
+_Static_assert(_Generic(&rgsaddle_atomic_mass_by_symbol,
+                        abi66_signature_rgsaddle_atomic_mass_by_symbol: 1, default: 0),
+               "rgsaddle_atomic_mass_by_symbol signature");
+typedef rgsaddle_status_t (*abi66_signature_rgsaddle_vineyard_config_default)(
+    rgsaddle_vineyard_config_t *out);
+_Static_assert(_Generic(&rgsaddle_vineyard_config_default,
+                        abi66_signature_rgsaddle_vineyard_config_default: 1, default: 0),
+               "rgsaddle_vineyard_config_default signature");
+typedef rgsaddle_status_t (*abi66_signature_rgsaddle_vineyard_fd)(
+    const rgsaddle_vineyard_config_t *config, int64_t n_atoms,
+    const double *x_min, const double *x_saddle, const double *atom_masses,
+    rgsaddle_surface_fn surface, void *user, rgsaddle_vineyard_report_t *report);
+_Static_assert(_Generic(&rgsaddle_vineyard_fd, abi66_signature_rgsaddle_vineyard_fd: 1,
+                        default: 0),
+               "rgsaddle_vineyard_fd signature");
+
 #endif
