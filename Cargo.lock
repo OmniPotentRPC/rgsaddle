@@ -1912,6 +1912,7 @@ version = "0.6.0"
 dependencies = [
  "approx",
  "capnp",
+ "cc",
  "criterion",
  "dlpk",
  "eindir-core",
@@ -1931,6 +1932,7 @@ dependencies = [
  "rgpot-pair",
  "rug",
  "sha2",
+ "tempfile",
  "thiserror 2.0.21",
  "zerocopy",
 ]
