@@ -74,6 +74,10 @@ operations that fix both the vacancy reactant and the chosen saddle.
 
 The constructor rejects non-finite data, non-orthogonal matrices,
 non-bijective permutations, and permutations that map unlike species.
+A lattice translation is not the identity. =operation_is_identity= rejects
+an operation when any translation component exceeds =matching_tolerance=,
+even if the rotation is the identity and the permutation is empty. A pure
+lattice translation therefore does not satisfy the identity requirement.
 Operations that are valid group operations but do not stabilize the
 particular reactant are omitted from \(H\).  Matching, orbit, and
 orthogonality tolerances are explicit fields of
