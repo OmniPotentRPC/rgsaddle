@@ -487,7 +487,7 @@ pub struct MinModeReport {
     pub curvature: f64,
     /// Rotation iterations (dimer) or Hessian actions (Lanczos).
     pub rotations: usize,
-    /// Number of steps taken.
+    /// Number of steps that moved the atoms.
     pub iteration: usize,
     /// Surface evaluations during this call, centre included.
     pub evaluations: usize,
@@ -3362,6 +3362,7 @@ impl MinModeSession {
                 }
             }
             if self.artn.as_ref().is_some_and(|state| !state.activated) {
+                let origin_before_push = self.x.clone();
                 self.artn_push_relax(
                     &counted,
                     &basin_direction,
@@ -3372,7 +3373,10 @@ impl MinModeSession {
                 if let Some(state) = &mut self.artn {
                     state.basin_pushes += 1;
                 }
-                self.iteration += 1;
+                // A push that leaves the atoms in place is not a step.
+                if self.x != origin_before_push {
+                    self.iteration += 1;
+                }
                 let max_force = self.centre.as_ref().map_or(f64::NAN, |point| {
                     self.force_gate.value(point.gradient.view())
                 });
@@ -3422,6 +3426,7 @@ impl MinModeSession {
         if self.config.max_move > 0.0 {
             push = push.min(self.config.max_move);
         }
+        let origin_before_push = self.x.clone();
         self.artn_push_relax(
             &counted,
             &direction,
@@ -3430,7 +3435,10 @@ impl MinModeSession {
             artn_config.relaxation_step,
         )?;
         self.last_translated = Some(translated_gradient(&gradient, &direction, curvature));
-        self.iteration += 1;
+        // A push that leaves the atoms in place is not a step.
+        if self.x != origin_before_push {
+            self.iteration += 1;
+        }
         let arrived_force = self.centre.as_ref().map_or(max_force, |point| {
             self.force_gate.value(point.gradient.view())
         });
@@ -3794,8 +3802,13 @@ impl MinModeSession {
             curvature = accepted_curvature;
             rotations += accepted_rotations;
         }
+        let moved = x != self.x;
         self.x = x;
-        self.iteration += 1;
+        // A solver step that leaves the atoms in place is not an iteration.
+        // Counting it lets a stationary positive curvature look like progress.
+        if moved {
+            self.iteration += 1;
+        }
         self.centre = Some(centre);
         if fire {
             let energy = self.centre.as_ref().and_then(|point| point.energy);
@@ -3818,14 +3831,23 @@ impl MinModeSession {
     }
 
     /// Convenience loop over [`MinModeSession::step`].
+    ///
+    /// A step that does not move the atoms is not counted in
+    /// [`MinModeReport::iteration`]. The loop still stops after
+    /// `max_steps` calls, so a stationary point cannot spin.
     pub fn run<S: PointSurface>(
         &mut self,
         surface: &S,
         max_steps: usize,
     ) -> Result<MinModeReport, SaddleError> {
         let mut report = self.step(surface)?;
-        while report.status == MinModeStatus::Running && self.iteration < max_steps {
+        let mut calls = 1usize;
+        while report.status == MinModeStatus::Running
+            && self.iteration < max_steps
+            && calls < max_steps
+        {
             report = self.step(surface)?;
+            calls += 1;
         }
         Ok(report)
     }
