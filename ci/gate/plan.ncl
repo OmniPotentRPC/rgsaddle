@@ -83,6 +83,11 @@ let plan = {
           argv = ["pixi", "run", "-e", "python", "gate-python-test"],
           kind = "test",
         },
+        {
+          name = "Gate self tests",
+          argv = ["pixi", "run", "-e", "python", "gate-selftest"],
+          kind = "test",
+        },
       ],
     },
   },
