@@ -1,0 +1,1 @@
+=ElasticDipole::from_energy_strain_gradient= builds a defect dipole from the homogeneous-strain energy derivatives of the defect and bulk cells, beside the stress and force routes.

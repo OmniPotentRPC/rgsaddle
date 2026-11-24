@@ -14,6 +14,55 @@ fn shear_dipole(value: f64) -> ElasticDipole {
     .expect("finite symmetric dipole")
 }
 
+fn cubic_constants() -> ElasticConstants {
+    ElasticConstants::cubic(10.0, 4.0, 2.0).expect("stable cubic tensor")
+}
+
+#[test]
+fn barnett_quadrature_requires_multiples_of_four_from_sixteen() {
+    let constants = cubic_constants();
+    for points in [8, 10, 12, 14, 18] {
+        let error = AnisotropicGreen::new(constants)
+            .with_config(AnisotropicGreenConfig::default().with_angular_points(points))
+            .expect_err("invalid quadrature should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("at least sixteen points and a multiple of four"),
+            "points {points} gave {error}"
+        );
+    }
+    for points in [16, 20] {
+        AnisotropicGreen::new(constants)
+            .with_config(AnisotropicGreenConfig::default().with_angular_points(points))
+            .expect("valid quadrature should pass");
+    }
+}
+
+#[test]
+fn periodic_elastic_rejects_invalid_angular_mesh_boundaries() {
+    let constants = cubic_constants();
+    let config = PeriodicElasticConfig::default().with_image_shells(2);
+    for points in [12, 18] {
+        let error = PeriodicElastic::new(
+            constants,
+            config.with_green(AnisotropicGreenConfig::default().with_angular_points(points)),
+        )
+        .expect_err("invalid quadrature should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("at least sixteen points and a multiple of four"),
+            "points {points} gave {error}"
+        );
+    }
+    PeriodicElastic::new(
+        constants,
+        config.with_green(AnisotropicGreenConfig::default().with_angular_points(16)),
+    )
+    .expect("boundary quadrature should pass");
+}
+
 #[test]
 fn barnett_reduces_to_the_eshelby_kelvin_solution() {
     // Eshelby's isotropic point-force solution is Kelvin's Green function.
@@ -76,7 +125,7 @@ fn cubic_100_green_derivative_matches_dederichs_leibfried() {
 
 #[test]
 fn periodic_pair_correction_removes_the_smoke_scale_cell_drift() {
-    let constants = ElasticConstants::cubic(10.0, 4.0, 2.0).expect("stable cubic tensor");
+    let constants = cubic_constants();
     let corrector = PeriodicElastic::new(
         constants,
         PeriodicElasticConfig::default()
@@ -84,6 +133,13 @@ fn periodic_pair_correction_removes_the_smoke_scale_cell_drift() {
             .with_image_shells(2),
     )
     .expect("periodic corrector");
+    let reference = PeriodicElastic::new(
+        constants,
+        PeriodicElasticConfig::default()
+            .with_green(AnisotropicGreenConfig::default().with_angular_points(192))
+            .with_image_shells(5),
+    )
+    .expect("reference periodic corrector");
     let first = DefectDipole {
         position: [0.0, 0.0, 0.0],
         dipole: shear_dipole(1.2),
@@ -100,12 +156,14 @@ fn periodic_pair_correction_removes_the_smoke_scale_cell_drift() {
         };
         let mut raw = Vec::new();
         let mut corrected = Vec::new();
+        let mut reference_infinite = Vec::new();
+        let mut max_reference_mismatch = 0.0_f64;
         for length in [9.0, 12.0, 15.0] {
             let cell = linkcell::Cell::ortho(length, length, length).expect("cubic cell");
-            let elastic = corrector
+            let reference_pair = reference
                 .pair_correction(&cell, first, second)
-                .expect("elastic correction");
-            let periodic_energy = chemical + elastic.periodic;
+                .expect("reference elastic correction");
+            let periodic_energy = chemical + reference_pair.periodic;
             let state = ElasticPairState {
                 energy: periodic_energy,
                 first,
@@ -116,10 +174,18 @@ fn periodic_pair_correction_removes_the_smoke_scale_cell_drift() {
                 .expect("corrected energy");
             raw.push(periodic_energy);
             corrected.push(infinite.infinite);
+            reference_infinite.push(chemical + reference_pair.infinite);
+            max_reference_mismatch = max_reference_mismatch.max(
+                (infinite.infinite - (chemical + reference_pair.infinite)).abs(),
+            );
         }
         assert!(
-            span(&corrected) <= f64::EPSILON.sqrt() * chemical.abs().max(1.0),
-            "separation {position:?}: {corrected:?}"
+            span(&reference_infinite) <= f64::EPSILON.sqrt() * chemical.abs().max(1.0),
+            "separation {position:?}: {reference_infinite:?}"
+        );
+        assert!(
+            max_reference_mismatch <= 1.0e-4,
+            "separation {position:?}: corrected {corrected:?} reference {reference_infinite:?}"
         );
         assert!(
             span(&corrected) < span(&raw),

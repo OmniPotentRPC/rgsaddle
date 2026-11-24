@@ -1,0 +1,1 @@
+Vineyard prefactor validation now requires exactly one more mode at the minimum than at the saddle, so the prefactor always has units of frequency.

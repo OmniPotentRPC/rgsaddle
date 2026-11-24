@@ -587,9 +587,9 @@ impl PeriodicElastic {
 }
 
 fn validate_angular_points(points: usize) -> Result<(), SaddleError> {
-    if points < 8 || !points.is_multiple_of(2) {
+    if points < 16 || !points.is_multiple_of(4) {
         return Err(SaddleError::Invalid(
-            "Barnett quadrature needs an even number of at least eight points".into(),
+            "Barnett quadrature needs at least sixteen points and a multiple of four".into(),
         ));
     }
     Ok(())
