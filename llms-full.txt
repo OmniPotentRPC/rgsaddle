@@ -4168,7 +4168,7 @@ ART pushes along the seed until the curvature falls under `art_threshold` (defau
 
 `Stencil::band` checks the array and returns `BAND_PRESET_SEAM` (`band presets stay on feat/band-methods-zoom`, kept for compatibility) because band presets are not implemented in the stencil builder. Use `BandSession`, `AutoNeb`, or `OcinebSession` directly for a band search, and `BandConfig::zoom` or `SpringKind::EnergyWeighted` for zoom-NEB and energy-weighted springs. The chain, the mesh (remesh, insert, window), and the point controller are implemented.
 
-From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only, and the ABI minor stays 16.
+From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only; the stencil symbols were added at ABI minor 16 and remain additive under the current ABI minor 65.
 
 From Python, `rgsaddle.Stencil.point(x, preset`"dimer")= takes a C-contiguous float64 vector. `step(surface)` releases the thread, and the surface callback re-attaches. `rgsaddle.ase.Point(atoms, preset`"dimer").run(fmax, steps)= is an ASE `Optimizer` whose `step` is one stencil step. A second thread that enters the same handle raises `RuntimeError`.
 
