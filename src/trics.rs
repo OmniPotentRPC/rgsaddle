@@ -2264,6 +2264,13 @@ mod tests {
     }
 
     #[test]
+    fn with_bonds_takes_an_optional_bond_list() {
+        let explicit = TricConfig::default().with_bonds(vec![(0, 1), (0, 2)]);
+        assert_eq!(explicit.bonds, Some(vec![(0, 1), (0, 2)]));
+        assert!(explicit.with_bonds(None).bonds.is_none());
+    }
+
+    #[test]
     fn inferred_bonds_keep_a_chain_sparse() {
         let chain = array![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.2, 0.0];
         let bonds = infer_bonds(chain.view(), DEFAULT_BOND_FACTOR).unwrap();
