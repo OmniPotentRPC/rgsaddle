@@ -7,7 +7,7 @@ AutoNEB starts from the endpoints, inserts an image where the band is coarsest, 
 :cite:`goswamiEnhancedClimbingImage2026,chillBenchmarksCharacterization2014,eon2901,kolsbjergAutomatedNudgedElastic2016`
 #+end_export
 
-On the double well, AutoNEB used more force calls than one fixed CI-NEB: 1.42 times as many, median 71 against 52, with a 95% BCa interval of 1.33 to 1.52 over 32 paired seeds. Prefer CI-NEB for that single barrier. Müller-Brown from B to C has mean ratio 0.46 (median 268 against 762, interval 0.35 to 0.79) over 31 paired seeds. The two-barrier path from A to B through the intermediate minimum has mean ratio 0.95, interval 0.81 to 1.23, medians 643 and 740, over 32 paired seeds. A pair with a censored side is dropped. Zoom-NEB is the growth method under development.
+On the double well, AutoNEB used more force calls than one fixed CI-NEB: 1.42 times as many, median 71 against 52, with a 95% BCa interval of 1.33 to 1.52 over 32 paired seeds. Prefer CI-NEB for that single barrier. Müller-Brown from B to C has mean ratio 0.46 (median 268 against 762, interval 0.35 to 0.79) over 31 paired seeds. The two-barrier path from A to B through the intermediate minimum has mean ratio 0.95, interval 0.81 to 1.23, medians 643 and 740, over 32 paired seeds. A pair with a censored side is dropped. Zoom-NEB (=BandConfig::zoom=, =ZoomConfig=) is an opt-in adaptive windowing refinement on =BandSession=, not a growth method.
 
 * Minimal example
 ~BandConfig::autoneb~ carries the tuning. ~None~ is a fixed band. ~AutoNeb::new~ reads that tuning, or the defaults when it is ~None~.

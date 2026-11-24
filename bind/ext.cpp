@@ -2045,7 +2045,7 @@ NB_MODULE(_core, m) {
           "that is not negative steps by max_move along the mode. Band preset "
           "names raise ValueError.")
       .def_static("band", &make_band, nb::arg("x").noconvert(), nb::arg("preset") = "ci-neb",
-                  "Band presets stay on feat/band-methods-zoom and raise ValueError.")
+                  "Band presets are not implemented and raise ValueError.")
       .def(
           "step", [](PyStencil &self, nb::callable fn) { return step_python(self, fn, 1, false); },
           nb::arg("surface"),

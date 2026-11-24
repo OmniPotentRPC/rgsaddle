@@ -20,7 +20,8 @@ use crate::minmode::{
     ArtNConfig, ClimbCap, FiniteDifference, MinModeConfig, MinModeKind, MinModeSession,
     MinModeStatus, climb_displacement, translated_gradient,
 };
-/// Error text [`BandBuilder::build`] returns until `feat/band-methods-zoom` lands.
+/// Error text [`BandBuilder::build`] returns for unimplemented band presets.
+/// The string text is kept unchanged for backward compatibility.
 pub const BAND_PRESET_SEAM: &str = "band presets stay on feat/band-methods-zoom";
 
 /// Closed preset list. A band value is accepted by the builder and

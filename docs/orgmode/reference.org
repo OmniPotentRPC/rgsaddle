@@ -351,7 +351,7 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 | =last_error= | Thread-local text reserved for the C ABI last-error call. Empty unless an error text was set. =raise_status= reads it and then clears the slot |
 | =raise_status= | Map an =rgsaddle_status_t= value. The message is the stored text, or the status name when that text is empty. =RGSADDLE_OK= returns true |
 | =rgsaddle.ase.SurfaceAdapter= | =list[Atoms]= evaluated as =(ids, x) -> (energies, gradients)= request rows (=claim=, =owners=, =reentrant=, =__call__=). Optional extra =ase= |
-| =rgsaddle.Stencil= | Point search. =point=, =band=, =step=, =run=, =positions=, =mode=, =curvature=. =band= raises =ValueError= with the zoom seam. Step report is =StencilReport= (=status=, =max_force=, =curvature=, =iteration=, =evaluations=, =converged=) |
+| =rgsaddle.Stencil= | Point search. =point=, =band=, =step=, =run=, =positions=, =mode=, =curvature=. =band= raises =ValueError= because band presets are not implemented. Step report is =StencilReport= (=status=, =max_force=, =curvature=, =iteration=, =evaluations=, =converged=) |
 | =rgsaddle.__version__= | Package version string returned by =rgsaddle._core.version= |
 | =rgsaddle.THERMODYNAMIC_DERIVATIVE= | Observable name =potential.full_minus_harmonic= used by =rgsaddle.hyperplane_thermodynamic_integration= |
 | =rgsaddle.hyperplane_thermodynamic_integration= | Constrained hyperplane thermodynamic integration, BAR, MBAR, and PAFI profile estimation from hyperplane sample batches |
