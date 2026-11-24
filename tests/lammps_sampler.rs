@@ -8,8 +8,9 @@ use ndarray::{Array1, ArrayView1};
 use rgpot_core::Potentials_capnp::potential_config;
 use rgsaddle::{
     AnalyticSurfaceSampler, Hyperplane, HyperplaneCoordinates, HyperplaneSampleBudget,
-    HyperplaneSampler, LammpsHyperplaneSampler, LammpsSamplerConfig, LammpsSystem, LangevinConfig,
-    PointSurface, SaddleError, sample_plane_with_sampler,
+    HyperplaneSampler, LammpsHyperplaneSampler, LammpsSamplerConfig, LammpsSystem,
+    LammpsThermodynamicReference, LangevinConfig, PointSurface, SaddleError,
+    THERMODYNAMIC_DERIVATIVE, sample_plane_with_sampler,
 };
 
 const EPSILON: f64 = 0.2;
@@ -188,6 +189,64 @@ fn lammps_and_analytic_lj_mean_forces_agree_with_their_error_bars() {
         analytic_sample.normal_force,
         analytic_sample.normal_force_error
     );
+}
+
+#[test]
+fn lambda_one_reads_the_live_lj_energy_before_sampling() {
+    let Some(path) = library_path() else {
+        return;
+    };
+    let system = lj_system();
+    let point = system.positions.clone();
+    // Thermo pe on this embed is the pair energy. The tether is a fix and is
+    // absent from that field. At the resting geometry the tether energy is zero.
+    let reference_energy = lj_pair_energy(point.view());
+    let mut backend = LammpsHyperplaneSampler::new(
+        system,
+        LammpsSamplerConfig::default()
+            .with_library_path(path)
+            .with_time_step_ps(0.0002)
+            .with_friction_per_ps(10.0)
+            .with_thermodynamic_reference(LammpsThermodynamicReference::new(
+                point.clone(),
+                reference_energy,
+                Array1::zeros(point.len()),
+                ndarray::Array2::zeros((point.len(), point.len())),
+            )),
+    );
+    let plane = Hyperplane::new(point, Array1::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]))
+        .expect("plane");
+    let budget = HyperplaneSampleBudget::default()
+        .with_thermal(0.01)
+        .with_seed(19)
+        .with_thermalize(0)
+        .with_stride(1)
+        .with_samples(1)
+        .with_lambda(1.0)
+        .with_coordinates(HyperplaneCoordinates::Cartesian)
+        .with_positions(true);
+    let ensemble = backend
+        .sample_hyperplane(&plane, &budget)
+        .expect("lambda one on the live library");
+    let observation = &ensemble.observations[0];
+    let position = observation.position.as_ref().expect("position");
+    let derivative = observation.observables[THERMODYNAMIC_DERIVATIVE];
+    let expected = lj_pair_energy(position.view()) - reference_energy;
+    assert!(
+        (derivative - expected).abs() < 1.0e-12,
+        "live {derivative}, analytic {expected}, position {position}"
+    );
+}
+
+fn lj_pair_energy(position: ArrayView1<f64>) -> f64 {
+    let delta = [
+        position[3] - position[0],
+        position[4] - position[1],
+        position[5] - position[2],
+    ];
+    let distance = delta.iter().map(|value| value * value).sum::<f64>().sqrt();
+    let sr6 = (SIGMA / distance).powi(6);
+    4.0 * EPSILON * (sr6 * sr6 - sr6)
 }
 
 #[test]

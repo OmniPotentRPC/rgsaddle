@@ -232,6 +232,22 @@ pub struct LammpsThermodynamicReference {
 }
 
 impl LammpsThermodynamicReference {
+    /// Taylor model `E0 + g·(x-x0) + ½ (x-x0)·H(x-x0)`.
+    #[must_use]
+    pub fn new(
+        point: Array1<f64>,
+        energy: f64,
+        gradient: Array1<f64>,
+        hessian: Array2<f64>,
+    ) -> Self {
+        Self {
+            point,
+            energy,
+            gradient,
+            hessian,
+        }
+    }
+
     fn check_position(&self, position: ArrayView1<f64>) -> Result<(), SaddleError> {
         if position.len() != self.point.len() {
             return Err(SaddleError::Shape(
@@ -513,7 +529,22 @@ impl HyperplaneSampler for LammpsHyperplaneSampler {
                             .into(),
                     )
                 })?;
-            engine.set_thermodynamic_coupling(lambda, reference, plane.dim())?;
+            // A lambda of one adds no harmonic force, so the live LAMMPS
+            // potential is already the unmixed full potential. The mixing
+            // hook is required only when that force is nonzero.
+            if lambda == 1.0 {
+                if reference.point.len() != plane.dim()
+                    || reference.gradient.len() != plane.dim()
+                    || reference.hessian.dim() != (plane.dim(), plane.dim())
+                {
+                    return Err(SaddleError::Shape(
+                        "LAMMPS thermodynamic reference does not match the plane dimension".into(),
+                    ));
+                }
+                reference.energy_at(reference.point.view())?;
+            } else {
+                engine.set_thermodynamic_coupling(lambda, reference, plane.dim())?;
+            }
             Some(reference)
         } else {
             None
@@ -686,6 +717,14 @@ type MdSetThermodynamicCouplingFn = unsafe extern "C" fn(
     usize,
 ) -> c_int;
 type MdPotentialEnergyFn = unsafe extern "C" fn(*mut c_void, *const f64, usize, *mut f64) -> c_int;
+type NveStateFn =
+    unsafe extern "C" fn(*mut c_void, *mut f64, *mut f64, usize, *mut NveObservation) -> c_int;
+
+#[repr(C)]
+struct NveObservation {
+    potential_energy_ev: f64,
+    kinetic_energy_ev: f64,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -712,6 +751,7 @@ struct Engine {
     md_state: MdStateFn,
     md_set_thermodynamic_coupling: Option<MdSetThermodynamicCouplingFn>,
     md_potential_energy: Option<MdPotentialEnergyFn>,
+    nve_state: Option<NveStateFn>,
     _library: Library,
 }
 
@@ -774,6 +814,10 @@ impl Engine {
                 .get::<MdPotentialEnergyFn>(b"lammpc_session_md_potential_energy\0")
                 .ok()
                 .map(|symbol| *symbol);
+            let nve_state = library
+                .get::<NveStateFn>(b"lammpc_session_nve_state\0")
+                .ok()
+                .map(|symbol| *symbol);
             if available() == 0 {
                 return Err(SaddleError::Surface(
                     "lammpc was built without LAMMPS".into(),
@@ -801,6 +845,7 @@ impl Engine {
                 md_state,
                 md_set_thermodynamic_coupling,
                 md_potential_energy,
+                nve_state,
                 _library: library,
             })
         }
@@ -863,21 +908,43 @@ impl Engine {
     }
 
     fn full_potential_energy(&mut self, position: &[f64]) -> Result<f64, SaddleError> {
-        let evaluate = self.md_potential_energy.ok_or_else(|| {
-            SaddleError::Surface(
-                "liblammpc lacks lammpc_session_md_potential_energy; thermodynamic \
-                 integration needs the unmixed full potential at the sampled geometry"
-                    .into(),
-            )
-        })?;
-        let mut energy = 0.0;
-        let status =
-            unsafe { evaluate(self.session, position.as_ptr(), position.len(), &mut energy) };
-        self.check(status)?;
-        if !energy.is_finite() {
-            return Err(SaddleError::NonFinite("LAMMPS potential energy"));
+        if let Some(evaluate) = self.md_potential_energy {
+            let mut energy = 0.0;
+            let status =
+                unsafe { evaluate(self.session, position.as_ptr(), position.len(), &mut energy) };
+            self.check(status)?;
+            return finite_potential(energy);
         }
-        Ok(energy)
+        let current = self.state(position.len())?;
+        let same_geometry = current.positions.len() == position.len()
+            && current
+                .positions
+                .iter()
+                .zip(position)
+                .all(|(stored, requested)| stored == requested);
+        if !same_geometry {
+            return Err(missing_potential_symbol());
+        }
+        self.live_potential_energy(position.len())
+    }
+
+    fn live_potential_energy(&mut self, dimension: usize) -> Result<f64, SaddleError> {
+        let read = self.nve_state.ok_or_else(missing_potential_symbol)?;
+        let mut observation = NveObservation {
+            potential_energy_ev: 0.0,
+            kinetic_energy_ev: 0.0,
+        };
+        let status = unsafe {
+            read(
+                self.session,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dimension,
+                &mut observation,
+            )
+        };
+        self.check(status)?;
+        finite_potential(observation.potential_energy_ev)
     }
 
     fn initialize(
@@ -997,6 +1064,21 @@ impl Drop for Engine {
             (self.finalize)();
         }
     }
+}
+
+fn finite_potential(energy: f64) -> Result<f64, SaddleError> {
+    if !energy.is_finite() {
+        return Err(SaddleError::NonFinite("LAMMPS potential energy"));
+    }
+    Ok(energy)
+}
+
+fn missing_potential_symbol() -> SaddleError {
+    SaddleError::Surface(
+        "liblammpc lacks lammpc_session_md_potential_energy; thermodynamic \
+         integration needs the unmixed full potential at the sampled geometry"
+            .into(),
+    )
 }
 
 fn load_error(error: libloading::Error) -> SaddleError {
