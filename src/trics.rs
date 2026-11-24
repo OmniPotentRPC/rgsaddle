@@ -127,7 +127,10 @@ pub struct TricsConfig {
     pub coordinates: TricConfig,
     /// Internal to Cartesian inversion controls.
     pub inversion: TricInversionConfig,
-    /// Largest diagnostic level considered stable.
+    /// Largest diagnostic level considered stable. A segment is only
+    /// interpolated in a coordinate system whose diagnostic stays at or
+    /// below it on every image of the segment, including its splice
+    /// overlap.
     pub diagnostic_threshold: u8,
     /// Maximum atom mismatch that ends endpoint splicing, in angstrom.
     pub splice_tolerance: f64,
@@ -1130,16 +1133,7 @@ fn segment_candidates(
                     candidates.push(system);
                 }
             }
-            let has_strict = candidates
-                .iter()
-                .any(|&system| expanded_level(system) <= threshold);
-            candidates.retain(|&system| {
-                if has_strict {
-                    expanded_level(system) <= threshold
-                } else {
-                    core_level(system) <= threshold && expanded_level(system) < 3
-                }
-            });
+            candidates.retain(|&system| expanded_level(system) <= threshold);
             candidates.sort_by_key(|&system| {
                 let endpoint_priority = if index == 0 && system == segment.start
                     || index + 1 == segments.len() && system == segment.end
@@ -3463,5 +3457,107 @@ mod tests {
             assert_eq!(max_diag, 0);
         }
         assert!(!candidates[0].contains(&0));
+    }
+
+    fn bent_triatomic_path(degrees: &[f64]) -> Array2<f64> {
+        let mut path = Array2::zeros((degrees.len(), 9));
+        for (image, angle) in degrees.iter().copied().enumerate() {
+            let radians = angle.to_radians();
+            path.row_mut(image).assign(&array![
+                -1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                radians.cos(),
+                radians.sin(),
+                0.0
+            ]);
+        }
+        path
+    }
+
+    fn segment_level(
+        systems: &[TricSystem],
+        path: &Array2<f64>,
+        segment: &TricsSegment,
+        system: usize,
+    ) -> u8 {
+        (segment.start..=segment.end)
+            .map(|image| systems[system].diagnostic(path.row(image)))
+            .max()
+            .unwrap()
+    }
+
+    #[test]
+    fn segment_candidates_never_exceed_the_diagnostic_threshold() {
+        let path = bent_triatomic_path(&[60.0, 40.0, 30.0, 20.0, 10.0, 20.0, 30.0, 40.0, 60.0]);
+        let config = TricConfig::default().with_bonds(Some(vec![(0, 1), (1, 2)]));
+        let systems = tric_systems(path.view(), &config).unwrap();
+        let matrix = diagnostic_matrix(&systems, path.view()).unwrap();
+        assert_eq!(matrix[(0, 2)], 0);
+        assert_eq!(matrix[(0, 3)], 1);
+        assert_eq!(matrix[(0, 4)], 2);
+        assert_eq!(matrix[(3, 0)], 2);
+        assert_eq!(matrix[(3, 4)], 0);
+        let segments = [
+            TricsSegment {
+                start: 0,
+                end: 3,
+                system: 1,
+            },
+            TricsSegment {
+                start: 5,
+                end: 8,
+                system: 7,
+            },
+        ];
+        let cases: [(u8, [&[usize]; 2]); 3] = [
+            (0, [&[], &[]]),
+            (1, [&[0, 1, 2], &[6, 7, 8]]),
+            (2, [&[0, 1, 2, 3], &[5, 6, 7, 8]]),
+        ];
+        for (threshold, wanted) in cases {
+            let candidates = segment_candidates(&segments, &systems, path.view(), threshold);
+            assert_eq!(candidates.len(), segments.len());
+            for ((segment, found), wanted) in segments.iter().zip(&candidates).zip(wanted) {
+                for &system in found {
+                    let level = segment_level(&systems, &path, segment, system);
+                    assert!(
+                        level <= threshold,
+                        "system {system} reaches level {level} above threshold {threshold}"
+                    );
+                }
+                let mut found = found.clone();
+                found.sort_unstable();
+                assert_eq!(found, wanted, "threshold {threshold}");
+            }
+        }
+    }
+
+    #[test]
+    fn trics_path_selects_only_systems_within_the_diagnostic_threshold() {
+        let path = bent_triatomic_path(&[60.0, 40.0, 30.0, 20.0, 10.0, 20.0, 30.0, 40.0, 60.0]);
+        let coordinates = TricConfig::default().with_bonds(Some(vec![(0, 1), (1, 2)]));
+        let systems = tric_systems(path.view(), &coordinates).unwrap();
+        let config = |threshold| {
+            TricsConfig::default()
+                .with_coordinates(coordinates.clone())
+                .with_diagnostic_threshold(threshold)
+        };
+        let error = trics_path(path.view(), &config(0)).unwrap_err();
+        assert!(matches!(error, SaddleError::Solver(_)), "{error:?}");
+        for (threshold, n_segments) in [(1, 3), (2, 1)] {
+            let report = trics_path(path.view(), &config(threshold)).unwrap();
+            assert_eq!(report.segments.len(), n_segments);
+            for segment in &report.segments {
+                let level = segment_level(&systems, &path, segment, segment.system);
+                assert!(
+                    level <= threshold,
+                    "{segment:?} reaches level {level} above threshold {threshold}"
+                );
+            }
+        }
     }
 }
