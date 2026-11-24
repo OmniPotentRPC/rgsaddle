@@ -1,5 +1,5 @@
 //! Dynamic NEB, the image-wise relaxation of Lindgren, Kastlunger and
-//! Peterson, J. Chem. Theory Comput. 15, 5787 (2019), doi:10.1021/acs.jctc.9b00684,
+//! Peterson, J. Chem. Theory Comput. 15, 5787 (2019), doi:10.1021/acs.jctc.9b00633,
 //! as ASE 3.29 implements it in `ase.mep.neb.DyNEB`.
 //!
 //! An image whose largest per-atom force lies under the threshold keeps
