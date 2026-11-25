@@ -1,0 +1,2 @@
+The Context7 docs workflow runs on each push to ~develop~.
+It exports every tracked Org file to Markdown, copies the authored Markdown and reStructuredText that have no Org source, writes ~context7.json~, and publishes that tree as one parentless commit on the orphan branch ~context7-docs~.
