@@ -925,7 +925,7 @@ fn quick_direction_cover_sanity() {
             )
             .unwrap();
             let delta = &landed.positions - minimum;
-            if (delta.dot(&delta) / arms as f64).sqrt() < 0.02 {
+            if (delta.dot(&delta) / (delta.len() / 3) as f64).sqrt() < 0.02 {
                 back += 1;
             }
         }
