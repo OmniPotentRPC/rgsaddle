@@ -53,6 +53,7 @@ use crate::minmode::{
     FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
     build_solver, translated_gradient,
 };
+use crate::saddle_index::counts_as_negative;
 
 /// Which block iteration finds the k lowest pairs when `k > 1`.
 ///
@@ -142,6 +143,13 @@ pub struct IndexKConfig {
     pub max_block_iterations: usize,
     /// Block solver used when `k > 1`.
     pub block: BlockEigenKind,
+    /// Curvature threshold for convergence: every sought curvature must
+    /// lie strictly below `-negative_tol` in energy per length squared.
+    /// Defaults to `0.0` so standalone searches require strictly negative
+    /// curvatures. [`crate::LandscapeConfig`] passes
+    /// [`crate::SaddleIndexCheck::negative_tol`] here so legs and
+    /// certification share one threshold.
+    pub negative_tol: f64,
 }
 
 with_setters!(IndexKConfig {
@@ -150,6 +158,7 @@ with_setters!(IndexKConfig {
     with_residual_tol => residual_tol: val f64,
     with_max_block_iterations => max_block_iterations: val usize,
     with_block => block: val BlockEigenKind,
+    with_negative_tol => negative_tol: val f64,
 });
 
 impl IndexKConfig {
@@ -169,6 +178,7 @@ impl IndexKConfig {
             residual_tol,
             max_block_iterations: 30,
             block,
+            negative_tol: 0.0,
         }
     }
 }
@@ -182,7 +192,8 @@ impl Default for IndexKConfig {
 /// One index-k translation.
 #[derive(Clone, Debug)]
 pub struct IndexKReport {
-    /// Running until every sought curvature is negative and the force is under tolerance.
+    /// Running until every sought curvature is below
+    /// `-config.negative_tol` and the force is under tolerance.
     pub status: MinModeStatus,
     /// Geometry after the step.
     pub position: Array1<f64>,
@@ -354,6 +365,11 @@ pub struct IndexKSession {
     modes: Array2<f64>,
     curvatures: Array1<f64>,
     translated: Array1<f64>,
+    negative_tol: f64,
+    /// Steps on which `k = 1` had a vanishing force and a curvature above
+    /// `-negative_tol`. The one-mode session then reports the same
+    /// iteration again, so this count keeps a host loop moving.
+    refused_steps: usize,
 }
 
 enum Engine {
@@ -403,6 +419,7 @@ impl IndexKSession {
         }
         let seed = prepare_seed(x.len(), config.k, modes)?;
         if config.k == 1 {
+            let negative_tol = config.negative_tol;
             let mode = seed.column(0).to_owned();
             let session = MinModeSession::new(config.search.with_saddle_check(None), x, mode)?;
             let stored = column_matrix(session.mode());
@@ -412,9 +429,12 @@ impl IndexKSession {
                 modes: stored,
                 curvatures,
                 translated: Array1::zeros(0),
+                negative_tol,
+                refused_steps: 0,
             });
         }
         crate::band::check_force_driven(&config.search.method)?;
+        let negative_tol = config.negative_tol;
         let n = x.len();
         let solver = build_solver(
             &config.search.method,
@@ -441,7 +461,20 @@ impl IndexKSession {
             modes: seed.clone(),
             curvatures: Array1::from_elem(seed.ncols(), f64::NAN),
             translated: Array1::zeros(0),
+            negative_tol,
+            refused_steps: 0,
         })
+    }
+
+    /// Convergence norm for the one-mode session and the block session.
+    ///
+    /// A landscape leg passes [`crate::LandscapeConfig::force_gate`] so the
+    /// search stops on the same norm the pathway check uses.
+    pub fn set_force_gate(&mut self, gate: ForceGate) {
+        match &mut self.engine {
+            Engine::One(session) => session.set_force_gate(gate),
+            Engine::Block(session) => session.force_gate = gate,
+        }
     }
 
     /// Current geometry.
@@ -496,15 +529,31 @@ impl IndexKSession {
                             "min-mode step did not record a translated force".into(),
                         )
                     })?;
+                // The one-mode translator still treats any negative curvature as
+                // unstable. Convergence uses the saddle-index threshold, so a
+                // curvature between that threshold and zero stays running.
+                // That session repeats its iteration once the force has
+                // vanished, and the refusal count advances the report.
+                let (status, iteration) = if report.status == MinModeStatus::Converged
+                    && !counts_as_negative(report.curvature, self.negative_tol)
+                {
+                    self.refused_steps = self.refused_steps.saturating_add(1);
+                    (
+                        MinModeStatus::Running,
+                        report.iteration.saturating_add(self.refused_steps),
+                    )
+                } else {
+                    (report.status, report.iteration)
+                };
                 Ok(IndexKReport {
-                    status: report.status,
+                    status,
                     position: session.position().to_owned(),
                     max_force: report.max_force,
                     modes: self.modes.clone(),
                     curvatures: self.curvatures.clone(),
                     translated_force: self.translated.clone(),
                     rotations: report.rotations,
-                    iteration: report.iteration,
+                    iteration,
                     evaluations: report.evaluations,
                 })
             }
@@ -575,7 +624,10 @@ impl BlockSession {
         let previous = self.modes.clone();
         align_signs(&mut modes, previous.view());
         let eff = translated_force(gradient.view(), modes.view(), curvatures.view())?;
-        let all_negative = curvatures.iter().all(|value| *value < 0.0);
+        let all_negative = curvatures
+            .iter()
+            .copied()
+            .all(|value| counts_as_negative(value, self.config.negative_tol));
         let max_force_here = self.force_gate.value(gradient.view());
         if all_negative && max_force_here <= self.config.search.force_tol {
             self.modes = modes.clone();
@@ -645,7 +697,10 @@ impl BlockSession {
             gradient: arrived_gradient,
         });
         let status = if max_force <= self.config.search.force_tol
-            && curvatures.iter().all(|value| *value < 0.0)
+            && curvatures
+                .iter()
+                .copied()
+                .all(|value| counts_as_negative(value, self.config.negative_tol))
         {
             MinModeStatus::Converged
         } else {
@@ -873,6 +928,11 @@ fn validate_config(config: &IndexKConfig, n: usize) -> Result<(), SaddleError> {
     if config.max_block_iterations == 0 {
         return Err(SaddleError::Invalid(
             "block iteration cap must be positive".into(),
+        ));
+    }
+    if !(config.negative_tol.is_finite() && config.negative_tol >= 0.0) {
+        return Err(SaddleError::Invalid(
+            "negative curvature tolerance must be finite and non-negative".into(),
         ));
     }
     Ok(())

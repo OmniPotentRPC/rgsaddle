@@ -162,6 +162,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_stencil_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_create=. Purpose: Create an index-k session. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_step=. Purpose: One index-k step. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_indexk_step_at=. Purpose: rgsaddle_indexk_step with a geometry-aware Hessian action, ABI minor 66. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_modes=. Purpose: Writes n-by-k row-major modes and k curvatures. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_translated=. Purpose: The effective gradient of the last successful step, length 3 * n_atoms. Parameters: the declaration. Units: the caller's.
@@ -200,6 +201,13 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_lineb_solve_counted_orbit=. Purpose: Counted solve with optional bead observations. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_lineb_solve_counted_turning=. Purpose: Counted orbit solve with optional return-turn geometry and energy checks. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_lineb_solve_counted_rate=. Purpose: Counted solve with selectable image-Hessian interpolation. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_config_default=. Purpose: Write the Rust defaults. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_create=. Purpose: Open a search. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_run=. Purpose: Run the search. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_node=. Purpose: Read one node. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_modes=. Purpose: Unstable modes, row-major, 3 * n_atoms by the saddle index. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_edge=. Purpose: One downward edge. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_landscape_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_set_refine=. Purpose: Per-step refine stepper, ABI minor 60. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_is_refining=. Purpose: 1 when the last first-order step used the refine stepper, else 0. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_geodesic_config_default=. Purpose: Fill `out` with the default geodesic controls (step and gradient tolerances 1e-6, max_move 0.5, lower_ratio 0.95, upper_ratio 1.1, 40 sweeps, 40 iterations, memory 8, 10 bound samples, 32 images, seed 0). Parameters: the declaration. Units: the caller's.
@@ -224,6 +232,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_stencil_t=. Purpose: Opaque session handle in include/rgsaddle.h.
 - =RgsaddleIndexK=. Purpose: Opaque session handle in include/rgsaddle.h.
 - =RgsaddleGrowingString=. Purpose: Opaque handle to a growing string session, ABI minor 44.
+- =RgsaddleLandscape=. Purpose: Opaque session handle in include/rgsaddle.h.
 - =rgsaddle_version_t=. Purpose: Version head carried by every wire struct.
 - =rgsaddle_status_t=. Purpose: C enum typedef in include/rgsaddle.h.
 - =rgsaddle_tangent_t=. Purpose: C enum typedef in include/rgsaddle.h.
@@ -277,6 +286,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_lineb_orbit_t=. Purpose: Opt-in observations from the rate's own surface calls.
 - =rgsaddle_lineb_turning_t=. Purpose: Return-turn agreement for the interpolated-force clock, in the caller's units.
 - =rgsaddle_lineb_rate_diagnostics_t=. Purpose: Geometry counts within the rate, and the Cartesian finite-difference displacement used at the path images (NaN for direct or path-only solves).
+- =rgsaddle_landscape_config_t=. Purpose: C struct typedef in include/rgsaddle.h.
+- =rgsaddle_landscape_report_t=. Purpose: C struct typedef in include/rgsaddle.h.
 - =rgsaddle_refine_method_t=. Purpose: Refine stepper of rgsaddle_band_set_refine, ABI minor 60.
 - =rgsaddle_geodesic_config_t=. Purpose: Geodesic interpolation controls.
 - =rgsaddle_hyperplane_emit_fn=. Purpose: Callback typedef in include/rgsaddle.h.
@@ -284,6 +295,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_solid_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_hessian_fn=. Purpose: Callback typedef in include/rgsaddle.h.
+- =rgsaddle_hessian_at_fn=. Purpose: Geometry-aware Hessian action, ABI minor 66.
 - =rgsaddle_stencil_eval_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_geodesic_chart_fn=. Purpose: Redundant coordinate chart for geodesic interpolation.
 
@@ -357,6 +369,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =RGSADDLE_NOT_EQUILIBRATED=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_NOT_CONVERGED=. Purpose: Enumerator of =rgsaddle_status_t=.
+- =RGSADDLE_LANDSCAPE_BOUND=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_TANGENT_SIMPLE=. Purpose: Enumerator of =rgsaddle_tangent_t=.
 - =RGSADDLE_TANGENT_IMPROVED=. Purpose: Enumerator of =rgsaddle_tangent_t=.
 - =RGSADDLE_SPRING_UNIFORM=. Purpose: Enumerator of =rgsaddle_spring_t=.

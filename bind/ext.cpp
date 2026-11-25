@@ -1810,6 +1810,223 @@ SessionReport growing_string_run_py(PyGrowingString &self, nb::callable fn,
   return last;
 }
 
+struct PyCriticalPoint {
+  std::vector<double> position;
+  double energy = 0.0;
+  int index = 0;
+  std::vector<double> curvatures;
+  std::int64_t evaluations = 0;
+};
+
+struct PyLandscapeEdge {
+  std::int64_t parent = 0;
+  std::int64_t child = 0;
+  int direction = 0;
+  int sign = 0;
+  std::int64_t evaluations = 0;
+};
+
+struct PyPathway {
+  std::vector<PyCriticalPoint> nodes;
+  std::vector<PyLandscapeEdge> edges;
+  std::int64_t evaluations = 0;
+};
+
+struct PyLandscape {
+  RgsaddleLandscape *handle = nullptr;
+  std::int64_t n_atoms = 0;
+
+  PyLandscape() = default;
+  PyLandscape(const PyLandscape &) = delete;
+  PyLandscape &operator=(const PyLandscape &) = delete;
+  PyLandscape(PyLandscape &&other) noexcept : handle(other.handle), n_atoms(other.n_atoms) {
+    other.handle = nullptr;
+  }
+  PyLandscape &operator=(PyLandscape &&other) noexcept {
+    if (this != &other) {
+      rgsaddle_landscape_free(handle);
+      handle = other.handle;
+      n_atoms = other.n_atoms;
+      other.handle = nullptr;
+    }
+    return *this;
+  }
+  ~PyLandscape() { rgsaddle_landscape_free(handle); }
+};
+
+int landscape_method(const std::string &name) {
+  if (name == "dimer") {
+    return 0;
+  }
+  if (name == "lanczos") {
+    return 1;
+  }
+  if (name == "lobpcg") {
+    return 2;
+  }
+  throw nb::value_error("method must be dimer, lanczos, or lobpcg");
+}
+
+PyLandscape make_landscape(Vector position, nb::handle modes, double duplicate_distance, double push,
+                           std::int64_t max_nodes, std::int64_t max_evaluations, std::int64_t max_steps,
+                           double force_tol, double relax_force_tol, double max_move, double max_atom_move,
+                           double initial_step, double dr, double rotation_tol, double residual_tol,
+                           std::int64_t max_rotations, int max_block_iterations, const std::string &method) {
+  if (position.shape(0) <= 0 || position.shape(0) % 3 != 0) {
+    throw nb::value_error("position must be a positive multiple of three");
+  }
+  rgsaddle_landscape_config_t config{};
+  if (rgsaddle_landscape_config_default(&config) != RGSADDLE_OK) {
+    throw nb::value_error("landscape defaults were refused");
+  }
+  config.duplicate_distance = duplicate_distance;
+  config.push = push;
+  config.max_nodes = max_nodes;
+  config.max_evaluations = max_evaluations;
+  config.max_steps = max_steps;
+  config.force_tol = force_tol;
+  config.relax_force_tol = relax_force_tol;
+  config.max_move = max_move;
+  config.max_atom_move = max_atom_move;
+  config.initial_step = initial_step;
+  config.dr = dr;
+  config.rotation_tol = rotation_tol;
+  config.residual_tol = residual_tol;
+  config.max_rotations = max_rotations;
+  config.max_block_iterations = max_block_iterations;
+  config.method = landscape_method(method);
+  const double *mode_data = nullptr;
+  int k = 0;
+  std::vector<double> packed;
+  if (!modes.is_none()) {
+    auto block = nb::cast<nb::ndarray<const double, nb::ndim<2>, nb::c_contig, nb::device::cpu>>(modes);
+    if (block.shape(0) != position.shape(0) || block.shape(1) < 1) {
+      throw nb::value_error("modes must have shape (3N, k) with k at least 1");
+    }
+    packed.assign(block.data(), block.data() + block.size());
+    mode_data = packed.data();
+    k = static_cast<int>(block.shape(1));
+  }
+  PyLandscape out;
+  out.n_atoms = static_cast<std::int64_t>(position.shape(0) / 3);
+  out.handle = rgsaddle_landscape_create(&config, out.n_atoms, position.data(), mode_data, k);
+  if (out.handle == nullptr) {
+    throw nb::value_error("landscape configuration was refused");
+  }
+  return out;
+}
+
+struct LandscapeCallback {
+  ConnectCallback surface;
+  nb::callable *hessian;
+};
+
+extern "C" rgsaddle_status_t landscape_python_surface(void *user, rgsaddle_surface_request_t *req) {
+  auto *state = static_cast<LandscapeCallback *>(user);
+  return connect_python_surface(&state->surface, req);
+}
+
+extern "C" int landscape_python_hessian(void *user, int64_t n, const double *position,
+                                        const double *vector, double *action) {
+  auto *state = static_cast<LandscapeCallback *>(user);
+  if (state == nullptr || state->hessian == nullptr || position == nullptr || vector == nullptr ||
+      action == nullptr || n < 1) {
+    return RGSADDLE_INVALID_PARAMETER;
+  }
+  try {
+    nb::gil_scoped_acquire gil;
+    const std::size_t count = static_cast<std::size_t>(n);
+    auto *raw_x = new double[count];
+    auto *raw_v = new double[count];
+    std::memcpy(raw_x, position, count * sizeof(double));
+    std::memcpy(raw_v, vector, count * sizeof(double));
+    nb::capsule own_x(raw_x, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+    nb::capsule own_v(raw_v, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+    const std::size_t shape[1] = {count};
+    nb::ndarray<nb::numpy, double> point(raw_x, 1, shape, own_x);
+    nb::ndarray<nb::numpy, double> direction(raw_v, 1, shape, own_v);
+    nb::object result = (*state->hessian)(point, direction);
+    auto out = nb::cast<nb::ndarray<const double, nb::ndim<1>, nb::c_contig>>(result);
+    if (static_cast<std::int64_t>(out.shape(0)) != n) {
+      throw std::invalid_argument("hessian action length must match the vector");
+    }
+    std::memcpy(action, out.data(), count * sizeof(double));
+    return 0;
+  } catch (nb::python_error &err) {
+    state->surface.ctx->capture(err);
+    return RGSADDLE_SURFACE_FAILED;
+  } catch (const std::exception &err) {
+    rgsaddle_py_set_last_error(err.what());
+    return RGSADDLE_SURFACE_FAILED;
+  }
+}
+
+PyPathway landscape_run(PyLandscape &self, nb::callable fn, nb::handle hessian) {
+  rgbind::CallContext ctx;
+  nb::callable hessian_fn;
+  nb::callable *hessian_ptr = nullptr;
+  if (!hessian.is_none()) {
+    hessian_fn = nb::cast<nb::callable>(hessian);
+    hessian_ptr = &hessian_fn;
+  }
+  LandscapeCallback state{ConnectCallback{&fn, &ctx}, hessian_ptr};
+  rgsaddle_landscape_report_t report{};
+  rgsaddle_status_t status = RGSADDLE_OK;
+  {
+    nb::gil_scoped_release release;
+    status = rgsaddle_landscape_run(self.handle, landscape_python_surface,
+                                    hessian_ptr == nullptr ? nullptr : landscape_python_hessian, &state,
+                                    &report);
+  }
+  if (ctx.has_error()) {
+    ctx.rethrow_if_set();
+  }
+  if (status == RGSADDLE_LANDSCAPE_BOUND) {
+    throw nb::value_error(
+        ("LANDSCAPE_BOUND nodes=" + std::to_string(report.n_nodes) +
+         " evaluations=" + std::to_string(report.evaluations) + " bound=" + std::to_string(report.bound))
+            .c_str());
+  }
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+  const std::size_t dof = static_cast<std::size_t>(self.n_atoms * 3);
+  PyPathway pathway;
+  pathway.evaluations = report.evaluations;
+  pathway.nodes.reserve(static_cast<std::size_t>(report.n_nodes));
+  for (std::int64_t i = 0; i < report.n_nodes; ++i) {
+    PyCriticalPoint node;
+    node.position.resize(dof);
+    int n_curvatures = 0;
+    const auto query = rgsaddle_landscape_node(self.handle, i, node.position.data(), &node.energy, &node.index,
+                                               nullptr, 0, &n_curvatures, &node.evaluations);
+    if (query != RGSADDLE_OK) {
+      status_error(query);
+    }
+    node.curvatures.resize(static_cast<std::size_t>(n_curvatures));
+    if (n_curvatures > 0) {
+      const auto filled =
+          rgsaddle_landscape_node(self.handle, i, node.position.data(), &node.energy, &node.index,
+                                  node.curvatures.data(), n_curvatures, &n_curvatures, &node.evaluations);
+      if (filled != RGSADDLE_OK) {
+        status_error(filled);
+      }
+    }
+    pathway.nodes.push_back(std::move(node));
+  }
+  pathway.edges.reserve(static_cast<std::size_t>(report.n_edges));
+  for (std::int64_t i = 0; i < report.n_edges; ++i) {
+    PyLandscapeEdge edge;
+    const auto read = rgsaddle_landscape_edge(self.handle, i, &edge.parent, &edge.child, &edge.direction,
+                                              &edge.sign, &edge.evaluations);
+    if (read != RGSADDLE_OK) {
+      status_error(read);
+    }
+    pathway.edges.push_back(edge);
+  }
+  return pathway;
+}
+
 nb::ndarray<nb::numpy, std::uint64_t> copy_u64_vector(const std::vector<std::uint64_t> &values) {
   const std::size_t n = values.empty() ? 1 : values.size();
   auto *raw = new std::uint64_t[n];
@@ -2744,6 +2961,85 @@ NB_MODULE(_core, m) {
             return copy_vector(out);
           },
           "Copy of the current Cartesian position.");
+
+  nb::class_<PyCriticalPoint>(m, "CriticalPoint")
+      .def_prop_ro("position", [](const PyCriticalPoint &node) { return copy_vector(node.position); },
+                   nb::rv_policy::move, "Coordinates of the certified point.")
+      .def_ro("energy", &PyCriticalPoint::energy, "Energy at that point.")
+      .def_ro("index", &PyCriticalPoint::index, "Saddle index: curvatures under the certificate threshold.")
+      .def_prop_ro("curvatures", [](const PyCriticalPoint &node) { return copy_vector(node.curvatures); },
+                   nb::rv_policy::move, "Lowest certified curvatures, ascending.")
+      .def_ro("evaluations", &PyCriticalPoint::evaluations,
+              "Force evaluations spent accepting this node.");
+
+  nb::class_<PyLandscapeEdge>(m, "LandscapeEdge")
+      .def_ro("parent", &PyLandscapeEdge::parent, "Index of the parent node.")
+      .def_ro("child", &PyLandscapeEdge::child, "Index of the child node.")
+      .def_ro("direction", &PyLandscapeEdge::direction, "Column of the parent's unstable block.")
+      .def_ro("sign", &PyLandscapeEdge::sign, "+1 or -1, the sense of the push.")
+      .def_ro("evaluations", &PyLandscapeEdge::evaluations, "Force evaluations of this leg.");
+
+  nb::class_<PyPathway>(m, "PathwayMap")
+      .def_prop_ro(
+          "nodes",
+          [](const PyPathway &map) {
+            nb::list nodes;
+            for (const auto &node : map.nodes) {
+              nodes.append(node);
+            }
+            return nodes;
+          },
+          nb::sig("def nodes(self) -> list[CriticalPoint]"),
+          "Certified critical points, parent first.")
+      .def_prop_ro(
+          "edges",
+          [](const PyPathway &map) {
+            nb::list edges;
+            for (const auto &edge : map.edges) {
+              edges.append(edge);
+            }
+            return edges;
+          },
+          nb::sig("def edges(self) -> list[LandscapeEdge]"),
+          "Downward connections.")
+      .def_ro("evaluations", &PyPathway::evaluations, "Every force evaluation of the search.");
+
+  nb::class_<PyLandscape>(m, "Landscape")
+      .def(
+          "__init__",
+          [](PyLandscape *self, Vector position, nb::handle modes, double duplicate_distance, double push,
+             std::int64_t max_nodes, std::int64_t max_evaluations, std::int64_t max_steps, double force_tol,
+             double relax_force_tol, double max_move, double max_atom_move, double initial_step, double dr,
+             double rotation_tol, double residual_tol, std::int64_t max_rotations, int max_block_iterations,
+             const std::string &method) {
+            new (self) PyLandscape(make_landscape(
+                position, modes, duplicate_distance, push, max_nodes, max_evaluations, max_steps, force_tol,
+                relax_force_tol, max_move, max_atom_move, initial_step, dr, rotation_tol, residual_tol,
+                max_rotations, max_block_iterations, method));
+          },
+          nb::arg("position").noconvert(), nb::arg("modes") = nb::none(), nb::arg("duplicate_distance") = 1e-3,
+          nb::arg("push") = 0.1, nb::arg("max_nodes") = 64, nb::arg("max_evaluations") = 100000,
+          nb::arg("max_steps") = 2000, nb::arg("force_tol") = 1e-3, nb::arg("relax_force_tol") = 1e-3,
+          nb::arg("max_move") = 0.2, nb::arg("max_atom_move") = 0.1, nb::arg("initial_step") = 0.1,
+          nb::arg("dr") = 1e-3, nb::arg("rotation_tol") = 1e-4, nb::arg("residual_tol") = 1e-4,
+          nb::arg("max_rotations") = 20, nb::arg("max_block_iterations") = 30, nb::arg("method") = "dimer",
+          nb::sig("def __init__(self, position: numpy.typing.NDArray[numpy.float64], modes: "
+                  "numpy.typing.NDArray[numpy.float64] | None = None, duplicate_distance: float = 0.001, "
+                  "push: float = 0.1, max_nodes: int = 64, max_evaluations: int = 100000, max_steps: int = 2000, "
+                  "force_tol: float = 0.001, relax_force_tol: float = 0.001, max_move: float = 0.2, "
+                  "max_atom_move: float = 0.1, initial_step: float = 0.1, dr: float = 0.001, "
+                  "rotation_tol: float = 0.0001, residual_tol: float = 0.0001, max_rotations: int = 20, "
+                  "max_block_iterations: int = 30, method: str = 'dimer') -> None"),
+          "Downward pathway search from a critical point. position is 3N. modes is (3N, k) or None. "
+          "method is dimer, lanczos, or lobpcg.")
+      .def("run", &landscape_run, nb::arg("surface"), nb::arg("hessian") = nb::none(),
+           nb::sig("def run(self, surface: collections.abc.Callable[..., "
+                   "tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]], "
+                   "hessian: collections.abc.Callable[..., numpy.typing.NDArray[numpy.float64]] | None = None) "
+                   "-> PathwayMap"),
+           "Follow every unstable direction down to minima. surface(x) is one image shaped (1, 3N). "
+           "hessian(x, v) returns the Hessian action at geometry x, or is omitted. "
+           "A node or evaluation limit raises ValueError and returns no pathway.");
 
   m.def("raise_status", &raise_status, nb::arg("code"),
         "Map an rgsaddle_status_t value. The message is the stored text, or the "

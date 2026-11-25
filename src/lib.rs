@@ -19,6 +19,9 @@
 //! of Ásgeirsson, Arnaldsson and Jónsson, J. Chem. Phys. 148, 102334
 //! (2018), doi:10.1063/1.5007180, and [`lineb::hqtst_rate`] turns the
 //! resulting instanton into a harmonic quantum TST rate.
+//! [`landscape::LandscapeSession`] builds a pathway map by pushing a
+//! certified saddle along each unstable eigenvector and following
+//! index-(k-1) minimum-mode dynamics down to minima.
 //!
 //! [`nichols::Index1Session`] is the index-1 search on a dense
 //! Hessian: Baker's restricted-step partitioned RFO (maximize the
@@ -260,7 +263,9 @@ pub use relax::{
     DEFAULT_FORCE_TOL, DEFAULT_MAX_STEPS, RelaxConfig, Relaxation, max_atom_force,
     relax_to_tolerance,
 };
-pub use saddle_index::{SaddleEscape, SaddleIndex, SaddleIndexCheck, saddle_index};
+pub use saddle_index::{
+    NEGATIVE_CURVATURE_TOL, SaddleEscape, SaddleIndex, SaddleIndexCheck, saddle_index,
+};
 pub use solid_dimer::{
     CellMask, IndexCheck, IndexReport, JointChart, STRAIN_VOIGT, SolidDimer, SolidDimerConfig,
     SolidDimerReport, StressCheck, VineyardIndexError, VineyardIndexReport, certify_vineyard_pair,
@@ -387,7 +392,13 @@ pub use prfo::{
 };
 
 pub mod irc;
+pub mod landscape;
 pub use irc::{IrcConfig, IrcDirection, IrcKind, IrcReport, IrcSession};
+pub use landscape::{
+    CriticalPoint, DEFAULT_DUPLICATE_DISTANCE, DEFAULT_LANDSCAPE_MAX_EVALUATIONS,
+    DEFAULT_LANDSCAPE_MAX_NODES, DEFAULT_LANDSCAPE_MAX_STEPS, DEFAULT_LANDSCAPE_PUSH,
+    LandscapeBoundKind, LandscapeConfig, LandscapeEdge, LandscapeSession, PathwayMap,
+};
 
 #[cfg(feature = "capi")]
 pub mod capi_kappa;
