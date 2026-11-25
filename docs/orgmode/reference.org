@@ -136,6 +136,7 @@ Every public module exported by =src/lib.rs=, with its public types, free functi
 | =pair_network= | Types: =Mat3i=, =PairConfig=, =PairEdge=, =PairExit=, =PairHop=, =PairMove=, =PairNetwork=, =PairStateClass=, =PairTarget=, =SensitivityCover=, =Vec3i=. Functions: =cubic_group=, =director=, =norm2=, =sensitivity_cover= |
 | =pes= | Types: =CartesianHessian=, =CartesianPes=, =HessUpdate= |
 | =pes_internal= | Types: =CellCartesianPes=, =CellInternalPes=, =HessianCarry=, =InternalPes=, =RebuildReason=, =RebuildReport=, =SellaPes=. Functions: =niggli_reduce_cell=, =niggli_reduce_vectors=, =place_perp_dummy= |
+| =placement= | Types: =SitePlacement=. Functions: =push_past=, =translate_onto_sites= |
 | =prfo= | Types: =PartitionedRationalFunctionOptimization=, =PrfoKind=. Functions: =partitioned_rfo_eigen=, =prfo_get_s=, =prfo_stepper=, =prfo_trust_region=, =restricted_partitioned_rfo=, =restricted_prfo_displacement=. Constants: =SYNONYMS= |
 | =prfo_restricted= | Types: =PrfoKind=. Functions: =partitioned_rfo_eigen=, =restricted_partitioned_rfo=, =restricted_prfo_displacement= |
 | =projection= | Types: =ProjectionKind=. Functions: =climbing_image_force=, =dneb_component=, =force_perp= |
