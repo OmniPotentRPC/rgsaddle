@@ -9,7 +9,9 @@ crates by rev then locks a second copy, and the types do not unify.
 The checks cover every workspace member here and the dependent under
 ``ci/consumer``. Each git dependency names a 40-hex ``rev`` and no tag
 or branch, asks for the exact version of the crate at that rev, and one
-crate name has one git source. Every git source in a lockfile is that
+crate name has one git source. A development dependency may leave the
+version out: the rev still fixes it, and the published manifest then
+omits it, which a crate that is not on crates.io needs. Every git source in a lockfile is that
 rev. ``cargo tree -d`` over all features, targets and edge kinds lists
 one copy of each crate in ``OWN`` and of each git crate.
 """
@@ -112,7 +114,7 @@ def check_manifests(where: Path, label: str) -> list[str]:
             version = locked.get((name, source))
             if version is None:
                 errors.append(f"{what} from {source} is not in {label}/Cargo.lock")
-            elif req != f"={version}":
+            elif req != f"={version}" and not (dep.get("kind") == "dev" and req == "*"):
                 errors.append(
                     f"{what} asks for {req!r}, but the crate at that rev is {version}; "
                     f"use '={version}'"
