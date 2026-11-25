@@ -149,7 +149,8 @@ pub fn factor_cyclic(
 
 impl CyclicFactor {
     /// Solve `Mx = rhs` and correct once when the residual exceeds
-    /// [`SOLVE_REFINE_TOLERANCE`] times `max(1, ‖rhs‖)`.
+    /// [`SOLVE_REFINE_TOLERANCE`] times `‖rhs‖`. A zero right-hand side
+    /// refines when the residual is positive.
     ///
     /// # Errors
     ///
@@ -590,7 +591,11 @@ fn euclidean(values: &[f64]) -> f64 {
 }
 
 fn refine_triggered(residual: f64, rhs_norm: f64) -> bool {
-    residual > SOLVE_REFINE_TOLERANCE * rhs_norm.max(1.0)
+    if rhs_norm == 0.0 {
+        residual > 0.0
+    } else {
+        residual > SOLVE_REFINE_TOLERANCE * rhs_norm
+    }
 }
 
 #[cfg(test)]
@@ -766,8 +771,12 @@ mod tests {
         assert!(!refine_triggered(1e-12, 1.0));
         assert!(refine_triggered(1e-10, 1.0));
         assert!(!refine_triggered(0.0, 1.0));
-        // `max(1, ‖b‖)` keeps a tiny right-hand side from lowering the bar.
-        assert!(!refine_triggered(1e-12, 1e-8));
+        // A zero right-hand side refines only when a residual remains.
+        assert!(!refine_triggered(0.0, 0.0));
+        assert!(refine_triggered(1e-30, 0.0));
+        // Relative to ‖b‖, with no unit floor: 1e-12 exceeds 1e-11 * 1e-8.
+        assert!(refine_triggered(1e-12, 1e-8));
+        assert!(!refine_triggered(1e-11 * 1e-8, 1e-8));
         // A right-hand scale above 1 distinguishes multiplication from division.
         assert!(!refine_triggered(2e-11, 2.0));
         assert!(refine_triggered(2e-11 * 1.0000001, 2.0));
