@@ -61,13 +61,26 @@ use crate::error::SaddleError;
 use crate::minmode::{FiniteDifference, PointSurface};
 use crate::stats::Rng;
 
+/// A curvature strictly below the negation of this value, in energy per
+/// length squared, counts as a negative mode.
+///
+/// [`SaddleIndexCheck::negative_tol`] defaults to this tolerance, and
+/// [`crate::LandscapeConfig`] passes [`SaddleIndexCheck::negative_tol`]
+/// to both its child [`crate::IndexKSession`] legs and certification so
+/// they share one threshold.
+pub const NEGATIVE_CURVATURE_TOL: f64 = 1.0e-3;
+
+pub(crate) fn counts_as_negative(curvature: f64, negative_tol: f64) -> bool {
+    curvature < -negative_tol
+}
+
 /// Controls of the saddle-index certification.
 ///
 /// The defaults resolve the four lowest curvatures, and the first
 /// non-negative one past every negative curvature found, to a Ritz
 /// residual of 1e-2 with blocks of two forward-difference actions of
-/// displacement 1e-3, within 100 actions. A curvature under -1e-3
-/// counts as negative. Lengths are the host's.
+/// displacement 1e-3, within 100 actions. A curvature under
+/// [`NEGATIVE_CURVATURE_TOL`] counts as negative. Lengths are the host's.
 ///
 /// Non-exhaustive: start from [`SaddleIndexCheck::default`] and chain
 /// the `with_*` setters.
@@ -128,7 +141,7 @@ impl Default for SaddleIndexCheck {
             block: 2,
             lowest: 4,
             residual_tol: 1e-2,
-            negative_tol: 1e-3,
+            negative_tol: NEGATIVE_CURVATURE_TOL,
             max_actions: 100,
             dr: 1e-3,
             difference: FiniteDifference::Forward,
