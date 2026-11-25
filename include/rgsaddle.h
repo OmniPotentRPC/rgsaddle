@@ -2389,6 +2389,66 @@ rgsaddle_status_t rgsaddle_geodesic_morse(
     const rgsaddle_geodesic_config_t *config, double *out, double *length,
     double *lower, double *upper);
 
+/**
+ * Mass-weighted finite-difference Vineyard prefactor controls. ABI minor 66.
+ * `flags` and `reserved` must be 0. `difference` is `rgsaddle_difference_t`.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double step;
+  int32_t difference;
+  int32_t reserved;
+  double positive_tol;
+  double negative_tol;
+} rgsaddle_vineyard_config_t;
+
+/**
+ * Mass-weighted Vineyard prefactor summary report. ABI minor 66.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double prefactor_hz;
+  double nu0_thz;
+  double unstable_eigenvalue;
+  int64_t n_min_modes;
+  int64_t n_saddle_modes;
+  int64_t evaluations;
+} rgsaddle_vineyard_report_t;
+
+/**
+ * Look up standard atomic mass in amu by atomic number `z` in [1, 118].
+ * ABI minor 66.
+ */
+rgsaddle_status_t rgsaddle_atomic_mass(int32_t z, double *out);
+
+/**
+ * Look up standard atomic mass in amu by IUPAC element symbol.
+ * ABI minor 66.
+ */
+rgsaddle_status_t rgsaddle_atomic_mass_by_symbol(const char *symbol,
+                                                 double *out);
+
+/**
+ * Fill `out` with default Vineyard finite-difference controls (step 1e-2,
+ * central differences, positive_tol 1e-8, negative_tol 1e-4). ABI minor 66.
+ */
+rgsaddle_status_t rgsaddle_vineyard_config_default(
+    rgsaddle_vineyard_config_t *out);
+
+/**
+ * Evaluate the harmonic Vineyard prefactor from dense finite-difference
+ * Hessians on `surface` at `x_min` and `x_saddle`. `x_min` and `x_saddle`
+ * hold `3 * n_atoms` doubles; `atom_masses` holds `n_atoms` positive masses
+ * in amu. ABI minor 66.
+ */
+rgsaddle_status_t rgsaddle_vineyard_fd(
+    const rgsaddle_vineyard_config_t *config, int64_t n_atoms,
+    const double *x_min, const double *x_saddle, const double *atom_masses,
+    rgsaddle_surface_fn surface, void *user,
+    rgsaddle_vineyard_report_t *report);
+
 #ifdef __cplusplus
 }
 #endif

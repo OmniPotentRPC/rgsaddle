@@ -318,6 +318,41 @@ def saddle_index(surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64
     Saddle index of x (ABI minor 40): the lowest curvatures on the free coordinates by block Lanczos on forward-difference Hessian actions, each one surface call. surface(x) is one image shaped (1, 3N). gradient at x saves one call; mode seeds the space; fixed is one uint8 per atom, 1 for a fixed atom.
     """
 
+class VineyardReport:
+    @property
+    def prefactor_hz(self) -> float:
+        """Harmonic transition-state prefactor in s^-1 (Hz)."""
+
+    @property
+    def nu0_thz(self) -> float:
+        """Harmonic transition-state prefactor in THz."""
+
+    @property
+    def unstable_eigenvalue(self) -> float:
+        """Single negative mass-weighted eigenvalue at the saddle in eV/(u A^2)."""
+
+    @property
+    def n_min_modes(self) -> int:
+        """Number of positive modes retained at the minimum."""
+
+    @property
+    def n_saddle_modes(self) -> int:
+        """Number of positive modes retained at the saddle."""
+
+    @property
+    def evaluations(self) -> int:
+        """Surface gradient evaluations consumed."""
+
+def atomic_mass(element: int | str) -> float:
+    """
+    Standard atomic mass in amu by atomic number (1..118) or IUPAC element symbol.
+    """
+
+def vineyard_prefactor_fd(surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]], x_min: numpy.typing.NDArray[numpy.float64], x_saddle: numpy.typing.NDArray[numpy.float64], atom_masses: numpy.typing.NDArray[numpy.float64], step: float = 0.01, difference: str = 'central', positive_tol: float = 1e-08, negative_tol: float = 0.0001) -> VineyardReport:
+    """
+    Harmonic Vineyard prefactor from mass-weighted finite-difference Hessians on surface at x_min and x_saddle.
+    """
+
 def project_band(positions: numpy.typing.NDArray[numpy.float64], energies: numpy.typing.NDArray[numpy.float64], gradients: numpy.typing.NDArray[numpy.float64], k: float = 0.1, climb: bool = False, projection: str = 'neb', tangent: str = 'improved', remove_translation: bool = False, force_tol: float = 0.001, fixed: numpy.typing.NDArray[numpy.uint8] | None = None, spring_ks: numpy.typing.NDArray[numpy.float64] | None = None, cell: numpy.typing.NDArray[numpy.float64] | None = None) -> tuple[numpy.typing.NDArray[numpy.float64], int]:
     """
     Project an evaluated band. Returns (forces, ci_index). forces is flat, one row per image including zero endpoints, in the ASE force convention. climb selects the interior image by the endpoint-slope rule on this call; a higher endpoint that slopes into the band does not climb. Units are the caller's. k is energy per length squared. spring_ks, when given, is one constant per spring (length images - 1) and replaces k. cell is the 3x3 row-major lattice; a zero row is not wrapped. fixed is one uint8 per atom, 1 for a fixed atom (ABI minor 39): its force rows are zero, tangents and springs use the free atoms, and the mean force stays. The endpoints must agree on every fixed atom.
