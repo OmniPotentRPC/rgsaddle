@@ -974,6 +974,50 @@ mod tests {
     use ndarray::{Array2, ArrayView2, array};
     use rgmin::Method;
 
+    struct ScaledDiagonal(f64);
+
+    impl PointSurface for ScaledDiagonal {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let diagonal = array![-1.0, 1.0, 2.0, 4.0, 6.0, 8.0] * self.0;
+            let gradient = &diagonal * &x;
+            Ok((0.5 * x.dot(&gradient), gradient))
+        }
+
+        fn hessian_vector(
+            &self,
+            _x: ArrayView1<f64>,
+            v: ArrayView1<f64>,
+        ) -> Result<Option<Array1<f64>>, SaddleError> {
+            let diagonal = array![-1.0, 1.0, 2.0, 4.0, 6.0, 8.0] * self.0;
+            Ok(Some(&diagonal * &v))
+        }
+    }
+
+    #[test]
+    fn band_min_mode_iterations_are_invariant_to_hessian_scale() {
+        let estimate = |factor: f64| {
+            let positions = Array2::zeros((3, 6));
+            let band = BandSession::new(BandConfig::default(), positions).expect("band");
+            let config = MinModeRefine::default();
+            let seed = array![8.0_f64.sqrt(), 2.0_f64.sqrt(), 1.0, 1.0, 0.0, 0.0] / 12.0_f64.sqrt();
+            let mut session = band
+                .refine_session(&config, Array1::zeros(6), seed)
+                .expect("refinement session");
+            session
+                .estimate_mode(&ScaledDiagonal(factor))
+                .expect("mode estimate")
+        };
+
+        let unit = estimate(1.0);
+        assert!(unit.rotations > 1, "{unit:?}");
+        assert!(unit.mode[0].abs() > 0.99, "{unit:?}");
+        for factor in [1.0e-13, 1.0e13] {
+            let scaled = estimate(factor);
+            assert_eq!(scaled.rotations, unit.rotations, "factor {factor:e}");
+            assert!((scaled.mode.dot(&unit.mode).abs() - 1.0).abs() < 1.0e-9);
+        }
+    }
+
     struct Ridge;
 
     impl BandSurface for Ridge {
