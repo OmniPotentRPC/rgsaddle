@@ -10,11 +10,11 @@ The test uses 12 arms on a linear-cost analytic independent-well surface. “Lea
 
 | Atoms | Method | Arms leaving start | Saddles found | Force calls / saddle | ms / arm |
 |---:|---|---:|---:|---:|---:|
-| 75 | direction cover | 3 / 12 | 1 | 2681 | 0.888 |
-| 75 | soft mode | 0 / 12 | 0 | n/a | 0.173 |
-| 500 | direction cover | 3 / 12 | 1 | 2681 | 4.294 |
-| 500 | soft mode | 0 / 12 | 0 | n/a | 0.884 |
-| 4000 | direction cover | 3 / 12 | 1 | 2681 | 36.322 |
-| 4000 | soft mode | 0 / 12 | 0 | n/a | 7.244 |
+| 75 | direction cover | 4 / 12 | 1 | 2564 | 0.871 |
+| 75 | soft mode | 0 / 12 | 0 | n/a | 0.195 |
+| 500 | direction cover | 4 / 12 | 1 | 2564 | 4.387 |
+| 500 | soft mode | 0 / 12 | 0 | n/a | 0.959 |
+| 4000 | direction cover | 4 / 12 | 1 | 2564 | 37.939 |
+| 4000 | soft mode | 0 / 12 | 0 | n/a | 7.929 |
 
 These are quick sanity observations from one run, not performance claims.
