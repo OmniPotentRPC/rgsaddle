@@ -33,6 +33,7 @@ rgsaddle is system-agnostic and unit-agnostic: surfaces supply energies, gradien
 - [Follow a minimum mode](https://omnipotentrpc.github.io/rgsaddle/howto/minmode.html): Dimer, Lanczos, soft-mode seeding, surrogate Hessian actions, saddle index, and ARTn protocol (`docs/orgmode/howto/minmode.org`)
 - [Leave a minimum with ART nouveau](https://omnipotentrpc.github.io/rgsaddle/howto/art.html): Phased Activation-Relaxation Technique nouveau (ArtSession) (`docs/orgmode/howto/art.org`)
 - [Follow k lowest modes](https://omnipotentrpc.github.io/rgsaddle/howto/indexk.html): Index-k minimum-mode searches with LOBPCG and block Lanczos (`docs/orgmode/howto/indexk.org`)
+- [Map a pathway down from a saddle](https://omnipotentrpc.github.io/rgsaddle/howto/landscape.html): Downward pathway maps from a certified saddle to minima (`docs/orgmode/howto/landscape.org`)
 - [Solid-state dimer](https://omnipotentrpc.github.io/rgsaddle/howto/solid-dimer.html): Variable-cell solid-state dimer on atoms and strain (`docs/orgmode/howto/solid-dimer.org`)
 - [Solid-state NEB](https://omnipotentrpc.github.io/rgsaddle/howto/ssneb.html): Generalized solid-state NEB on the joint atom-strain chart (`docs/orgmode/howto/ssneb.org`)
 - [Strain response of a hop](https://omnipotentrpc.github.io/rgsaddle/howto/strain-rate.html): Elastic dipoles, multipoles, FMM fields, and strain response of a hop (`docs/orgmode/howto/strain-rate.org`)

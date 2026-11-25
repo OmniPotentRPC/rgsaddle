@@ -42,6 +42,7 @@ template <> struct status_traits<rgsaddle_status_t> {
     case RGSADDLE_NOT_EQUILIBRATED:
     case RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES:
     case RGSADDLE_NOT_CONVERGED:
+    case RGSADDLE_LANDSCAPE_BOUND:
       return static_cast<int>(Status::other);
     }
     return static_cast<int>(Status::other);

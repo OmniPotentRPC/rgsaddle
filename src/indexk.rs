@@ -444,6 +444,17 @@ impl IndexKSession {
         })
     }
 
+    /// Convergence norm for the one-mode session and the block session.
+    ///
+    /// A landscape leg passes [`crate::LandscapeConfig::force_gate`] so the
+    /// search stops on the same norm the pathway check uses.
+    pub fn set_force_gate(&mut self, gate: ForceGate) {
+        match &mut self.engine {
+            Engine::One(session) => session.set_force_gate(gate),
+            Engine::Block(session) => session.force_gate = gate,
+        }
+    }
+
     /// Current geometry.
     pub fn position(&self) -> ArrayView1<'_, f64> {
         match &self.engine {
