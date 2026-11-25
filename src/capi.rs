@@ -36,7 +36,7 @@ use crate::tangent::TangentKind;
 /// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
 /// The RGSADDLE ABI MINOR.
-pub const RGSADDLE_ABI_MINOR: u32 = 65;
+pub const RGSADDLE_ABI_MINOR: u32 = 66;
 
 /// A band, min-mode or OCI-NEB config of this minor or newer certifies
 /// the saddle index at convergence by default.
@@ -2331,6 +2331,219 @@ pub unsafe extern "C" fn rgsaddle_idpp_path(
         Ok(path) => {
             for (i, v) in path.iter().enumerate() {
                 out[i] = *v;
+            }
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
+    }
+}
+
+/// Configuration for mass-weighted finite-difference Vineyard prefactors.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RgsaddleVineyardConfig {
+    /// ABI version this value was built against.
+    pub version: RgsaddleVersion,
+    /// Reserved flags; must be 0.
+    pub flags: u64,
+    /// Finite-difference step in length units.
+    pub step: f64,
+    /// Finite-difference scheme (`0` for forward, `1` for central).
+    pub difference: i32,
+    /// Reserved alignment padding; must be 0.
+    pub reserved: i32,
+    /// Positive-mode threshold on mass-weighted eigenvalues in eV/(u A^2).
+    pub positive_tol: f64,
+    /// Unstable-mode threshold magnitude on mass-weighted eigenvalues in eV/(u A^2).
+    pub negative_tol: f64,
+}
+
+/// Summary report from a mass-weighted Vineyard prefactor evaluation.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RgsaddleVineyardReport {
+    /// ABI version this value was built against.
+    pub version: RgsaddleVersion,
+    /// Reserved flags.
+    pub flags: u64,
+    /// Harmonic transition-state prefactor in s^-1 (Hz).
+    pub prefactor_hz: f64,
+    /// Harmonic transition-state prefactor in THz.
+    pub nu0_thz: f64,
+    /// Single unstable mass-weighted eigenvalue at the saddle in eV/(u A^2).
+    pub unstable_eigenvalue: f64,
+    /// Number of positive modes retained at the minimum.
+    pub n_min_modes: i64,
+    /// Number of positive modes retained at the saddle.
+    pub n_saddle_modes: i64,
+    /// Total point-surface gradient evaluations consumed.
+    pub evaluations: i64,
+}
+
+/// Look up standard atomic mass in amu by atomic number (`1..=118`).
+///
+/// # Safety
+/// `out` must point to one writable `f64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_atomic_mass(z: i32, out: *mut f64) -> i32 {
+    if out.is_null() || !(1..=118).contains(&z) {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let Some(mass) = crate::atomic_mass(z as u8) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    unsafe {
+        *out = mass;
+    }
+    RGSADDLE_OK
+}
+
+/// Look up standard atomic mass in amu by IUPAC element symbol.
+///
+/// # Safety
+/// `symbol` must be a valid null-terminated UTF-8 string and `out` must point
+/// to one writable `f64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_atomic_mass_by_symbol(
+    symbol: *const std::ffi::c_char,
+    out: *mut f64,
+) -> i32 {
+    if symbol.is_null() || out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let Ok(sym) = unsafe { std::ffi::CStr::from_ptr(symbol) }.to_str() else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let Some(mass) = crate::atomic_mass_by_symbol(sym) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    unsafe {
+        *out = mass;
+    }
+    RGSADDLE_OK
+}
+
+/// Fill `out` with default mass-weighted Vineyard finite-difference controls.
+///
+/// # Safety
+/// `out` must point to one writable `RgsaddleVineyardConfig`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_vineyard_config_default(out: *mut RgsaddleVineyardConfig) -> i32 {
+    if out.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let cfg = crate::VineyardConfig::default();
+    unsafe {
+        *out = RgsaddleVineyardConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            step: cfg.step,
+            difference: match cfg.difference {
+                crate::FiniteDifference::Forward => 0,
+                crate::FiniteDifference::Central => 1,
+            },
+            reserved: 0,
+            positive_tol: cfg.positive_tol,
+            negative_tol: cfg.negative_tol,
+        };
+    }
+    RGSADDLE_OK
+}
+
+/// Evaluate the harmonic Vineyard prefactor from dense finite-difference
+/// Hessians on `surface` at `x_min` and `x_saddle`.
+///
+/// # Safety
+/// `x_min` and `x_saddle` must each hold `3 * n_atoms` doubles; `atom_masses`
+/// must hold `n_atoms` positive masses in amu; `report` must point to one
+/// writable `RgsaddleVineyardReport`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_vineyard_fd(
+    config: *const RgsaddleVineyardConfig,
+    n_atoms: i64,
+    x_min: *const f64,
+    x_saddle: *const f64,
+    atom_masses: *const f64,
+    surface: Option<RgsaddleSurfaceFn>,
+    user: *mut c_void,
+    report: *mut RgsaddleVineyardReport,
+) -> i32 {
+    if x_min.is_null() || x_saddle.is_null() || atom_masses.is_null() || report.is_null() {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    if n_atoms < 1 {
+        return RGSADDLE_SHAPE;
+    }
+    let Some(surface_fn) = surface else {
+        return RGSADDLE_NULL_SURFACE;
+    };
+    let cfg = if config.is_null() {
+        crate::VineyardConfig::default()
+    } else {
+        let raw = unsafe { &*config };
+        if raw.version.major != RGSADDLE_ABI_MAJOR {
+            return RGSADDLE_ABI_MISMATCH;
+        }
+        if raw.flags != 0 || raw.reserved != 0 {
+            return RGSADDLE_INVALID_PARAMETER;
+        }
+        let diff = match raw.difference {
+            0 => crate::FiniteDifference::Forward,
+            1 => crate::FiniteDifference::Central,
+            _ => return RGSADDLE_INVALID_PARAMETER,
+        };
+        crate::VineyardConfig::default()
+            .with_step(raw.step)
+            .with_difference(diff)
+            .with_positive_tol(raw.positive_tol)
+            .with_negative_tol(raw.negative_tol)
+    };
+    let n = n_atoms as usize;
+    let dof = 3 * n;
+    let x_min_slice = unsafe { slice::from_raw_parts(x_min, dof) };
+    let x_sad_slice = unsafe { slice::from_raw_parts(x_saddle, dof) };
+    let masses_slice = unsafe { slice::from_raw_parts(atom_masses, n) };
+    let mut dof_masses = Vec::with_capacity(dof);
+    for &m in masses_slice {
+        dof_masses.extend_from_slice(&[m, m, m]);
+    }
+    let csurf = CSurface {
+        f: surface_fn,
+        user,
+        n_atoms,
+        n_images: 1,
+        per_image: false,
+        climbing_request: false,
+        rows: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let x_min_arr = Array1::from_vec(x_min_slice.to_vec());
+    let x_sad_arr = Array1::from_vec(x_sad_slice.to_vec());
+    match crate::vineyard_prefactor_dense(
+        &csurf,
+        x_min_arr.view(),
+        &csurf,
+        x_sad_arr.view(),
+        &dof_masses,
+        &cfg,
+    ) {
+        Ok(res) => {
+            unsafe {
+                *report = RgsaddleVineyardReport {
+                    version: RgsaddleVersion {
+                        major: RGSADDLE_ABI_MAJOR,
+                        minor: RGSADDLE_ABI_MINOR,
+                    },
+                    flags: 0,
+                    prefactor_hz: res.prefactor_hz,
+                    nu0_thz: res.prefactor_hz / 1e12,
+                    unstable_eigenvalue: res.unstable_eigenvalue,
+                    n_min_modes: res.n_min_modes as i64,
+                    n_saddle_modes: res.n_saddle_modes as i64,
+                    evaluations: res.evaluations as i64,
+                };
             }
             RGSADDLE_OK
         }
