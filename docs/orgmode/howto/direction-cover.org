@@ -108,7 +108,7 @@ The states of a gap are the start together with the products of its three neares
 
 - =subspace_dim=: three times the number of active atoms
 - =covering_radius=: the largest, over centres, of the exact covering radius of that centre's tried signed directions on the sphere (=covering_radius_s2=); π before any arm
-- =atoms=: per centre, the tried count, the covering radius and the distinct states reached
+- =atoms=: per centre, the tried count, the covering radius and the distinct states among the start and the products reached, so one before any product
 - =records=: one =ArmRecord= per arm, in record order, with the direction, outcome, saddle and product ids, barrier, optional prefactor and force calls
 - =saddles=, =products=: the distinct saddles with their hit counts, and the distinct product minima
 - =discovery=: distinct saddles after each arm; =saddle_draws= and =frequency_counts= are the connected draws and the number of saddles seen once, twice, and so on, for a Good-Turing (Good, Biometrika 40, 237 (1953), doi:10.1093/biomet/40.3-4.237) or capture-recapture estimate of what is left

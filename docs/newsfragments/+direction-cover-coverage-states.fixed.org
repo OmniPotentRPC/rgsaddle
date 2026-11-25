@@ -1,0 +1,1 @@
+=AtomCoverage::states= now counts the start, as the gap score does. A centre with nothing tried, or only failed and returned arms, reports one state instead of zero, and a centre whose arms reached one product reports two.
