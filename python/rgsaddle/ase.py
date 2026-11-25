@@ -1103,8 +1103,11 @@ class AutoNEB:
     Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016),
     doi:10.1063/1.4961868. The growth, the spring rescaling, and the
     window relaxation run in the Rust core. The constructor arguments
-    match ``ase.mep.AutoNEB``. Image-parallel MPI is refused. The
-    optimizer must be FIRE or a subclass of it: the steps are the
+    match ``ase.mep.AutoNEB``. Image-parallel MPI is refused. The stored
+    images must agree on the atom count, the atomic numbers, ``pbc``,
+    and the periodic cell vectors, as ASE's ``NEB`` requires. The
+    endpoints keep their own ``Atoms`` records and a new interior image
+    copies the start. The optimizer must be FIRE or a subclass of it: the steps are the
     band's FIRE solver, and ``maxstep`` on that class is the per-atom
     cap. A numeric signature default is that number. A default of
     None uses the optimizer's documented ``defaults['maxstep']``,
@@ -1197,7 +1200,9 @@ class AutoNEB:
         self._load(read)
         if len(self.all_images) < 2:
             raise ValueError("AutoNEB needs the two endpoints")
-        template = self.all_images[0]
+        _check_images(self.all_images)
+        start, end = self.all_images[0], self.all_images[-1]
+        template = start
         pool: list[Any] = []
 
         def surface(x: Float64) -> tuple[Float64, Float64]:
@@ -1251,9 +1256,11 @@ class AutoNEB:
         count = int(report.n_images)
         natoms = len(template)
         coords = finished.reshape(count, natoms, 3)
+        # Each endpoint keeps its own Atoms record. A new interior image
+        # copies the start, as ASE copies the image left of the cut.
         self.all_images = []
         for index in range(count):
-            image = template.copy()
+            image = (end if index == count - 1 else start).copy()
             image.set_positions(coords[index], apply_constraint=False)
             self.all_images.append(image)
         self.attach_calculators(self.all_images)

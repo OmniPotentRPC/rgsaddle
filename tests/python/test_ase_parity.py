@@ -443,3 +443,71 @@ def test_autoneb_constructor_validates_the_image_counts(n_simul: int, n_max: int
     with pytest.raises(ValueError, match="n_max|n_simul"):
         AutoNEB(lambda images: None, "unused", n_simul=n_simul, n_max=n_max)
 
+
+
+def _flat_autoneb(prefix, images, **kwargs):  # type: ignore[no-untyped-def]
+    from ase.io import write
+
+    for index, atoms in enumerate(images):
+        write(f"{prefix}{index:03d}.traj", atoms)
+
+    def attach(images):  # type: ignore[no-untyped-def]
+        for image in images:
+            image.calc = Flat()
+
+    options = {
+        "n_simul": 1,
+        "n_max": 3,
+        "fmax": 0.5,
+        "maxsteps": 2,
+        "k": 1.0,
+        "climb": False,
+        "method": "improvedtangent",
+        "optimizer": FIRE,
+        "parallel": False,
+        "interpolate_method": "linear",
+    }
+    options.update(kwargs)
+    return AutoNEB(attach, prefix, **options)
+
+
+def test_autoneb_refuses_endpoints_with_other_atoms(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    hydrogen = Atoms("H", positions=[[0.0, 0.0, 0.0]])
+    helium = Atoms("He", positions=[[1.0, 0.0, 0.0]])
+    band = _flat_autoneb(str(tmp_path / "numbers"), [hydrogen, helium])
+    with pytest.raises(ValueError, match="different orders"):
+        band.run()
+    assert not os.path.exists(str(tmp_path / "numbers002.traj"))
+
+
+def test_autoneb_refuses_endpoints_with_another_cell_or_pbc(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    cell = np.diag([4.0, 4.0, 4.0])
+    start = Atoms("H", positions=[[0.5, 0.5, 0.5]], cell=cell, pbc=True)
+    other_pbc = Atoms("H", positions=[[1.5, 0.5, 0.5]], cell=cell, pbc=[True, True, False])
+    with pytest.raises(ValueError, match="boundary conditions"):
+        _flat_autoneb(str(tmp_path / "pbc"), [start, other_pbc]).run()
+    other_cell = Atoms("H", positions=[[1.5, 0.5, 0.5]], cell=1.1 * cell, pbc=True)
+    with pytest.raises(NotImplementedError, match="Variable cell"):
+        _flat_autoneb(str(tmp_path / "cell"), [start, other_cell]).run()
+    longer = Atoms("H2", positions=[[1.5, 0.5, 0.5], [2.5, 0.5, 0.5]], cell=cell, pbc=True)
+    with pytest.raises(ValueError, match="numbers of atoms"):
+        _flat_autoneb(str(tmp_path / "count"), [start, longer]).run()
+
+
+def test_autoneb_images_keep_the_atoms_of_their_endpoints(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    start = Atoms("HHe", positions=[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], tags=[1, 2])
+    end = Atoms("HHe", positions=[[0.0, 1.0, 0.0], [1.5, 1.0, 0.0]], tags=[3, 4])
+    report = _flat_autoneb(str(tmp_path / "band"), [start, end]).run()
+    assert report.n_images == 3
+    for image in report.images:
+        assert list(image.get_atomic_numbers()) == [1, 2]
+        assert list(image.get_chemical_symbols()) == ["H", "He"]
+    assert list(report.images[0].get_tags()) == [1, 2]
+    assert list(report.images[1].get_tags()) == [1, 2]
+    assert list(report.images[-1].get_tags()) == [3, 4]
+
+    from ase.io import read
+
+    written = read(str(tmp_path / "band002.traj"))
+    assert list(written.get_atomic_numbers()) == [1, 2]
+    assert list(written.get_tags()) == [3, 4]
