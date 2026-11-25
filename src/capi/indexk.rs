@@ -319,7 +319,7 @@ pub unsafe extern "C" fn rgsaddle_indexk_step(
     }
 }
 
-/// One index-k step with a geometry-aware Hessian action, ABI minor 66.
+/// One index-k step with a geometry-aware Hessian action, ABI minor 68.
 ///
 /// Identical to [`rgsaddle_indexk_step`] except that `hessian`, when not
 /// NULL, is called with `(user, n, position, vector, out)`. `position` is

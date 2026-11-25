@@ -503,3 +503,64 @@ pub unsafe extern "C" fn rgsaddle_landscape_free(session: *mut RgsaddleLandscape
         drop(unsafe { Box::from_raw(session) });
     }
 }
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{
+        RGSADDLE_ABI_MINOR, RgsaddleLandscapeConfig, RgsaddleLandscapeReport, RgsaddleVersion,
+        stamp,
+    };
+    use std::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn landscape_wire_layouts_match_c_header() {
+        assert_eq!(size_of::<RgsaddleLandscapeConfig>(), 144);
+        assert_eq!(align_of::<RgsaddleLandscapeConfig>(), 8);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, version), 0);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, flags), 8);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, duplicate_distance), 16);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, push), 24);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, max_nodes), 32);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, max_evaluations), 40);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, max_steps), 48);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, force_tol), 56);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, relax_force_tol), 64);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, max_move), 72);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, max_atom_move), 80);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, initial_step), 88);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, dr), 96);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, rotation_tol), 104);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, residual_tol), 112);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, max_rotations), 120);
+        assert_eq!(
+            offset_of!(RgsaddleLandscapeConfig, max_block_iterations),
+            128
+        );
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, method), 132);
+        assert_eq!(offset_of!(RgsaddleLandscapeConfig, cell), 136);
+
+        assert_eq!(size_of::<RgsaddleLandscapeReport>(), 48);
+        assert_eq!(align_of::<RgsaddleLandscapeReport>(), 8);
+        assert_eq!(offset_of!(RgsaddleLandscapeReport, version), 0);
+        assert_eq!(offset_of!(RgsaddleLandscapeReport, flags), 8);
+        assert_eq!(offset_of!(RgsaddleLandscapeReport, n_nodes), 16);
+        assert_eq!(offset_of!(RgsaddleLandscapeReport, n_edges), 24);
+        assert_eq!(offset_of!(RgsaddleLandscapeReport, bound), 32);
+        assert_eq!(offset_of!(RgsaddleLandscapeReport, evaluations), 40);
+    }
+
+    #[test]
+    fn a_stamped_report_has_zero_flags() {
+        let mut report = RgsaddleLandscapeReport {
+            version: RgsaddleVersion { major: 0, minor: 0 },
+            flags: u64::MAX,
+            n_nodes: 0,
+            n_edges: 0,
+            bound: 0,
+            evaluations: 0,
+        };
+        stamp(&mut report);
+        assert_eq!(report.flags, 0);
+        assert_eq!(report.version.minor, RGSADDLE_ABI_MINOR);
+    }
+}

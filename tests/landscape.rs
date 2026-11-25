@@ -1083,3 +1083,38 @@ fn the_index_k_leg_uses_the_configured_force_gate() {
         .unwrap_or_else(|err| panic!("configured gate: {err}"));
     assert!(map.nodes.iter().any(|node| node.index == 1));
 }
+
+#[test]
+fn landscape_config_setters_cover_every_field() {
+    let search = IndexKConfig::new(2, MinModeConfig::default().with_force_tol(1.0e-6));
+    let relax = RelaxConfig::default()
+        .with_force_tol(2.0e-6)
+        .with_max_steps(30);
+    let certificate = SaddleIndexCheck::default().with_negative_tol(1.0e-4);
+    let cell = Cell([[4.0, 0.0, 0.0], [0.0, 5.0, 0.0], [0.0, 0.0, 6.0]]);
+    let config = LandscapeConfig::default()
+        .with_duplicate_distance(0.02)
+        .with_push(0.3)
+        .with_max_nodes(8)
+        .with_max_evaluations(90)
+        .with_max_steps(40)
+        .with_search(search.clone())
+        .with_relax(relax.clone())
+        .with_certificate(certificate)
+        .with_negative_tol(2.0e-4)
+        .with_force_gate(ForceGate::L2Norm)
+        .with_cell(cell);
+    assert_eq!(config.duplicate_distance, 0.02);
+    assert_eq!(config.push, 0.3);
+    assert_eq!(config.max_nodes, 8);
+    assert_eq!(config.max_evaluations, 90);
+    assert_eq!(config.max_steps, 40);
+    assert_eq!(config.search.k, search.k);
+    assert_eq!(config.search.search.force_tol, search.search.force_tol);
+    assert_eq!(config.search.negative_tol, 2.0e-4);
+    assert_eq!(config.relax.force_tol, relax.force_tol);
+    assert_eq!(config.relax.max_steps, relax.max_steps);
+    assert_eq!(config.certificate.negative_tol, 2.0e-4);
+    assert_eq!(config.force_gate, ForceGate::L2Norm);
+    assert_eq!(config.cell.map(|cell| cell.0), Some(cell.0));
+}
