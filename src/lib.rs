@@ -78,6 +78,7 @@ pub mod defect_pair;
 pub mod elastic_dipole;
 pub mod error;
 pub mod geodesic;
+pub mod hop_search;
 pub mod idpp;
 pub mod indexk;
 #[cfg(feature = "lammps")]
@@ -145,16 +146,17 @@ pub use bennett::{ShootingConfig, Transmission, bennett_chandler};
 pub use connect::{ConnectConfig, ConnectProfile, ConnectReport, connect};
 pub use defect_pair::{
     BasinSaddle, CaptureRecord, CellMode, DefectPairConfig, DimerSeed, DirectionClass,
-    FREE_CRYSTAL, FreeMigration, HopOutcome, HopTemplate, MatchedCapture, OuterHop, PairSetup,
-    PeriodicSinkRate, PeriodicSinkSurvival, RateCatalogue, RateEntry, RecombinationVolume,
-    SPONTANEOUS_BARRIER_EV, SiteOutcome, SphereLanding, VolumePlacement, VolumeSite,
-    attempt_frequency, capture_is_spontaneous, capture_is_spontaneous_within, classify_separation,
-    debye_hit_probability, debye_matched_radius, debye_radius, debye_resistance, defect_pair_rates,
-    descend_to_floor, effective_capture_radius, embed_free_migration, embed_sphere_return,
+    FREE_CRYSTAL, FreeMigration, HopOutcome, HopSearchConfig, HopSearchResult, HopTemplate,
+    MatchedCapture, OuterHop, PairSetup, PeriodicSinkRate, PeriodicSinkSurvival, RateCatalogue,
+    RateEntry, RecombinationVolume, SPONTANEOUS_BARRIER_EV, SiteOutcome, SphereLanding,
+    VolumePlacement, VolumeSite, attempt_frequency, capture_is_spontaneous,
+    capture_is_spontaneous_within, classify_separation, debye_hit_probability,
+    debye_matched_radius, debye_radius, debye_resistance, defect_pair_rates, descend_to_floor,
+    effective_capture_radius, embed_free_migration, embed_sphere_return,
     kinetic_recombination_volume, matched_capture_radius, mean_absorption_time, pair_separation,
     periodic_capture_log_likelihood, periodic_sink_rate, periodic_sink_survival, product_tangent,
-    seeded_saddles, segment_band, shell_pair_factor, smoluchowski_rate, sphere_hit_probability,
-    spherical_return_probability, volume_from_frequency,
+    search_hop, seeded_saddles, segment_band, shell_pair_factor, smoluchowski_rate,
+    sphere_hit_probability, spherical_return_probability, volume_from_frequency,
 };
 pub use elastic::{
     ElasticMultipole, LocalField, Octupole, Quadrupole, StrainGradient, quadrupole_energy,
