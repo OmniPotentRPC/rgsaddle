@@ -171,7 +171,10 @@ pub use geodesic::{
     GeodesicChart, GeodesicConfig, GeodesicLengths, GeodesicReport, MORSE_ALPHA, MORSE_BETA,
     MorsePairChart, geodesic_interpolate, geodesic_lengths, geodesic_path,
 };
-pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
+pub use idpp::{
+    IdppConfig, PathInitializer, SidppConfig, TricsSeed, TricsStartConfig, idpp_path,
+    initialize_path, linear_path, sidpp_path,
+};
 pub use indexk::{
     BlockEigenKind, HessianProduct, IndexKConfig, IndexKReport, IndexKSession, WithHessian,
     indexk_step, reflect_force, translated_force,
