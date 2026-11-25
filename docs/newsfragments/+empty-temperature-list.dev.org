@@ -1,2 +1,8 @@
-Copper defect-pair readers now reject an empty, whitespace only, or separator only =RGSADDLE_TEMPS= list by naming the variable and leaving the target output file unchanged.
-The same work also fixed the lattice table rows by pinning each Table 1 temperature row and made rotation rates fail fast when either the isolated barrier or its attempt frequency is missing, instead of returning a zero rate.
+Copper defect-pair readers now reject an empty, whitespace only, or separator
+only =RGSADDLE_TEMPS= list by naming the variable and leaving the target output
+file unchanged. The check covers 11 files across 7 readers.
+
+Table 1 lattice lookup no longer maps both 400 K and 600 K to 3.643, and an
+unlisted temperature now panics. Rotation rates now panic instead of returning
+zero when no rated PAFI row, and no barrier with an attempt frequency, exists
+for the temperature.
