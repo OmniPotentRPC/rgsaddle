@@ -9,9 +9,11 @@
 //! `λ̈ = −(T · f + (T · ∂T/∂λ) λ̇²) / (T · T)`,
 //!
 //! with `T = ∂q/∂λ`. This is the constrained dynamics in appendix B of
-//! the LI-NEB review (doi:10.1021/acs.jctc.5c00673), which Ásgeirsson,
-//! Arnaldsson and Jónsson, J. Chem. Phys. 148, 102334 (2018), use to
-//! read the temperature of an optimal tunneling path. The closed orbit
+//! Zhang, Nimmrich, Johnson, Schenter, Khalil, and Govind, J. Chem.
+//! Theory Comput. 21, 7517 (2025), doi:10.1021/acs.jctc.5c00673, which
+//! Ásgeirsson, Arnaldsson and Jónsson, J. Chem. Phys. 148, 102334
+//! (2018), use to read the temperature of an optimal tunneling path.
+//! The closed orbit
 //! has period `τ = 2` half periods and temperature `ℏ / (k_B τ)`.
 
 use std::collections::HashMap;
