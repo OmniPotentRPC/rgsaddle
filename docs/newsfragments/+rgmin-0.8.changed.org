@@ -1,0 +1,1 @@
+~rgmin~ is the crates.io release 0.8.0 instead of a pinned git revision of 0.7.0, which was never published. This lets ~rgsaddle~ publish.
