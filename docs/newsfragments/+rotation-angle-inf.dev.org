@@ -1,1 +1,0 @@
-The Lanczos and ART preset test now includes positive and negative infinity among the ~rotation_angle_tol~ values that must fail as finite and non-negative, with no default substituted.

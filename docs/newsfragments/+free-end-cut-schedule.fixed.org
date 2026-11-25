@@ -1,1 +1,0 @@
-Free-end NEB cut thresholds at or below the final \(4\,f_{\mathrm{tol}}\) threshold now stay at that threshold instead of increasing between cuts.

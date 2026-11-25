@@ -1,5 +1,0 @@
-~PafiMeanForce::PublishedEquation8~ evaluates both terms of Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018), Eq. (8), including the analytic ~kT d/ds ln(|psi| / |X'|)~ Jacobian term and its locality check. ~PafiMeanForce::ReferenceCode~ remains the default and reproduces the force-only estimator recorded by LAMMPS ~fix pafi~ and the public PAFI driver.
-
-~PafiIntegrator::EulerMaruyama~ selects the paper's direct overdamped Eq. (9) step. ~PafiConfig::trajectories~ runs independent trajectories and reports the ensemble error used by the public driver.
-
-~ArcPath::geometry~, and so ~pafi_profile~, return ~SaddleError::Invalid~ for an arc outside ~ArcPath::bounds~ instead of clamping it to the end. ~PathGeometry~ gains the field ~jerk~, the third derivative of the spline.

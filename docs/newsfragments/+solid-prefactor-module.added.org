@@ -1,1 +1,0 @@
-The =solid_prefactor= module builds dense atom-strain Hessians with =joint_hessian= and computes variable-cell Vineyard prefactors with =joint_vineyard_prefactor=, keeping the homogeneous strains and requiring one unstable saddle mode.

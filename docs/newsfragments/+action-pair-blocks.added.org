@@ -1,1 +1,0 @@
-=action_pair_blocks= reads the Hessian blocks of caller-chosen atom pairs from an exact =PointSurface::hessian_vector=, with no finite difference, and refuses a surface without a Hessian action.

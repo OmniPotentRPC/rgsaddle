@@ -1,1 +1,0 @@
-Bibliography DOI metadata now matches Crossref for the AFIR and Simons and Nichols citations, and IDPP references cite Smidstrup et al. (2014), doi:10.1063/1.4878664.

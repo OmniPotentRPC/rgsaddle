@@ -1,1 +1,0 @@
-The C header now documents that ~rgsaddle_band_free_end_residual~ returns ~RGSADDLE_INVALID_PARAMETER~ for a null output pointer, consistently with the other band getters.

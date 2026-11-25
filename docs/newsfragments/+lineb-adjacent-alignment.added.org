@@ -1,1 +1,0 @@
-Fixed-energy LI-NEB aligns the images of a free molecule to the first image by default and to their neighbours on request: =Masses::with_adjacent_alignment(true)= in Rust and ~molecular~ 2 in the C API. Neighbour alignment gives every chord its minimum mass-weighted length, as in Ásgeirsson, Arnaldsson and Jónsson, J. Chem. Phys. 148, 102334 (2018).

@@ -1,1 +1,0 @@
-A free-end step no longer evaluates the fixed terminal image again after the first step, and the step that follows starts from the evaluation the last step ended on instead of evaluating the band a second time. The trajectory is unchanged. On the narrow-barrier example the surface sees 1662 rows where it saw 2522.

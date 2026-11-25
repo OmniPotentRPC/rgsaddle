@@ -1,1 +1,0 @@
-The Rust LI-NEB continuation API accepts a callback after each completed energy level, allowing callers to record provider work including seed preparation.

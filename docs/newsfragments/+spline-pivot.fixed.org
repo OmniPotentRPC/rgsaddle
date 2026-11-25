@@ -1,2 +1,0 @@
-A not-a-knot spline refuses a pivot that is not larger than one unit
-in the last place of the knot span.

@@ -1,1 +1,0 @@
-The interpolated LI-NEB flux restricts its symmetric Hessian to the retained modes with Householder reflections and computes only eigenvalues on the faer backend.

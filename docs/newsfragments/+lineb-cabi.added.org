@@ -1,6 +1,0 @@
-~rgsaddle_lineb_config_default~ and ~rgsaddle_lineb_solve~ expose fixed-energy LI-NEB and harmonic quantum TST through the C ABI at minor 46.
-~molecular~ 0 expands atom masses onto Cartesian coordinates without alignment; ~molecular~ 1 uses quaternion molecule alignment.
-~beads~ 0 returns the path only with a NaN ~log_rate_over_reactant~; an unconverged search returns ~RGSADDLE_STALLED~.
-~rgsaddle_lineb_solve_with_kappa~ accepts an explicit endpoint restraint coefficient from ABI minor 47.
-~rgsaddle_lineb_solve_options~ accepts flags for a straight initial band and separate endpoint and perpendicular convergence tests from minor 48. Minor 49 adds projected velocity Verlet.
-Minor 50 adds ~rgsaddle_lineb_solve_counted~. Its ~rgsaddle_lineb_counts_t~ partitions surface evaluations among seeding, optimization, path preparation, quadrature, dynamics and the rate prefactor.

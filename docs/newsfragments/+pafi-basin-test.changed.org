@@ -1,5 +1,0 @@
-~average_hyperplane~ keeps its walk in the basin of the path by default, as the ~MaxJump~ test of Swinburne and Marinica's reference code (github.com/tomswinburne/pafi, ~MaxJumpThresh~ 0.4 Å) drops a trajectory that left it.
-With ~PafiConfig::max_jump~ set, 0.4 Å by default, the production run is cut into ~blocks~ stretches; the thermalized configuration and the end of every stretch are quenched in the plane under ~PafiConfig::quench~, the steepest-descent flow (~Method::Ode12r~) by default, and compared with the plane minimum quenched from the path.
-A stretch whose minimum has one atom farther than ~max_jump~ from that one is sampled again from the end of the last kept stretch; ~HyperplaneAverage::rejected~ counts them, ~HyperplaneAverage::evaluations~ includes the quenches, and more rejections than ~blocks~ is an error.
-Before, a walk that crossed into another basin of its plane was averaged with it: on a plane of two wells the gradient left the quadrature over the basin of the path by more than 0.25, against an error of 0.004.
-~with_max_jump(None)~ samples as before; ~DefectPairConfig::pafi~ takes the new default.

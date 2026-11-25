@@ -1,1 +1,0 @@
-Solid-state NEB activates the climbing image only when the highest interior image exceeds both endpoint enthalpies. A band that slopes toward an endpoint continues with the ordinary NEB forces.

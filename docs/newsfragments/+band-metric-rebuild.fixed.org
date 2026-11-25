@@ -1,2 +1,0 @@
-Rebuilding the exponential metric drops the cached band force, so the
-next assembly uses the new matrices.

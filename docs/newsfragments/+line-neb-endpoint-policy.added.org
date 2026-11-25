@@ -1,4 +1,0 @@
-=LineNebConfig::with_endpoint_below_energy= selects the endpoint policy for a running fixed-energy LI-NEB session.
-=EndpointBelowEnergy::Restrained= is the default and retains the published restraint and zero action weight while an endpoint is below =E=.
-=EndpointBelowEnergy::Strict= stops with =SaddleError::Invalid=, so the error enum is unchanged.
-=LineNebEndpointViolation= reports the endpoint, =V - E=, and the one-based session step.

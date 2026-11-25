@@ -1,9 +1,0 @@
-~ElasticConstants~ and the Barnett quadrature now invert an acoustic tensor only
-when every leading minor is positive, so a tensor with two negative eigenvalues
-and a positive determinant, such as a cubic tensor with a negative ~C44~,
-returns ~SaddleError::Invalid~ instead of being treated as stable.
-
-~PeriodicElastic::correct_rate_catalogue~ now returns ~SaddleError::NonFinite~
-when a corrected barrier or harmonic rate is not finite, such as the overflow
-of a strongly negative barrier at low temperature, where it used to return an
-infinite ~rate_hz~.

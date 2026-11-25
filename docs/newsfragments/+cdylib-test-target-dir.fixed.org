@@ -1,1 +1,0 @@
-The C ABI tests now link their fresh shared library in a separate target directory, so ~cargo test~ no longer replaces the library the doctests link against.

@@ -1,1 +1,0 @@
-=SplineEnds::NotAKnot= now uses the same knot, shape, and finiteness checks as =SplineEnds::Natural= and returns the same typed error for an empty or non-finite input.

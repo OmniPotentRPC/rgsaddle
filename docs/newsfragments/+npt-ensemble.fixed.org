@@ -1,3 +1,0 @@
-~npt_lattice~ samples the isotropic NPT ensemble with stochastic cell rescaling (Bernetti and Bussi, J. Chem. Phys. 153, 114107 (2020)).
-~NptBarostat::Berendsen~ remains available for equilibration and reports means only, with no ensemble fluctuation statistics.
-A cell that is not cubic is refused, and an extension that would overflow the step counter is an error instead of a panic or a stale report.

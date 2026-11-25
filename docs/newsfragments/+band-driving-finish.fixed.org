@@ -1,3 +1,0 @@
-A band step that accepts a geometry other than its last evaluation
-assembles the preconditioned driving force when an exponential metric
-is installed, for every stepper.

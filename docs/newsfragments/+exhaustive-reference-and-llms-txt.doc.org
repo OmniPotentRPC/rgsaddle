@@ -1,2 +1,0 @@
-Every public module, type, function, constant, configuration field, C ABI symbol, and Python binding is indexed in ~docs/orgmode/reference.org~ and ~docs/orgmode/reference/c-symbols.org~, and verified in CI by ~docs/check_c_symbols.py~.
-Added ~llms.txt~ and ~llms-full.txt~ rendered by ~docs/render_llms.py~, plus ~AGENTS.md~.

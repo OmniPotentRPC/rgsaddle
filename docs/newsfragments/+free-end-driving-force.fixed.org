@@ -1,1 +1,0 @@
-The evaluation a free-end step caches now holds the preconditioned driving force under the metric it is tagged with, and no driving force when the band has no metric. Before, the cache held the unpreconditioned force under a metric tag, so a later read that trusted the tag used the wrong force.

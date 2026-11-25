@@ -1,5 +1,0 @@
-A converged band, min-mode or OCI-NEB step now certifies the saddle index of its point by default, and the check's surface evaluations count in that step's ~surface_rows~ or ~evaluations~.
-Every step still reaches the same positions.
-~with_saddle_check(None)~ turns the check off when a caller needs the earlier evaluation budget.
-~BandReport~, ~MinModeReport~ and ~OcinebReport~ gain the public field ~saddle_index~, so code that builds one with a struct literal or matches it exhaustively must handle the new field.
-A C config stamped with ABI minor 40 or newer certifies by default, while one stamped earlier does not; Python's ~MinMode~ certifies by default.

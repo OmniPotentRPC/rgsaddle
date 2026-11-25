@@ -1,5 +1,0 @@
-The ~minimage~ requirement is now ~>=0.1.2, <0.2~ in place of the exact ~=0.1.2~, and ~Cargo.lock~ holds 0.1.4.
-A dependent that needs ~minimage~ 0.1.3 or newer now resolves beside rgsaddle, and linkcell v0.3.5 and rgsaddle still share one ~Cell~, because linkcell asks for the caret ~^0.1.2~.
-From 0.1.3, ~Cell::displacement~ on an orthorhombic cell wraps a coordinate difference across every box image, and ~Cell::displacement_euclidean~ returns the nearest image on a triclinic cell for any separation.
-~SparsityPattern::from_positions~ on an orthorhombic cell therefore finds every pair for atoms that sit more than one box length outside it, where 0.1.2 missed pairs once a difference reached 1.5 box lengths.
-The public API of ~minimage~ only grows, and the test suites, golden hashes and reference values do not move.

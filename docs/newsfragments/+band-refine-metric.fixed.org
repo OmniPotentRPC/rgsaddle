@@ -1,4 +1,0 @@
-Cached band forces are keyed on the current exponential-metric build
-and the metric is refreshed on every step exit, including converged
-min-mode refinements, so an evaluation cannot assemble or reuse forces
-from a stale metric.

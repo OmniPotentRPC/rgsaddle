@@ -1,1 +1,0 @@
-=FixedEnergyTrajectory::from_gradients= refuses a non-finite position, gradient, or mass, and a mass that is not positive.

@@ -1,7 +1,0 @@
-~LinebSession~ finds the optimal tunneling path at a fixed energy by the line integral nudged elastic band (LI-NEB) of Ásgeirsson, Arnaldsson and Jónsson, J. Chem. Phys. 148, 102334 (2018), on any ~PointSurface~ in mass-weighted coordinates.
-~LinebConfig::new~ takes the two stopping tolerances, which have no default. ~Masses::coordinates~ leaves rigid motions alone and ~Masses::molecule~ removes them by quaternion alignment.
-~LinebPath~ reports the action, the half period from the quadrature and from constrained dynamics, the instanton temperature of each, and ~LinebCalls~, the force calls of the optimizer, the quadrature and the dynamics counted apart.
-~continue_from_mep~ runs a ladder of energies, a ~Continuation~, down from the top of a minimum energy path.
-~hqtst_rate~ gives the ring-polymer harmonic quantum TST rate from Hessian-vector products at the distinct replicas and a deflated Lanczos log-determinant, in ~(P/2 + 1)(1 + 2 dof)~ force calls without an analytic product.
-The paper's interpolated finite-difference Hessian is ~hqtst_rate_interpolated_hessian~ behind the ~lineb-oracle~ feature.
-On H2 desorbing from rgpot's Cu(110) slab over RPC, 9 energies from 235 K to 63 K took 466.7 optimizer force calls per energy on average.

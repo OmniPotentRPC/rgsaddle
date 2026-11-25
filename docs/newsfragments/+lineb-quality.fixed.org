@@ -1,1 +1,0 @@
-LI-NEB endpoint quadrature now uses the finite turning-point limit despite positive roundoff in the endpoint energy, and its fine-grid regression has a bounded refinement.

@@ -1,1 +1,0 @@
-The all feature test suite now runs independent numerical campaigns, seed sweeps, and molecular checks in parallel and builds only the C ABI shared library in the shared target directory while preserving every fixture size, sample count, tolerance, and assertion.

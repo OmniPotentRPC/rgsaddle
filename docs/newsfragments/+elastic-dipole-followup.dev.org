@@ -1,1 +1,0 @@
-The default tests cover coupled atom and strain relaxation, external stress response, and finite difference stress.

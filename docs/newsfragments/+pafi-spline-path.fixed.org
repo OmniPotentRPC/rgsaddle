@@ -1,7 +1,0 @@
-PAFI hyperplanes follow the not-a-knot cubic spline through the images, the spline interpolation of Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018), p. 135503-2, instead of the chords between them.
-~ArcPath::geometry~ returned the chord of the segment as the normal and no curvature, so the normal jumped at every image, ~ψ~ was zero, and each average was the mean force on a plane of no common family; the normal also kept its center-of-mass part when the center of mass was held.
-On the Fe self-interstitial path of the reference code (github.com/tomswinburne/pafi, commit 1661a1d) at ~kT → 0~ the chord planes gave ~dF/dr~ = 0.378 at ~r = 1/8~ against the reference 0.614, and a trapezoid barrier of 0.228 eV against 0.262 eV; the spline planes give all nine reference gradients within 1e-3.
-~ArcPath~ now shares the spline of ~Reparametrization::NotAKnot~, ~ψ = (x - X) · X'' / |t|²~ with ~t~ the center-of-mass-free ~X'~, and the drift, the noise and the return to the plane use that one normal.
-~ArcPath::reversed~ is the same curve from the last frame, for the reversal test of a profile.
-~zero_temperature_barrier~ integrates the energy along the spline with 64 points per span, and ~defect_pair_rates~ takes its reactant attempt frequency and Bennett–Chandler normal from the spline tangent.
-The copper rows of ~benchmarks/defect_pair_network_pafi.csv~ and the volumes built on them were integrated on the chord planes and are not recomputed here.

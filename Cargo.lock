@@ -1909,7 +1909,7 @@ source = "git+https://github.com/OmniPotentRPC/rgpot?rev=20c58fe5a2859cd0a79a3e0
 
 [[package]]
 name = "rgsaddle"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "approx",
  "capnp",

@@ -3,6 +3,13 @@
 
 The Rust sessions are the source of the mechanics. The Python classes in ~rgsaddle.ase~ follow the call shape of ASE's nudged elastic band, minimum-mode atoms, and Sella's ~run(fmax, steps)~. Where the numbers differ, the difference is the one the tests lock in.
 
+* From 0.6.0 to 0.7.0
+Version 0.6.0 was tagged and never reached crates.io. Its ~rgmin~ requirement, 0.7.0, was not published there.
+
+~rgmin~ is the crates.io release 0.8.0. Code that passes ~rgmin~ types to ~rgsaddle~ needs the same release.
+
+The zero-temperature half of ~defect_pair~ is the module ~hop_search~, with ~search_hop~, ~HopSearchConfig~ and ~HopSearchResult~. Every earlier path, such as ~rgsaddle::defect_pair::PairSetup~, still resolves, and ~DefectPairConfig~ is unchanged.
+
 * From 0.5.x to 0.6.0
 A converged band, minimum-mode, or OCI-NEB session now certifies the saddle index by default.
 Those finite-difference evaluations count in the step report, so force-call totals can increase even when the search takes the same path.
