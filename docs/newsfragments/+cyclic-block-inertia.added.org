@@ -1,0 +1,1 @@
+Cyclic block-tridiagonal inertia is available as ~block_cyclic~: one factorization of each Schur complement, GEMM block products, and one residual correction at ~1e-11~.

@@ -286,6 +286,8 @@ pub use strain_rate::{
 };
 pub use tangent::TangentKind;
 
+#[cfg(feature = "faer")]
+pub mod block_cyclic;
 pub mod cell_log;
 pub mod constraints;
 pub mod covalent;
