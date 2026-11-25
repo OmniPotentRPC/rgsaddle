@@ -8,4 +8,4 @@ converts a path in any other unit.
 C ABI minor 63 adds =rgsaddle_trics_path=.  Failed refinement returns
 =SaddleError::Solver= in Rust and =RGSADDLE_SOLVER= in C; invalid controls use
 =SaddleError::Invalid= and =RGSADDLE_INVALID_PARAMETER=, while non-finite
-geometry or derived values use =SaddleError::NonFinite= and =RGSADDLE_ERROR=.
+geometry or derived values use =SaddleError::NonFinite= and =RGSADDLE_NON_FINITE=.

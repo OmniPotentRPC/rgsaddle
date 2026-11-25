@@ -994,6 +994,7 @@ static int test_band_minmode_index1_and_sessions_cdylib(void) {
 static int test_trics_path_runtime(void) {
   double initial[5 * 3];
   double out[5 * 3] = {0};
+  double two_out[2 * 3] = {-1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
   for (int64_t image = 0; image < 5; ++image) {
     initial[3 * image] = 0.25 * (double)image;
     initial[3 * image + 1] = 0.1 * (double)image;
@@ -1022,6 +1023,13 @@ static int test_trics_path_runtime(void) {
   CHECK(rgsaddle_trics_path(5, 1, initial, 50, 1e-8, 0.1, 1, 0.0018,
                             1000, -1.0, out) == RGSADDLE_INVALID_PARAMETER,
         "TRICS negative length unit");
+  CHECK(rgsaddle_trics_path(1, 1, initial, 50, 1e-8, 0.1, 1, 0.0018,
+                            1000, 1.0, out) == RGSADDLE_SHAPE,
+        "TRICS single image shape error");
+  CHECK(rgsaddle_trics_path(2, 1, initial, 50, 1e-8, 0.1, 1, 0.0018,
+                            1000, 1.0, two_out) == RGSADDLE_SOLVER,
+        "TRICS two-image path has no interior image");
+  CHECK(two_out[0] == -1.0, "TRICS two-image error leaves output untouched");
   return 0;
 }
 

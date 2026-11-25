@@ -663,6 +663,45 @@ fn c_abi_trics_path_reports_solver_failures_and_crosses_a_linear_angle() {
     assert_eq!(&out[..12], &through_linear[..12]);
     assert_eq!(&out[48..], &through_linear[48..]);
     assert!(out.iter().all(|value| value.is_finite()));
+
+    let two_images = bend_path(&[40.0, -40.0], true);
+    let mut two_out = vec![-1.0; two_images.len()];
+    let rc_two = unsafe {
+        rgsaddle_trics_path(
+            2,
+            4,
+            two_images.as_ptr(),
+            50,
+            0.000_000_01,
+            0.1,
+            1,
+            0.001_8,
+            1000,
+            1.0,
+            two_out.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc_two, RGSADDLE_SOLVER);
+    assert!(two_out.iter().all(|&value| value == -1.0));
+
+    let mut non_finite = two_images.clone();
+    non_finite[0] = f64::NAN;
+    let rc_non_finite = unsafe {
+        rgsaddle_trics_path(
+            2,
+            4,
+            non_finite.as_ptr(),
+            50,
+            0.000_000_01,
+            0.1,
+            1,
+            0.001_8,
+            1000,
+            1.0,
+            two_out.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc_non_finite, rgsaddle::capi::RGSADDLE_NON_FINITE);
 }
 
 #[test]
