@@ -1045,17 +1045,6 @@ class SingleCalculatorNEB(NEB):
         super().__init__(images, *args, **kwargs)
 
 
-def _refuse_parallel_world(world: Any) -> None:
-    """Accept a serial communicator. A world with more than one rank is refused."""
-    if world is None:
-        return
-    size = getattr(world, "size", None)
-    if size is None:
-        return
-    if int(size) != 1:
-        raise NotImplementedError("this AutoNEB evaluates images on the calling thread")
-
-
 def _pair_of(value: Any, name: str) -> tuple[float, float] | None:
     """Two-stage ``(build, climb)`` number, or None when ``value`` is scalar."""
     if isinstance(value, (list, tuple, np.ndarray)):
@@ -1103,7 +1092,10 @@ class AutoNEB:
     Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016),
     doi:10.1063/1.4961868. The growth, the spring rescaling, and the
     window relaxation run in the Rust core. The constructor arguments
-    match ``ase.mep.AutoNEB``. Image-parallel MPI is refused. The stored
+    match ``ase.mep.AutoNEB``. ``world=None`` is ``ase.parallel.world``.
+    Image-parallel MPI (``parallel=True`` on more than one rank) is
+    refused. With ``parallel=False`` every rank runs the same search and
+    rank 0 alone writes the trajectories. The stored
     images must agree on the atom count, the atomic numbers, ``pbc``,
     and the periodic cell vectors, as ASE's ``NEB`` requires. The
     endpoints keep their own ``Atoms`` records and a new interior image
@@ -1156,8 +1148,11 @@ class AutoNEB:
             raise NotImplementedError(
                 "AutoNEB method must be improvedtangent, aseneb, eb, or dneb"
             )
-        _refuse_parallel_world(world)
-        if parallel and world is not None and int(getattr(world, "size", 1)) != 1:
+        if world is None:
+            import ase.parallel
+
+            world = ase.parallel.world
+        if parallel and int(getattr(world, "size", 1)) != 1:
             raise NotImplementedError("this AutoNEB evaluates images on the calling thread")
         self.attach_calculators = attach_calculators
         self.prefix = str(prefix)
@@ -1269,8 +1264,13 @@ class AutoNEB:
         self.max_force = float(report.max_force)
         self.surface_rows = int(report.surface_rows)
         self.ci = None if int(report.ci_index) < 0 else int(report.ci_index)
-        for index, image in enumerate(self.all_images):
-            write(f"{self.prefix}{index:03d}.traj", image)
+        # Every rank runs the same serial search. One rank writes.
+        if int(getattr(self.world, "rank", 0)) == 0:
+            for index, image in enumerate(self.all_images):
+                write(f"{self.prefix}{index:03d}.traj", image)
+        barrier = getattr(self.world, "barrier", None)
+        if callable(barrier):
+            barrier()
         return AutoNEBReport(
             status=self.status,
             max_force=self.max_force,

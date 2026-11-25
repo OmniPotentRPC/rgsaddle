@@ -511,3 +511,49 @@ def test_autoneb_images_keep_the_atoms_of_their_endpoints(tmp_path) -> None:  # 
     written = read(str(tmp_path / "band002.traj"))
     assert list(written.get_atomic_numbers()) == [1, 2]
     assert list(written.get_tags()) == [3, 4]
+
+
+class _World:
+    """A stand-in communicator: a rank, a size, and a counted barrier."""
+
+    def __init__(self, rank: int, size: int) -> None:
+        self.rank = rank
+        self.size = size
+        self.barriers = 0
+
+    def barrier(self) -> None:
+        self.barriers += 1
+
+
+def _two_hydrogens() -> list[Atoms]:
+    return [
+        Atoms("H", positions=[[0.0, 0.0, 0.0]]),
+        Atoms("H", positions=[[1.0, 0.0, 0.0]]),
+    ]
+
+
+def test_autoneb_world_none_is_the_ase_world(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import ase.parallel
+
+    band = _flat_autoneb(str(tmp_path / "default"), _two_hydrogens())
+    assert band.world is ase.parallel.world
+
+
+def test_autoneb_refuses_image_parallel_mpi(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(NotImplementedError, match="calling thread"):
+        _flat_autoneb(str(tmp_path / "mpi"), _two_hydrogens(), parallel=True, world=_World(0, 2))
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_autoneb_writes_the_band_from_rank_zero_alone(tmp_path, rank: int) -> None:  # type: ignore[no-untyped-def]
+    world = _World(rank, 2)
+    prefix = str(tmp_path / "ranked")
+    band = _flat_autoneb(prefix, _two_hydrogens(), world=world)
+    before = os.path.getmtime(f"{prefix}001.traj")
+    report = band.run()
+    assert report.n_images == 3
+    assert world.barriers == 1
+    assert os.path.exists(f"{prefix}002.traj") == (rank == 0)
+    if rank != 0:
+        assert os.path.getmtime(f"{prefix}001.traj") == before
+
