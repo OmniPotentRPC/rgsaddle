@@ -1,0 +1,126 @@
+#+TITLE: Choose saddle search directions from a minimum
+#+OPTIONS: toc:nil num:nil
+
+=DirectionCover= decides where the saddle searches out of one minimum start, and in which order. It is written for adaptive kinetic Monte Carlo, where every visited minimum needs its low saddles and a measure of how much of the search space has been tried (Xu and Henkelman, J. Chem. Phys. 129, 114104 (2008), doi:10.1063/1.2976010). It supplies the starts and the order only. Each start runs as one =ArtSession=, the phased ART nouveau of =howto/art=, so the push, perpendicular relaxation, Lanczos climb, index-1 certificate and both quenches are the ones documented there.
+
+Nothing here builds a Hessian. The inputs are the minimum, an optional per-atom active mask, a =u64= seed, a =DirectionCoverConfig= and a =CoverBudget=. Bad input returns =SaddleError=; nothing is clamped or replaced.
+
+#+begin_export rst
+:cite:`xuAdaptiveKineticMonte2008,pedersenEfficientSamplingSaddle2011,belandKineticActivationRelaxation2015,plasenciaImprovedMinimumMode2017,quappGradientOnlyAlgorithm1996,quappSearchingSaddlePoints1998,barkemaEventBasedRelaxation1996,malekFindingSaddlePoints2000,henkelmanDimerMethodFinding1999,xiaoBasinConstrainedKappa2014,jonesEfficientGlobalOptimization1998,goodPopulationFrequenciesSpecies1953`
+#+end_export
+
+* Run a budget of arms
+Build the chooser on the surface and the relaxed minimum, then spend a budget. A budget sets =max_arms=, =max_force_calls=, or both; an empty budget is refused.
+
+#+begin_src rust
+use ndarray::{Array1, ArrayView1, array};
+use rgsaddle::{
+    ArmOutcome, ArtConfig, CoverBudget, DirectionCover, DirectionCoverConfig, MinModeConfig,
+    MinModeKind, PointSurface, SaddleError,
+};
+
+struct DoubleWell;
+
+impl PointSurface for DoubleWell {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (px, py, pz) = (x[0], x[1], x[2]);
+        let e = (px * px - 1.0).powi(2) + 0.25 * (py * py + pz * pz);
+        Ok((e, array![4.0 * px * (px * px - 1.0), 0.5 * py, 0.5 * pz]))
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    let mode = MinModeConfig::default()
+        .with_kind(MinModeKind::Lanczos)
+        .with_saddle_check(None)
+        .with_force_tol(0.02)
+        .with_max_move(0.1)
+        .with_krylov_dim(4)
+        .with_max_rotations(6);
+    let art = ArtConfig::default()
+        .with_mode(mode)
+        .with_push_length(0.5)
+        .with_push_step(0.3)
+        .with_max_pushes(12)
+        .with_max_climbs(25)
+        .with_push_over(0.25);
+    let config = DirectionCoverConfig::default().with_art(art);
+    let mut cover = DirectionCover::new(&DoubleWell, array![-1.0, 0.0, 0.0], None, 7, config)?;
+    let report = cover.run(&DoubleWell, CoverBudget::default().with_max_arms(12))?;
+    assert_eq!(report.saddles.len(), 1);
+    assert!(report
+        .records
+        .iter()
+        .any(|r| r.outcome == ArmOutcome::DuplicateSaddle(0)));
+    Ok(())
+}
+#+end_src
+
+The same example is the doctest on =DirectionCover=. Arms whose push points away from the barrier end as =NonConverged= (ART spent its pushes without negative curvature). Once one product is known the picker turns to the untried directions next to it.
+
+* Drive the arms from the host
+=run= is the loop =suggest_batch=, =run_arm= for each pick on rayon's pool, then =record= in pick order. A host that schedules its own workers can split it:
+
+1. =suggest= or =suggest_batch(k)= returns =ArmSuggestion= values: the =ArmId= (centre atom and cover point), its score, and the policy that produced it.
+2. =seed(arm)= is the =ArtSeed= for that arm, if the host runs ART itself; =run_arm(surface, arm)= runs it and returns an =ArmTrial=.
+3. =record(trial)= files the verdict. A host that runs another climb builds the trial with =ArmTrial::connected=, =returned=, =failed= or =non_converged=.
+4. =set_prefactor(arm, ν)= attaches a prefactor the host computed later.
+5. =coverage()= is the readout.
+
+Recording the same arm twice is an error. The picker is a function of the recorded trials, so a host that records in a fixed order gets the same picks whatever its thread count.
+
+* Confine the search to a region
+Pass =Some(&active)= with one =bool= per atom. Only active atoms are centres, and only they move in their own seeds: the ART mask is one on the centre and on each kicked neighbour, zero elsewhere. Neighbour kicks reach atoms within =kick_radius= of the centre, inactive ones included, so set the radius to zero to keep every push on the active atoms alone. A mask of the wrong length is =SaddleError::Shape=; a mask with no active atom is =SaddleError::Invalid=.
+
+* Reference
+** Cover
+Every active atom carries the same cover: =cover_points= signed unit vectors on its own sphere (64 by default, at least 4). A direction and its opposite are separate arms. The points are spread by the geodesic repulsion of Plasencia Gutiérrez, Argáez and Jónsson (J. Chem. Theory Comput. 13, 125 (2017), doi:10.1021/acs.jctc.5b01216), relaxed for =cover_sweeps= Gauss-Seidel sweeps from a start drawn from the seed, then ordered farthest point first. =sphere_cover(n, sweeps, seed)= returns that set.
+
+An arm's seed is its cover vector on the centre plus, when =kick_radius= is positive, independent Gaussian components of standard deviation =kick_width= on every atom within the radius. Pedersen, Hafstein and Jónsson (SIAM J. Sci. Comput. 33, 633 (2011), doi:10.1137/100792743) show that this centre, radius and width set which saddles a minimum-mode search reaches and how often. Distances use the minimum image when =cell= is set; ART itself runs on open coordinates.
+
+** Arm verdicts
+| =ArtStatus=               | =ArmOutcome=                                                        |
+|---------------------------+---------------------------------------------------------------------|
+| =Connected=               | =NewSaddle=, or =DuplicateSaddle(id)= for a saddle already recorded |
+| =Reverted=                | =ReturnedToStart=: both quenches came back                          |
+| =LostCurvature=           | =Failed(ArmFailure::LostCurvature)=: no quench ran                  |
+| =Irreversible=            | =Failed(ArmFailure::Disconnected)=                                  |
+| =NotIndexOne=             | =Failed(ArmFailure::NotIndexOne)=                                   |
+| =NotDownhill=             | =Failed(ArmFailure::NotDownhill)=                                   |
+| =Exhausted=               | =NonConverged=                                                      |
+| an error from the session | =Failed(ArmFailure::Error(message))=                                |
+
+Two saddles are one when their energies differ by less than =saddle_energy_tol= and their per-atom RMSD is below =saddle_rmsd_tol=. Product minima use =minimum_energy_tol= and =minimum_rmsd_tol= the same way. The RMSD is per atom and Cartesian, under the minimum image when =cell= is set; it does not match permuted identical atoms, so symmetry copies of one saddle on different atoms count as different saddles.
+
+** Pick policies
+| Policy                | Score of an untried arm                                                                                          |
+|-----------------------+------------------------------------------------------------------------------------------------------------------|
+| =Gap= (default)       | angle to the nearest tried direction on the same centre, times the distinct states among the three nearest tried |
+| =ExpectedImprovement= | expected improvement on the barrier from a Gaussian process on the centre's sphere, times the gap over π         |
+| =Auto=                | =ExpectedImprovement= once two different barriers are known, =Gap= before                                        |
+
+The start counts as one state in the gap score, so a hole bounded by arms that led to different minima is tried before one whose edges all came back. The expected improvement is that of Jones, Schonlau and Welch (J. Global Optim. 13, 455 (1998), doi:10.1023/A:1008306431147) with kernel =exp(-θ²/2ℓ²)= of angular length scale =length_scale= (0.6 rad), the mean and variance of all known barriers, and target =best barrier - ei_margin=. =ExpectedImprovement= alone refuses to score before two different barriers are known. Ties go to the centre with fewer tried arms, then the lower atom, then the lower cover point, so the first pass touches every centre once. =batch= arms (1 by default) are picked greedily, each scored as if the earlier picks of the batch were already tried.
+
+** Coverage readout
+=CoverageReport= has:
+
+- =subspace_dim=: three times the number of active atoms
+- =covering_radius=: the largest, over centres, of the exact covering radius of that centre's tried signed directions on the sphere (=covering_radius_s2=); π before any arm
+- =atoms=: per centre, the tried count, the covering radius and the distinct states reached
+- =records=: one =ArmRecord= per arm, in record order, with the direction, outcome, saddle and product ids, barrier, optional prefactor and force calls
+- =saddles=, =products=: the distinct saddles with their hit counts, and the distinct product minima
+- =discovery=: distinct saddles after each arm; =saddle_draws= and =frequency_counts= are the connected draws and the number of saddles seen once, twice, and so on, for a Good-Turing (Good, Biometrika 40, 237 (1953), doi:10.1093/biomet/40.3-4.237) or capture-recapture estimate of what is left
+- =force_calls=: the total over all arms
+- =next=: the next suggestion and its score, or =None= when every arm is tried
+
+** Determinism
+Every random draw comes from the =u64= seed. A batch is chosen before it runs, its arms run on rayon's pool, and their trials are recorded in pick order, so the records are the same at one thread and at four; =tests/direction_cover.rs= checks that bitwise.
+
+** Measured
+=tests/direction_cover.rs= runs the picker on Müller-Brown, embedded as one atom with a stiff third coordinate, where 16 arms from the shallow minimum find both saddles next to it. On a 13-atom Lennard-Jones icosahedron, 5 of 16 arms reach another minimum, each through a different saddle. A bare displacement of the same length along the Lanczos soft mode, quenched, came back to the start on all 16. The ignored test =scaling_with_cluster_size= prints force calls per saddle and time per arm for 13, 38 and 75 atoms:
+
+#+begin_src sh
+cargo test --release --test direction_cover -- --ignored --nocapture
+#+end_src
+
+=ArtSession= keeps every force call with its position, so memory per arm grows with the number of atoms times the calls the arm spends.
