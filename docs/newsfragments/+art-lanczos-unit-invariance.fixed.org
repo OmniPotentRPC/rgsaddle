@@ -1,5 +1,4 @@
 Lanczos now stops when the lowest Ritz residual divided by the absolute Ritz value is at most ~rotation_tol~, together with the relative change of that value.
-A Ritz value near zero keeps that comparison absolute, so the stop never divides by zero.
 The Lanczos torque window uses the same ratio and stops once two vectors leave it under 1.
 The dimer keeps an absolute rotational force in curvature units.
 ART unit conversion therefore leaves ~rotation_tol~ unchanged for Lanczos and scales it by energy over length squared when the dimer is selected.
