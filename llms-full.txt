@@ -5096,7 +5096,10 @@ The selection prunes dead ends, drives square cars from both the left and
 right edges, minimizes the number of segments, and then chooses the largest
 successful car.  The splice width is the next even integer nearest one tenth
 of the image count, bounded from two through six.  Short segments are merged
-before each segment is expanded by half that width.
+before each segment is expanded by half that width.  A segment is
+interpolated only in a coordinate system whose diagnostic stays at or below
+`diagnostic_threshold` on every image of the expanded segment, so a threshold
+of zero or one never admits a level two system.
 
 ## Segment interpolation and inversion
 Inside one stable interval, the internal displacement is divided uniformly,
