@@ -11749,7 +11749,7 @@ fn defect_pair_run12_volume() {
 }
 
 struct PairField {
-    kelvin: rgsaddle::Kelvin,
+    green: rgsaddle::AnisotropicGreen,
     vacancy: rgsaddle::ElasticDipole,
     sia: [rgsaddle::ElasticDipole; 3],
 }
@@ -11761,9 +11761,10 @@ impl PairField {
             direction[1] * radius,
             direction[2] * radius,
         ];
-        self.kelvin
+        self.green
             .dipole_interaction(separation, self.vacancy, self.sia[which])
-            .unwrap_or(0.0)
+            .expect("validated Cu elastic tensor and nonzero pair separation")
+            .value
     }
 
     fn binding(&self, radius: f64, orientation: &str) -> f64 {
@@ -11882,7 +11883,7 @@ fn pair_field_with(
     a: f64,
     relax: &rgsaddle::RelaxConfig,
 ) -> Result<PairField, SaddleError> {
-    let repeats = 8usize;
+    let repeats = env_usize("RGSADDLE_ELASTIC_REPEATS", 8);
     let (perfect, cell) = fcc(repeats, a);
     let held = FastHeld { copper, cell };
     let (_, _, bulk_stress) = copper.evaluate(perfect.view(), cell);
@@ -11898,21 +11899,50 @@ fn pair_field_with(
     let sia = rgsaddle::ElasticDipole::from_stress(volume, sia_stress, bulk_stress)?;
     let to_010 = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
     let to_001 = [[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]];
-    let (c11, c12, c44) = cubic_moduli(copper, a);
-    let shear = (c11 - c12 + 3.0 * c44) / 5.0;
-    let bulk = (c11 + 2.0 * c12) / 3.0;
-    let poisson = if bulk + shear / 3.0 > 0.0 {
-        (3.0 * bulk - 2.0 * shear) / (6.0 * bulk + 2.0 * shear)
-    } else {
-        0.3
-    };
-    let kelvin = rgsaddle::Kelvin::new(shear.abs().max(1.0e-6), poisson.clamp(-0.9, 0.49))?;
-    eprintln!("dipoles vacancy {vacancy_dipole:?} sia {sia:?} mu {shear:.4} nu {poisson:.3}");
+    let (c11, c44, c12) = cubic_moduli(copper, a);
+    let constants = rgsaddle::ElasticConstants::cubic(c11, c12, c44)?;
+    let green = rgsaddle::AnisotropicGreen::new(constants)
+        .with_config(rgsaddle::AnisotropicGreenConfig::default().with_angular_points(32))?;
+    eprintln!(
+        "dipoles vacancy {vacancy_dipole:?} sia {sia:?} C11 {c11:.4} C12 {c12:.4} C44 {c44:.4}"
+    );
     Ok(PairField {
-        kelvin,
+        green,
         vacancy: vacancy_dipole,
         sia: [sia, rotate_dipole(sia, to_010), rotate_dipole(sia, to_001)],
     })
+}
+
+/// Residual-stress dipoles for the exact Mishin parameterization used by
+/// this test file.  Mishin et al. report defect energies but no vacancy or
+/// dumbbell dipole tensor, so this records rather than fits a literature
+/// number.  See docs/orgmode/explanation/elastic-dipole.org.
+#[test]
+#[ignore = "2048-atom Cu vacancy and dumbbell relaxations"]
+fn mishin_cu_vacancy_and_dumbbell_elastic_dipoles() {
+    let copper = FastCopper::new();
+    let field = pair_field(&copper, measured_lattice(300.0)).expect("Cu elastic dipoles");
+    for (name, dipole) in [("vacancy", field.vacancy), ("100 dumbbell", field.sia[0])] {
+        let tensor = dipole.tensor();
+        let scale = tensor
+            .iter()
+            .flatten()
+            .fold(1.0_f64, |largest, value| largest.max(value.abs()));
+        let tolerance = f64::EPSILON.sqrt() * scale;
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(
+                    (tensor[i][j] - tensor[j][i]).abs() <= tolerance,
+                    "{name} dipole is not symmetric: {tensor:?}"
+                );
+            }
+        }
+        assert!(
+            tensor.iter().flatten().all(|value| value.is_finite()),
+            "{name} dipole is not finite: {tensor:?}"
+        );
+        eprintln!("MISHIN_DIPOLE defect={name:?} tensor_eV={tensor:?}");
+    }
 }
 
 /// The rate-model volumes of [`channel_volumes`] at one cutoff: the site

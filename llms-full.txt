@@ -346,6 +346,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `defect_pair` | Types: `BasinSaddle`, `CaptureRecord`, `CellMode`, `DefectPairConfig`, `DimerSeed`, `DirectionClass`, `FreeMigration`, `HopOutcome`, `HopTemplate`, `MatchedCapture`, `OuterHop`, `PairSetup`, `PeriodicSinkRate`, `PeriodicSinkSurvival`, `RateCatalogue`, `RateEntry`, `RecombinationVolume`, `SiteOutcome`, `SphereLanding`, `VolumePlacement`, `VolumeSite`. Functions: `attempt_frequency`, `capture_is_spontaneous`, `capture_is_spontaneous_within`, `classify_separation`, `debye_hit_probability`, `debye_matched_radius`, `debye_radius`, `debye_resistance`, `defect_pair_rates`, `descend_to_floor`, `effective_capture_radius`, `embed_free_migration`, `embed_sphere_return`, `kinetic_recombination_volume`, `matched_capture_radius`, `mean_absorption_time`, `pair_separation`, `periodic_capture_log_likelihood`, `periodic_sink_rate`, `periodic_sink_survival`, `product_tangent`, `seeded_saddles`, `segment_band`, `shell_pair_factor`, `smoluchowski_rate`, `sphere_hit_probability`, `spherical_return_probability`, `volume_from_frequency`. Constants: `FREE_CRYSTAL`, `SPONTANEOUS_BARRIER_EV` |
 | `eigensolve` | Types: `EigenDevice`, `ExpandKind`, `RitzDecomposition`. Functions: `dense_logabsdet`, `eigh_on`, `exact_eigh`, `exact_eigvalsh`, `expand`, `faer_eigh`, `lowest_on`, `rayleigh_ritz`, `rayleigh_ritz_iter`, `relative_zero_tolerance`, `solve_dense`, `solve_dense_matrix`, `spd_logdet` |
 | `elastic` | Types: `ElasticMultipole`, `LocalField`, `Octupole`, `Quadrupole`, `StrainGradient`. Functions: `quadrupole_energy` |
+| `elastic_dipole` | Types: `AnisotropicGreen`, `AnisotropicGreenConfig`, `CorrectedEnergy`, `CorrectedRate`, `DefectDipole`, `ElasticConstants`, `ElasticCorrection`, `ElasticPairState`, `ElasticRate`, `GreenSecondDerivative`, `InteractionEstimate`, `PeriodicElastic`, `PeriodicElasticConfig`, `Tensor4` |
 | `error` | Types: `SaddleError` |
 | `field` | Types: `DefectSource`, `DirectSolver`, `FieldSolver`, `FmmSolver`, `Kelvin` |
 | `force` | Types: `ForceGate` |
@@ -390,6 +391,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `sella_min` | Types: `SellaMinConfig`, `SellaMinReport`, `SellaMinSession` |
 | `sella_saddle` | Types: `SellaSaddleConfig`, `SellaSaddleReport`, `SellaSaddleSession` |
 | `solid_dimer` | Types: `CellMask`, `IndexCheck`, `IndexReport`, `JointChart`, `SolidDimer`, `SolidDimerConfig`, `SolidDimerReport`, `StressCheck`, `VineyardIndexError`, `VineyardIndexReport`. Functions: `certify_vineyard_pair`, `check_cauchy_stress`, `finite_difference_cauchy_stress`, `index_at`, `virial`. Constants: `STRAIN_VOIGT` |
+| `solid_prefactor` | Types: `JointHessian`, `JointHessianConfig`, `JointVineyard`, `JointVineyardConfig`. Functions: `joint_hessian`, `joint_vineyard_prefactor` |
 | `solid_state` | Functions: `cartesian_step`, `cell_neb_force`, `joint_displacement`, `orient_lower_triangular`, `solid_state_enthalpy`, `solid_state_jacobian` |
 | `sparse_hessian` | Types: `Colouring`, `LowestEigenpairs`, `SparseHessian`, `SparseHessianOpts`, `SparsityPattern`. Functions: `distance2_colouring`, `eval_displacements`, `one_atom_hessian`, `prefactor_hessian`, `sparse_hessian` |
 | `spring` | Types: `SpringForces`, `SpringKind`. Functions: `energy_weighted_constants`, `onsager_machlup_displacements`. Constants: `OM_RECIP_EPS` |
@@ -408,6 +410,7 @@ Every public configuration struct, its public fields, and the corresponding chai
 | --- | --- |
 | `AdaptiveOhTstConfig` | `max_iterations` (`with_max_iterations`), `max_planes` (`with_max_planes`), `sampler` (`with_sampler`, `with_thermal`) |
 | `AffineSymmetry` | `linear` (`with_linear`), `translation` (`with_translation`) |
+| `AnisotropicGreenConfig` | `angular_points` (`with_angular_points`) |
 | `AnharmonicConfig` | `hvp_step` (`with_hvp_step`), `krylov` (`with_krylov`), `krylov_tolerance` (`with_krylov_tolerance`), `probes` (`with_probes`), `seed` (`with_seed`), `step` (`with_step`) |
 | `ArtConfig` | `basin_rmsd` (`with_basin_rmsd`), `duplicate_rmsd` (`with_duplicate_rmsd`), `eigen_threshold` (`with_eigen_threshold`), `max_climbs` (`with_max_climbs`), `max_pushes` (`with_max_pushes`), `mode` (`with_mode`), `permute_identical` (`with_permute_identical`), `perpendicular` (`with_perpendicular`), `push_length` (`with_push_length`), `push_over` (`with_push_over`), `push_step` (`with_push_step`), `quench` (`with_quench`), `saddle` (`with_saddle`) |
 | `ArtNConfig` | `activation_relaxations` (`with_activation_relaxations`), `basin_push` (`with_basin_push`), `basin_relaxations` (`with_basin_relaxations`), `curvature_floor` (`with_curvature_floor`), `eigenvalue_threshold` (`with_eigenvalue_threshold`), `lanczos_actions` (`with_lanczos_actions`), `lanczos_start` (`with_lanczos_start`), `relaxation_step` (`with_relaxation_step`) |
@@ -442,6 +445,8 @@ Every public configuration struct, its public fields, and the corresponding chai
 | `InternalPes` | `with_dummies` (`InternalPes::with_dummies`, `with_vocn`) |
 | `InternalWeights` | `angle` (`with_angle`), `bond` (`with_bond`), `dihedral` (`with_dihedral`), `other` (`with_other`), `translation` (`with_translation`) |
 | `IrcConfig` | `dr` (`with_dr`), `dx` (`with_dx`), `eigen_kind` (`with_eigen_kind`), `force_gate` (`with_force_gate`), `force_tol` (`with_force_tol`), `kind` (`with_kind`), `krylov_dim` (`with_krylov_dim`), `max_inner` (`with_max_inner`) |
+| `JointHessianConfig` | `coordinate_step` (`with_coordinate_step`), `stationary_tolerance` (`with_stationary_tolerance`), `stress_step` (`with_stress_step`) |
+| `JointVineyardConfig` | `mass_amu` (`with_mass_amu`), `mode_tolerance` (`with_mode_tolerance`) |
 | `KappaDimerConfig` | `beta` (`with_beta`), `eigen` (`with_eigen`) |
 | `LammpsSamplerConfig` | `excluded_modes` (`with_excluded_modes`), `friction_per_ps` (`with_friction_per_ps`), `library_path` (`with_library_path`), `thermodynamic_reference` (`with_thermodynamic_reference`), `thermostat` (`with_thermostat`), `time_step_ps` (`with_time_step_ps`) |
 | `LammpsSystem` | `atomic_numbers` (`with_atomic_numbers`), `box_matrix` (`with_box_matrix`), `config_bytes` (`with_config_bytes`), `masses` (`with_masses`), `positions` (`with_positions`) |
@@ -455,6 +460,7 @@ Every public configuration struct, its public fields, and the corresponding chai
 | `OcinebConfig` | `angle_tol` (`with_angle_tol`), `band` (`with_band`), `max_mmf_steps` (`with_max_mmf_steps`), `minmode` (`with_minmode`), `restore_unhelpful` (`with_restore_unhelpful`), `stability_count` (`with_stability_count`), `trigger_factor` (`with_trigger_factor`), `trigger_force` (`with_trigger_force`) |
 | `PafiConfig` | `blocks` (`with_blocks`), `fix_com` (`with_fix_com`), `max_rounds` (`with_max_rounds`), `mobility` (`with_mobility`), `region` (`with_region`), `retain` (`with_retain`), `samples` (`with_samples`), `seed` (`with_seed`), `stride` (`with_stride`), `target_error` (`with_target_error`), `thermal` (`with_thermal`), `thermalize` (`with_thermalize`), `time_step` (`with_time_step`) |
 | `PairConfig` | `offset`, `orientation` (`PairConfig::new`) |
+| `PeriodicElasticConfig` | `green` (`with_green`), `image_shells` (`with_image_shells`) |
 | `PermutationDistance` | `atoms` (`with_atoms`), `cell` (`with_cell`), `masses` (`with_masses`), `species` (`with_species`) |
 | `PlaneOptimizerConfig` | `confidence` (`with_confidence`), `max_evaluations` (`with_max_evaluations`), `max_iterations` (`with_max_iterations`), `max_records` (`with_max_records`), `max_rotation` (`with_max_rotation`), `max_translation` (`with_max_translation`), `metric` (`with_metric`), `metric_rank` (`with_metric_rank`), `norm_test` (`with_norm_test`), `patience` (`with_patience`), `recenter` (`with_recenter`), `rotate` (`with_rotate`), `rotation_basis` (`with_rotation_basis`), `sampler` (`with_sampler`), `tolerance` (`with_tolerance`), `translate` (`with_translate`) |
 | `QuadraticModel` | `center` (`with_center`), `energy` (`with_energy`), `gradient` (`with_gradient`), `hessian` (`with_hessian`) |
@@ -705,6 +711,8 @@ When a linearly interpolated guess between reactant and product crosses a rugged
 
 ## Periodicity
 Positions stay unwrapped Cartesian. `Cell` wraps per-atom differences for the band mechanics through fractional coordinates (rows are lattice vectors; a zero row is a non-periodic axis). Neighbor lists, when a surface wants them, are vesin's job.
+
+The point-defect finite-cell correction is described in [elastic dipoles and periodic images](explanation/elastic-dipole.html).  It uses `linkcell::Cell` / minimage for the defect separation, Barnett's anisotropic Green function, and a spherical periodic-image order with an explicit error estimate.
 
 ## The solid-state reference cell
 The solid-state band is checked against an answer computed without a band. The case is the Bain path from bcc to fcc of LJ (epsilon 1 eV, sigma 1 A), switched to zero over [2.0, 2.2] A. Both atoms of the body-centred tetragonal cell diag(a, a, c) sit on inversion centres, so the atomic force is zero at any cell. The relaxed energy at fixed c/a is then a one-dimensional minimum over the volume. `validation/bain_lj_reference.py` scans it on a 2.5e-4 grid. bcc and fcc are minima, and the saddle sits at c/a 1.09331985, 0.0590356373 eV/atom above bcc. Over the six cell strains that saddle has one negative eigenvalue.
