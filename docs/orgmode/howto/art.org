@@ -14,7 +14,9 @@ The phase is stored on the session. =step= runs one phase and leaves the next on
 7. =Quench= minimizes both images with no constraint.
 8. =Report= decides reversibility.
 
-=run_events= repeats that for many seeds and records a later landing on the same saddle in =ArtBatch::duplicates=. =ArtSession::force_calls= lists every surface evaluation, with the phase that requested it.
+=run_events= repeats that for many seeds and records a later landing on the same saddle in =ArtBatch::duplicates=. =ArtSession::force_calls= lists the most recent =ArtConfig::force_call_window= evaluations (64 by default), with the phase that requested each one; =force_call_count()= is the unbounded total.
+
+During =Lanczos= on the climb, negative curvature and =mode_overlap_tol= keep the search on the accepted index-1 direction. A rejected estimate first gets a direct curvature check along the carried mode. If that direction is no longer negative, ART restarts from the last accepted point with a halved translation cap, up to =index_one_recovery_attempts= times, then returns =SaddleError::ArtIndexOneLost=.
 
 =ArtStatus::Connected= requires a converged index-1 certificate, both quench energies below the saddle, one quenched image on the reactant, and the other image a different minimum. Either sign of the push-over may be the return: the mode at the saddle is not required to point back along the path that arrived. =ArtStatus::Reverted= is the other case of one basin, and it is not a completed exit. The structural distance is Euclidean for one atom. For several atoms it is the Kabsch RMSD, or the RMSD of the sorted pair distances when =permute_identical= is set, which is the identical-atom comparison used for the LJ clusters in the paper.
 
@@ -38,7 +40,9 @@ of the lowest Ritz pair divided by the absolute Ritz value and the relative
 change of that value, so it keeps its value. A dimer reads =rotation_tol=
 as a rotational force in curvature units, and unit conversion multiplies it
 by energy over length squared. Any other relaxation method is an
-error from =for_units=. =ArtConfig::validate()=
+error from =for_units=. =mode_overlap_tol= is a cosine, and
+=force_call_window= and =index_one_recovery_attempts= are counts, so
+=for_units= keeps their values. =ArtConfig::validate()=
 returns an invalid parameter error when the perpendicular relaxation force
 tolerance is looser than the mode force tolerance, and when the mode force
 tolerance is not finite and positive. It also holds =ArtConfig::mode= to the
