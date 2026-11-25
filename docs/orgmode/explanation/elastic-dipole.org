@@ -21,7 +21,10 @@ For separation \(r\), source \(P^a\), and target \(P^b\), the interaction is
 E_ab = P^b_ij G_ik,jl(r) P^a_kl.
 #+end_example
 
-The periodic trapezoid rule is evaluated on nested angular meshes.  Their difference is the angular error estimate.  The isotropic test compares the result with the closed Eshelby--Kelvin expression.  The cubic test uses the exact =[100]= result of Dederichs and Leibfried, Phys. Rev. 188, 1175 (1969), doi:10.1103/PhysRev.188.1175: \(G_{xx,xx}=1/(2 pi C_{44}r^3)\), while choosing constants that are not isotropic.
+The periodic trapezoid rule is evaluated on nested angular meshes.
+Their difference is the angular error estimate.
+The isotropic test compares the dipole interaction with Kelvin's closed form result.
+The cubic test uses the exact =[100]= result of Dederichs and Leibfried, Phys. Rev. 188, 1175 (1969), doi:10.1103/PhysRev.188.1175: \(G_{xx,xx}=1/(2 pi C_{44}r^3)\), while choosing constants that are not isotropic.
 
 * Periodic correction
 The \(1/r^3\) image sum is conditionally convergent.  =PeriodicElastic= fixes its order by growing Cartesian spheres, as required when applying the periodic image correction of Varvenne, Bruneval, Marinica, and Clouet, Phys. Rev. B 88, 134102 (2013), doi:10.1103/PhysRevB.88.134102.  It reports the change on removing the outer sphere plus both nested angular errors.  For a pair,
@@ -33,7 +36,11 @@ E_corrected = E_atomistic_periodic + correction.
 
 =correct_energy= handles one pair state, =correct_landscape= maps a whole energy landscape, and =correct_rate_catalogue= applies the reactant and saddle corrections before rebuilding the harmonic rate.  Every result carries an absolute error estimate.  The periodic energy includes the cross interaction with every image and one half of each defect's interaction with its own nonzero images.  Consequently a barrier remains correct when a defect dipole changes between the reactant and saddle states.
 
-The smoke cell-size test synthesizes the atomistic long-range contribution from the same periodic sum, then verifies that adding the correction removes its cell drift for several separations and box lengths.  The full copper job is driven by =scripts/benchmark-elastic-dipole.sh=.  It runs every size in =RGSADDLE_REPEATS= and records the field-free and dipole-corrected \(V_{iv}\) estimators as separate rows.
+The smoke cell-size test synthesizes the atomistic long-range contribution from the same periodic sum, then verifies that adding the correction removes its cell drift for several separations and box lengths.
+The full copper job is driven by =scripts/benchmark-elastic-dipole.sh=.
+It builds the defect-pair catalogue once, runs the network volume calculation for every size in =RGSADDLE_REPEATS=, and records the uncorrected and vector-dipole \(V_{iv}\) estimators as separate rows.
 
 * Copper reference status
-The Mishin Cu EAM tests evaluate the vacancy and =[100]= dumbbell residual stresses after relaxation.  No published tensor for those two defects using exactly the 2001 Mishin parameterization and this fixed-cell convention was identified, so the test records the tensors and checks symmetry, route consistency, and cell convergence rather than asserting an unrelated potential's numbers.  Mishin et al., Phys. Rev. B 63, 224106 (2001), doi:10.1103/PhysRevB.63.224106, report defect energetics and elastic constants, not these residual-stress dipole tensors.
+The opt-in Mishin Cu EAM test uses a reference supercell with 2048 lattice sites by default, relaxes a vacancy and a =[100]= dumbbell, derives their dipoles from the residual stress, and records finite symmetric tensors.
+No published tensor for those two defects using exactly the 2001 Mishin parameterization and this fixed-cell convention was identified, so the test does not assert an unrelated potential's numbers.
+Mishin et al., Phys. Rev. B 63, 224106 (2001), doi:10.1103/PhysRevB.63.224106, report defect energetics and elastic constants, not these residual-stress dipole tensors.
