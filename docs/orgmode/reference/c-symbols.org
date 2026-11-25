@@ -131,7 +131,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_samd_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_samd_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_idpp_path=. Purpose: Image dependent pair potential initial path. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_trics_path=. Purpose: Translation rotation internal coordinates with splicing, ABI minor 63. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_trics_path=. Purpose: Translation rotation internal coordinates with splicing, ABI minor 66. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_create=. Purpose: Climbing-image band that hands the climbing image to a min-mode climb. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_step=. Purpose: One band step, one alignment, or one P-RFO climb step. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_positions=. Purpose: Copy the current band out (n_images * 3 * n_atoms doubles). Parameters: the declaration. Units: the caller's.
