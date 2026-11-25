@@ -55,6 +55,20 @@ inline bool abi_compatible() noexcept { return abi_at_least(15); }
 
 // First ABI minor that carries the rgsaddle_growing_string_* symbols.
 inline constexpr std::uint32_t growing_string_abi_minor = 44;
+/// Minor that introduced `rgsaddle_landscape_create` and the other landscape symbols.
+inline constexpr std::uint32_t landscape_abi_minor = 66;
+
+inline constexpr bool abi_has_landscape_for(rgsaddle_version_t const& stamp) noexcept {
+    return stamp.major == RGSADDLE_ABI_MAJOR && stamp.minor >= landscape_abi_minor;
+}
+
+inline bool abi_has_landscape() noexcept {
+    rgsaddle_version_t stamp{};
+    if (rgsaddle_abi_stamp(&stamp) != RGSADDLE_OK) {
+        return false;
+    }
+    return abi_has_landscape_for(stamp);
+}
 
 struct Report {
     int status = RGSADDLE_STATUS_RUNNING;
@@ -676,7 +690,7 @@ public:
         return Report::from_c(out);
     }
 
-    /** The Hessian callback receives the geometry of each request. */
+    /** Minor 66: the Hessian callback receives the geometry of each request. */
     Report step_at(rgsaddle_surface_fn surface, rgsaddle_hessian_at_fn hessian, void* user) {
         rgsaddle_report_t out{};
         check(rgsaddle_indexk_step_at(handle_, surface, hessian, user, &out));
@@ -837,8 +851,8 @@ public:
     Landscape(rgsaddle_landscape_config_t const& config, std::int64_t n_atoms,
               double const* position, double const* modes, std::int32_t k)
         : n_atoms_(n_atoms) {
-        if (!abi_compatible()) {
-            throw std::runtime_error("rgsaddle ABI 1.15 or later is required");
+        if (!abi_has_landscape()) {
+            throw std::runtime_error("rgsaddle ABI 1.66 or later is required");
         }
         handle_ = rgsaddle_landscape_create(&config, n_atoms, position, modes, k);
         if (handle_ == nullptr) {
