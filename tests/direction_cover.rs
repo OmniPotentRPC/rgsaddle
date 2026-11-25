@@ -525,6 +525,57 @@ impl PointSurface for MullerBrown {
     }
 }
 
+/// A harmonic well along `x` with a Gaussian shoulder at `x = 2`. The
+/// shoulder makes the curvature along `x` negative for `|x - 2| < 0.45`,
+/// but the slope stays positive, so there is no saddle past it.
+struct Shoulder;
+
+impl PointSurface for Shoulder {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let d = (x[0] - 2.0) / 0.5;
+        let bump = 0.5 * (-d * d).exp();
+        let energy = 0.5 * x.dot(&x) + bump;
+        let mut gradient = x.to_owned();
+        gradient[0] -= 2.0 * d / 0.5 * bump;
+        Ok((energy, gradient))
+    }
+}
+
+#[test]
+fn climb_off_a_shoulder_is_lost_curvature() {
+    let mode = MinModeConfig::default()
+        .with_kind(MinModeKind::Lanczos)
+        .with_saddle_check(None)
+        .with_krylov_dim(3)
+        .with_max_rotations(6)
+        .with_force_tol(1e-3)
+        .with_max_move(0.1)
+        .with_dr(1e-4);
+    let art = ArtConfig::default()
+        .with_mode(mode)
+        .with_eigen_threshold(-0.5)
+        .with_push_length(0.5)
+        .with_push_step(0.5)
+        .with_max_pushes(8)
+        .with_max_climbs(400)
+        .with_index_one_recovery_attempts(3);
+    let config = DirectionCoverConfig::default().with_art(art);
+    let cover = DirectionCover::new(&Shoulder, Array1::zeros(3), None, 3, config).unwrap();
+    let point = (0..cover.cover().len())
+        .max_by(|&a, &b| cover.cover()[a][0].total_cmp(&cover.cover()[b][0]))
+        .unwrap();
+    let trial = cover
+        .run_arm(&Shoulder, rgsaddle::ArmId { atom: 0, point })
+        .unwrap();
+    let mut cover = cover;
+    let record = cover.record(trial).unwrap();
+    assert_eq!(
+        record.outcome,
+        ArmOutcome::Failed(rgsaddle::ArmFailure::LostCurvature),
+        "{record:?}"
+    );
+}
+
 #[test]
 fn muller_brown_low_saddles_are_recovered() {
     let relax = RelaxConfig::default()

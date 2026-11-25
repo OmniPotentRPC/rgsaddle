@@ -22,7 +22,9 @@ pub enum SaddleError {
     /// A parameter is outside its documented domain.
     Invalid(String),
     /// ART lost the tracked index-1 direction and exhausted its
-    /// configured recovery attempts.
+    /// configured recovery attempts while the rejected curvature was
+    /// still negative or not finite. A non-negative one finishes the
+    /// event as [`crate::ArtStatus::LostCurvature`] instead.
     #[error(
         "ART lost its index-1 mode after {attempts} recovery attempts (curvature {curvature:.3e}, overlap {overlap:.3e})"
     )]

@@ -310,10 +310,12 @@ pub enum ArmFailure {
     NotDownhill,
     /// Both quenches are distinct minima and neither is the start.
     Disconnected,
-    /// The lowest curvature became non-negative during the climb, so
-    /// the event stopped before any quench.
+    /// The lowest curvature became non-negative during the climb and
+    /// ART's restarts from the last accepted index-1 point did not bring
+    /// it back, so the event stopped before any quench.
     LostCurvature,
-    /// ART could not recover the tracked index-1 mode.
+    /// ART could not recover the tracked index-1 mode while its
+    /// curvature was still negative.
     IndexOneLost {
         /// Recovery attempts made before the arm stopped.
         attempts: usize,
