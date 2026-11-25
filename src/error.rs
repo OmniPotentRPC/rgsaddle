@@ -21,6 +21,19 @@ pub enum SaddleError {
     #[error("invalid parameter: {0}")]
     /// A parameter is outside its documented domain.
     Invalid(String),
+    /// ART lost the tracked index-1 direction and exhausted its
+    /// configured recovery attempts.
+    #[error(
+        "ART lost its index-1 mode after {attempts} recovery attempts (curvature {curvature:.3e}, overlap {overlap:.3e})"
+    )]
+    ArtIndexOneLost {
+        /// Recovery attempts made before returning the error.
+        attempts: usize,
+        /// Curvature reported for the rejected mode.
+        curvature: f64,
+        /// Absolute overlap with the last accepted index-1 mode.
+        overlap: f64,
+    },
     /// Automated equilibration selected a tail whose two halves still drift.
     #[error(
         "constrained ensemble did not equilibrate after {equilibration_steps} steps: split-half drift {drift:.3e} exceeds {sigma_multiple:.1} standard errors ({standard_error:.3e})"
