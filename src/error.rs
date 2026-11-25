@@ -4,22 +4,22 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, Error)]
 #[non_exhaustive]
-/// The SaddleError.
+/// Failure returned by a saddle search, surface callback, or estimator.
 pub enum SaddleError {
     #[error("shape mismatch: {0}")]
-    /// The Shape.
+    /// An array or geometry has the wrong dimensions.
     Shape(String),
     #[error("surface evaluation failed: {0}")]
-    /// The Surface.
+    /// The host potential or force callback failed.
     Surface(String),
     #[error("non-finite value in {0}")]
-    /// The str.
+    /// A named input or computed quantity is NaN or infinite.
     NonFinite(&'static str),
     #[error("solver step failed: {0}")]
-    /// The Solver.
+    /// The optimizer could not produce a valid step.
     Solver(String),
     #[error("invalid parameter: {0}")]
-    /// The Invalid.
+    /// A parameter is outside its documented domain.
     Invalid(String),
     /// Automated equilibration selected a tail whose two halves still drift.
     #[error(

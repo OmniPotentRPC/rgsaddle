@@ -30,7 +30,10 @@ The top-level =meson.build= provides the headers as the dependency =rgsaddle-hea
 | =SpringKind=     | =Uniform { k }=, energy-weighted, Onsager–Machlup                   |
 | =ProjectionKind= | plain elastic band, =Neb=, =Dneb=                                    |
 
-Defaults: improved tangent, uniform spring =k = 5=, NEB projection, climbing image with trigger factor 0.5.
+Defaults: improved tangent, uniform spring =k = 5=, NEB projection, and
+a climbing image that arms when the largest force component falls below
+the absolute threshold 0.5 in the host's force units. The relative
+trigger factor is 0.
 =BandConfig::with_string(StringConfig::default())= opts out of springs and tangent projection for the simplified string method of E, Ren, and Vanden-Eijnden (2007), evolving interior images under the full potential force and reparametrizing to equal arc length on the not-a-knot cubic spline or the polyline; see @@rst::doc:`the band how-to <howto/band>`@@.
 
 * Interpolate a geodesic initial path
@@ -40,7 +43,7 @@ Defaults: improved tangent, uniform spring =k = 5=, NEB projection, climbing ima
 =howto/art= is the phased search: a host seed and mask, perpendicular relaxation, Lanczos, a lowest-mode climb, an index-1 certificate, a push both ways off the saddle, and the two quenches. =ArtStatus::Reverted= is not a completed exit.
 
 * Step one point with a stencil
-=howto/stencil= builds =Stencil::point= for a minimiser, the dimer, Lanczos, ART, or eigen following. =Stencil::band= is the =feat/band-methods-zoom= seam. The C names are =rgsaddle_stencil_*= and =rgsaddle_last_error=. Python is =rgsaddle.Stencil.point= and =rgsaddle.ase.Point=.
+=howto/stencil= builds =Stencil::point= for a minimiser, the dimer, Lanczos, ART, or eigen following. =Stencil::band= validates its array but band presets are not implemented. The C names are =rgsaddle_stencil_*= and =rgsaddle_last_error=. Python is =rgsaddle.Stencil.point= and =rgsaddle.ase.Point=.
 
 * Solid-state dimer
 =howto/solid-dimer= is the minimum-mode search on atoms plus cell strain, the dimer analogue of the generalized solid-state band. A frozen cell is the fixed-cell dimer. The saddle stress is =V σ=, the elastic dipole.
@@ -58,7 +61,7 @@ Defaults: improved tangent, uniform spring =k = 5=, NEB projection, climbing ima
 =howto/pafi= is projected average force integration (PAFI; Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018)): the free energy along a path such as converged NEB images, from =dF/ds = ⟨(∇E · n)(1 - ψ)⟩= averaged on the hyperplanes normal to the path. The input is a =PointSurface=, an =ArcPath= from the images (=ArcPath::from_positions=) and the arcs of the planes; the output is a =FreeEnergyProfile= with the barrier and its standard error, and one =HyperplaneAverage= per plane with =tau= and =n_eff=. =zero_temperature_barrier= is the check that the path and the surface agree. The page also says how the warm-up floor and the automated equilibration test treat each plane.
 
 * Optimal hyperplane rates
-=howto/oh-tst= is optimal hyperplanar TST: a plane seeded from a converged dimer and climbed to the maximum of its free energy, a reactant normalization from parallel planes through the minimum, and the reversible work between them by integration with a BAR check. The rate is =sqrt(kT/2π) (Z_H/Z_R) exp(-ΔA/kT)= in mass-weighted coordinates. Only Hessian actions are used. The plane optimizer takes any =rgmin= manifold; the product manifold of point and normal is to come from rgmin.
+=howto/oh-tst= is optimal hyperplanar TST: a plane seeded from a converged dimer and climbed to the maximum of its free energy, a reactant normalization from parallel planes through the minimum, and the reversible work between them by integration with a BAR check. The rate is =sqrt(kT/2π) (Z_H/Z_R) exp(-ΔA/kT)= in mass-weighted coordinates. Only Hessian actions are used. The plane optimizer uses rgmin's product manifold of the point and normal.
 
 * Sample hyperplanes with LAMMPS
 =howto/lammps-hyperplane= configures =LammpsHyperplaneSampler= through rgpot's pinned =PotentialConfig= profile. lammpc keeps one in-process LAMMPS instance for the ensemble and applies the plane to position, velocity, and force on every BAOAB step. The =lammps= Cargo feature is opt-in.

@@ -84,14 +84,14 @@ class Stencil:
 
     @staticmethod
     def band(x: Annotated[NDArray[numpy.float64], dict(shape=(None, None), order='C', writable=False)], preset: str = 'ci-neb') -> None:
-        """Band presets stay on feat/band-methods-zoom and raise ValueError."""
+        """Band presets are not implemented and raise ValueError."""
 
-    def step(self, surface: Callable[..., StencilReport]) -> StencilReport:
+    def step(self, surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]]) -> StencilReport:
         """
         One step. surface(x) returns (energy, gradient) with x shaped (rows, dof).
         """
 
-    def run(self, surface: Callable[..., StencilReport], max_steps: int) -> StencilReport:
+    def run(self, surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]], max_steps: int) -> StencilReport:
         """Loop of step until convergence or max_steps."""
 
     def positions(self) -> NDArray[numpy.float64]:
@@ -258,7 +258,7 @@ class SessionReport:
 
     @property
     def curvature(self) -> float:
-        """Curvature along the mode. 0 for a band projection."""
+        """Curvature along the mode; 0 on a band step."""
 
     @property
     def iteration(self) -> int:
@@ -351,7 +351,7 @@ def trust_update(radius: float, predicted: float, actual: float, step_norm: floa
 class MinMode:
     def __init__(self, x: Annotated[NDArray[numpy.float64], dict(shape=(None,), order='C', device='cpu', writable=False)], mode: Annotated[NDArray[numpy.float64], dict(shape=(None,), order='C', device='cpu', writable=False)], kind: str = 'dimer', dr: float = 0.001, force_tol: float = 0.001, max_move: float = 0.2, rotation_tol: float = 0.0001, max_rotations: int = 20, krylov_dim: int = 12, rotation_stop_length: float = 0.0) -> None:
         """
-        Dimer or Lanczos minimum-mode session. Lengths are the caller's. A positive rotation_stop_length stops a rotation once |C| * rotation_stop_length * |sin w| is at most force_tol (Kastner and Sherwood 2008); 0 turns that stop off.
+        Dimer or Lanczos minimum-mode session translated by L-BFGS. Lengths are the caller's. A positive rotation_stop_length stops a rotation once |C| * rotation_stop_length * |sin w| is at most force_tol (Kastner and Sherwood 2008); 0 turns that stop off.
         """
 
     def estimate(self, surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]]) -> SessionReport:
@@ -380,7 +380,7 @@ class MinMode:
 
     def set_saddle_check(self, enabled: bool = True, escape_attempts: int = 0, escape_push: float = 0.1, lowest: int = 4, max_actions: int = 100, dr: float = 0.001, residual_tol: float = 0.01, negative_tol: float = 0.001) -> None:
         """
-        Replace the saddle check. enabled=False turns it off. escape_attempts above 0 pushes a converged point of index two or more by escape_push, the largest per-atom displacement, doubled on each later attempt, along its extra negative modes and searches again.
+        Replace the saddle check. enabled=False turns it off. escape_attempts above 0 pushes a converged point of index two or more by escape_push, the largest per-atom displacement, doubled on each later attempt, along its extra negative modes and searches again. The block size stays 2, finite differences stay forward, and the seed stays at the deterministic C default.
         """
 
 class Band:

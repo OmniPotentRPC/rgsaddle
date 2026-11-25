@@ -34,8 +34,9 @@
 //! NEBTangent / NEBSpringForce / NEBForceProjection with identical
 //! branch structure.
 //!
-//! Positions are unwrapped Cartesian; a periodic host applies its
-//! minimum-image convention before handing differences in.
+//! Positions are unwrapped Cartesian. [`BandConfig::cell`] makes the
+//! band mechanics take minimum-image differences; the host surface still
+//! receives the unwrapped positions and owns its potential's periodicity.
 //!
 //! [`sparse_hessian::sparse_hessian`] recovers a cutoff Hessian by a
 //! direct Curtis-Powell-Reid partition: a smallest-last distance-2

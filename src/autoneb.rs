@@ -36,10 +36,9 @@
 //! keeps a private per-segment list: the fill from two endpoints sets
 //! every segment to `k * (n_simul + 1)`, and each later insertion
 //! replaces the cut segment with two segments of twice that constant.
-//! A weighted or Onsager-Machlup spring supplied by the host is
-//! refused. The refusal is temporary: zoom-NEB will recompute those
-//! springs when an image is inserted. The solid-state block is not
-//! part of this loop.
+//! A weighted, energy-weighted, or Onsager-Machlup spring supplied by
+//! the host is refused with [`SaddleError::Invalid`]. The solid-state
+//! block is not part of this loop.
 //!
 //! `surface_rows` counts force evaluations: one row of
 //! [`BandSurface::eval`] is one force call. A surface error discards
