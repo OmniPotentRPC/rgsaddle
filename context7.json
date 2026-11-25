@@ -6,7 +6,8 @@
     "docs/orgmode",
     "examples",
     "include",
-    "python"
+    "python",
+    "docs/design"
   ],
   "excludeFolders": [
     "docs/source",
