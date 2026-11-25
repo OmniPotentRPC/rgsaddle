@@ -497,7 +497,11 @@ pub struct RgsaddleMinMode {
 
 fn method_of(v: i32, memory: i64) -> Method {
     match v {
-        1 => Method::lbfgs_with_memory(if memory > 0 { memory as usize } else { 20 }),
+        1 => Method::lbfgs_with_memory(if memory > 0 {
+            usize::try_from(memory).unwrap_or(usize::MAX)
+        } else {
+            20
+        }),
         4 => Method::Ode12r,
         _ => Method::fire(FireKind::V2),
     }
@@ -507,6 +511,8 @@ fn minmode_config_from(cfg: &RgsaddleMinModeConfig) -> Option<MinModeConfig> {
     if cfg.version.major != RGSADDLE_ABI_MAJOR {
         return None;
     }
+    let max_rotations = usize::try_from(cfg.max_rotations).ok()?;
+    let krylov_dim = usize::try_from(cfg.krylov_dim).ok()?;
     let default_rotation_angle_tol = MinModeConfig::default().rotation_angle_tol;
     let explicit_rotation_angle = cfg.version.minor >= MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR
         && (cfg.flags & RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL != 0
@@ -534,8 +540,8 @@ fn minmode_config_from(cfg: &RgsaddleMinModeConfig) -> Option<MinModeConfig> {
             } else {
                 FiniteDifference::Forward
             })
-            .with_max_rotations(cfg.max_rotations as usize)
-            .with_krylov_dim(cfg.krylov_dim as usize)
+            .with_max_rotations(max_rotations)
+            .with_krylov_dim(krylov_dim)
             .with_force_tol(cfg.force_tol)
             .with_max_move(cfg.max_move)
             .with_method(method_of(cfg.method, 0))
@@ -544,6 +550,17 @@ fn minmode_config_from(cfg: &RgsaddleMinModeConfig) -> Option<MinModeConfig> {
                 (cfg.version.minor >= SADDLE_INDEX_MINOR).then(SaddleIndexCheck::default),
             ),
     )
+}
+
+/// The product of `factors` as a count of doubles. `None` when a factor
+/// is negative or does not fit a `usize`, when the product overflows, or
+/// when that many doubles pass the `isize::MAX` bytes a slice may span.
+pub(crate) fn f64_len(factors: &[i64]) -> Option<usize> {
+    let len = factors.iter().try_fold(1usize, |len, &factor| {
+        len.checked_mul(usize::try_from(factor).ok()?)
+    })?;
+    let bytes = len.checked_mul(std::mem::size_of::<f64>())?;
+    (bytes <= isize::MAX.unsigned_abs()).then_some(len)
 }
 
 fn stamp_report(out: &mut RgsaddleReport) {
@@ -631,8 +648,12 @@ pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
 ///
 /// extern "C" fn double_well(_user: *mut c_void, req: *mut RgsaddleSurfaceRequest) -> i32 {
 ///     let req = unsafe { &mut *req };
-///     let rows = if req.flags & RGSADDLE_REQ_ONE_IMAGE != 0 { 1 } else { req.n_images as usize };
-///     let dof = 3 * req.n_atoms as usize;
+///     let n_images = if req.flags & RGSADDLE_REQ_ONE_IMAGE != 0 { 1 } else { req.n_images };
+///     let rows = usize::try_from(n_images).ok();
+///     let dof = usize::try_from(req.n_atoms).ok().and_then(|n| n.checked_mul(3));
+///     let (Some(rows), Some(dof)) = (rows, dof) else {
+///         return RGSADDLE_SHAPE;
+///     };
 ///     let x = unsafe { std::slice::from_raw_parts(req.positions, rows * dof) };
 ///     let e = unsafe { std::slice::from_raw_parts_mut(req.energies, rows) };
 ///     let g = unsafe { std::slice::from_raw_parts_mut(req.gradients, rows * dof) };
@@ -680,7 +701,7 @@ pub extern "C" fn rgsaddle_status_name(status: i32) -> *const c_char {
 /// };
 /// assert_eq!(report.status, 1);
 /// unsafe { rgsaddle_band_positions(band, positions.as_mut_ptr()) };
-/// let ci = report.ci_index as usize;
+/// let ci = usize::try_from(report.ci_index).unwrap();
 /// assert!(positions[3 * ci..3 * ci + 3].iter().all(|c| c.abs() < 1e-2));
 /// unsafe { rgsaddle_band_free(band) };
 /// ```
@@ -710,9 +731,12 @@ pub unsafe extern "C" fn rgsaddle_band_create_solid(
     if cells.is_null() || n_images < 3 {
         return std::ptr::null_mut();
     }
-    let raw = unsafe { slice::from_raw_parts(cells, (n_images as usize) * 9) };
-    let mut parsed = Vec::with_capacity(n_images as usize);
-    for image in 0..n_images as usize {
+    let Some(cell_len) = f64_len(&[n_images, 9]) else {
+        return std::ptr::null_mut();
+    };
+    let raw = unsafe { slice::from_raw_parts(cells, cell_len) };
+    let mut parsed = Vec::with_capacity(cell_len / 9);
+    for image in 0..cell_len / 9 {
         let c = &raw[image * 9..image * 9 + 9];
         parsed.push(Cell([
             [c[0], c[1], c[2]],
@@ -758,7 +782,8 @@ pub(super) unsafe fn parse_band_config(
             if cfg.spring_ks.is_null() {
                 return None;
             }
-            let ks = unsafe { slice::from_raw_parts(cfg.spring_ks, (n_images - 1) as usize) };
+            let ks_len = f64_len(&[n_images - 1])?;
+            let ks = unsafe { slice::from_raw_parts(cfg.spring_ks, ks_len) };
             SpringKind::Weighted { ks: ks.to_vec() }
         }
         2 => SpringKind::OnsagerMachlupLive { k: cfg.spring_k },
@@ -834,10 +859,12 @@ unsafe fn band_from_parts(
     if cfg.version.major != RGSADDLE_ABI_MAJOR {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
-    let total = dof * n_images as usize;
+    let (Some(dof), Some(total)) = (f64_len(&[3, n_atoms]), f64_len(&[n_images, 3, n_atoms]))
+    else {
+        return std::ptr::null_mut();
+    };
     let flat = unsafe { slice::from_raw_parts(positions, total) };
-    let initial = match Array2::from_shape_vec((n_images as usize, dof), flat.to_vec()) {
+    let initial = match Array2::from_shape_vec((total / dof, dof), flat.to_vec()) {
         Ok(a) => a,
         Err(_) => return std::ptr::null_mut(),
     };
@@ -901,7 +928,10 @@ impl BandSurface for GivenBand {
 /// # Safety
 /// `mask` addresses `n_atoms` bytes and `n_atoms` is positive.
 pub(super) unsafe fn fixed_mask(mask: *const u8, n_atoms: i64) -> Option<Vec<bool>> {
-    let raw = unsafe { slice::from_raw_parts(mask, n_atoms as usize) };
+    let len = usize::try_from(n_atoms)
+        .ok()
+        .filter(|&len| len <= isize::MAX.unsigned_abs())?;
+    let raw = unsafe { slice::from_raw_parts(mask, len) };
     raw.iter()
         .map(|&v| match v {
             0 => Some(false),
@@ -984,9 +1014,11 @@ unsafe fn project_band(
         return RGSADDLE_SHAPE;
     }
     let cfg = unsafe { &*config };
-    let dof = (3 * n_atoms) as usize;
-    let rows = n_images as usize;
-    let total = dof * rows;
+    let (Some(dof), Some(total)) = (f64_len(&[3, n_atoms]), f64_len(&[n_images, 3, n_atoms]))
+    else {
+        return RGSADDLE_SHAPE;
+    };
+    let rows = total / dof;
     let Some(mut parsed) = (unsafe { parse_band_config(cfg, n_images, dof, None) }) else {
         return RGSADDLE_INVALID_PARAMETER;
     };
@@ -1066,9 +1098,11 @@ pub unsafe extern "C" fn rgsaddle_dyneb_mask(
     {
         return RGSADDLE_SHAPE;
     }
-    let rows = n_images as usize;
-    let dof = (3 * n_atoms) as usize;
-    let total = rows * dof;
+    let (Some(dof), Some(total)) = (f64_len(&[3, n_atoms]), f64_len(&[n_images, 3, n_atoms]))
+    else {
+        return RGSADDLE_SHAPE;
+    };
+    let rows = total / dof;
     let pos = unsafe { slice::from_raw_parts(positions, total) };
     let energy = unsafe { slice::from_raw_parts(energies, rows) };
     let force = unsafe { slice::from_raw_parts_mut(forces, total) };
@@ -1192,7 +1226,9 @@ pub unsafe extern "C" fn rgsaddle_band_positions(band: *const RgsaddleBand, out:
     }
     let band = unsafe { &*band };
     let pos = band.session.positions();
-    let total = (band.n_images * 3 * band.n_atoms) as usize;
+    let Some(total) = f64_len(&[band.n_images, 3, band.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let dst = unsafe { slice::from_raw_parts_mut(out, total) };
     for (i, v) in pos.iter().enumerate() {
         dst[i] = *v;
@@ -1214,10 +1250,14 @@ pub unsafe extern "C" fn rgsaddle_band_set_positions(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let band = unsafe { &mut *band };
-    let dof = (3 * band.n_atoms) as usize;
-    let total = dof * band.n_images as usize;
+    let (Some(dof), Some(total)) = (
+        f64_len(&[3, band.n_atoms]),
+        f64_len(&[band.n_images, 3, band.n_atoms]),
+    ) else {
+        return RGSADDLE_SHAPE;
+    };
     let flat = unsafe { slice::from_raw_parts(positions, total) };
-    let arr = match Array2::from_shape_vec((band.n_images as usize, dof), flat.to_vec()) {
+    let arr = match Array2::from_shape_vec((total / dof, dof), flat.to_vec()) {
         Ok(a) => a,
         Err(_) => return RGSADDLE_SHAPE,
     };
@@ -1375,7 +1415,9 @@ pub unsafe extern "C" fn rgsaddle_minmode_create(
         return std::ptr::null_mut();
     }
     let cfg = unsafe { &*config };
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
     if cfg.method == 3 || cfg.method == 4 {
@@ -1514,7 +1556,9 @@ pub unsafe extern "C" fn rgsaddle_minmode_set_position(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &mut *session };
-    let dof = (3 * session.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let g = (!gradient.is_null())
         .then(|| Array1::from(unsafe { slice::from_raw_parts(gradient, dof) }.to_vec()));
@@ -1538,7 +1582,9 @@ pub unsafe extern "C" fn rgsaddle_minmode_set_mode(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &mut *session };
-    let dof = (3 * session.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let m = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
     match session.session.set_mode(m) {
         Ok(()) => RGSADDLE_OK,
@@ -1560,7 +1606,9 @@ pub unsafe extern "C" fn rgsaddle_minmode_position(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &*session };
-    let dof = (3 * session.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
     for (i, v) in session.session.position().iter().enumerate() {
         dst[i] = *v;
@@ -1582,7 +1630,9 @@ pub unsafe extern "C" fn rgsaddle_minmode_mode(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &*session };
-    let dof = (3 * session.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
     for (i, v) in session.session.mode().iter().enumerate() {
         dst[i] = *v;
@@ -1673,11 +1723,10 @@ pub unsafe extern "C" fn rgsaddle_nichols_step(
     let Some(mode) = nichols_mode(mode) else {
         return RGSADDLE_INVALID_PARAMETER;
     };
-    let n = n as usize;
-    let nmode = nmode as usize;
-    if n.checked_mul(nmode).is_none() {
+    let (Some(n), Some(nmode), Some(_)) = (f64_len(&[n]), f64_len(&[nmode]), f64_len(&[n, nmode]))
+    else {
         return RGSADDLE_INVALID_PARAMETER;
-    }
+    };
     let g = Array1::from(unsafe { slice::from_raw_parts(gradient, n) }.to_vec());
     let ev = Array1::from(unsafe { slice::from_raw_parts(evals, nmode) }.to_vec());
     let vectors = unsafe { slice::from_raw_parts(evecs, n * nmode) }.to_vec();
@@ -1734,8 +1783,7 @@ pub unsafe extern "C" fn rgsaddle_prfo_step(
         1 => PrfoKind::Index1,
         _ => return RGSADDLE_INVALID_PARAMETER,
     };
-    let n = n as usize;
-    let Some(len) = n.checked_mul(n) else {
+    let (Some(len), Some(n)) = (f64_len(&[n, n]), f64_len(&[n])) else {
         return RGSADDLE_INVALID_PARAMETER;
     };
     let g = Array1::from(unsafe { slice::from_raw_parts(gradient, n) }.to_vec());
@@ -1804,10 +1852,12 @@ fn hessian_update(
     if n < 1 || step.is_null() || dgradient.is_null() || hessian.is_null() {
         return RGSADDLE_INVALID_PARAMETER;
     }
-    let n = n as usize;
+    let (Some(len), Some(n)) = (f64_len(&[n, n]), f64_len(&[n])) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
     let s = Array1::from(unsafe { slice::from_raw_parts(step, n) }.to_vec());
     let y = Array1::from(unsafe { slice::from_raw_parts(dgradient, n) }.to_vec());
-    let raw = unsafe { slice::from_raw_parts(hessian, n * n) }.to_vec();
+    let raw = unsafe { slice::from_raw_parts(hessian, len) }.to_vec();
     let mut h = match Array2::from_shape_vec((n, n), raw) {
         Ok(m) => m,
         Err(_) => return RGSADDLE_SHAPE,
@@ -1941,7 +1991,9 @@ pub unsafe extern "C" fn rgsaddle_cap_max_abs(n: i64, step: *mut f64, trust_radi
     if n < 1 || step.is_null() {
         return RGSADDLE_INVALID_PARAMETER;
     }
-    let n = n as usize;
+    let Some(n) = f64_len(&[n]) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
     let mut dx = Array1::from(unsafe { slice::from_raw_parts(step, n) }.to_vec());
     match cap_max_abs(&mut dx, trust_radius) {
         Ok(()) => {
@@ -1975,12 +2027,17 @@ pub unsafe extern "C" fn rgsaddle_index1_create(
     if cfg.version.major != RGSADDLE_ABI_MAJOR {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let hess = if hessian.is_null() {
         None
     } else {
-        let raw = unsafe { slice::from_raw_parts(hessian, dof * dof) }.to_vec();
+        let Some(hessian_len) = f64_len(&[3, n_atoms, 3, n_atoms]) else {
+            return std::ptr::null_mut();
+        };
+        let raw = unsafe { slice::from_raw_parts(hessian, hessian_len) }.to_vec();
         match Array2::from_shape_vec((dof, dof), raw) {
             Ok(m) => Some(m),
             Err(_) => return std::ptr::null_mut(),
@@ -2076,7 +2133,9 @@ pub unsafe extern "C" fn rgsaddle_index1_position(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &*session };
-    let dof = (3 * session.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
     for (i, v) in session.session.position().iter().enumerate() {
         dst[i] = *v;
@@ -2102,8 +2161,10 @@ pub unsafe extern "C" fn rgsaddle_index1_hessian(
     let Some(h) = session.session.hessian() else {
         return RGSADDLE_SHAPE;
     };
-    let dof = (3 * session.n_atoms) as usize;
-    let dst = unsafe { slice::from_raw_parts_mut(out, dof * dof) };
+    let Some(len) = f64_len(&[3, session.n_atoms, 3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
+    let dst = unsafe { slice::from_raw_parts_mut(out, len) };
     for (i, v) in h.iter().enumerate() {
         dst[i] = *v;
     }
@@ -2199,10 +2260,15 @@ pub unsafe extern "C" fn rgsaddle_connect(
     if cfg.max_calls <= 0 || !(cfg.force_tol.is_finite() && cfg.force_tol > 0.0) {
         return RGSADDLE_INVALID_PARAMETER;
     }
-    let dof = (n_atoms as usize).saturating_mul(3);
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
+    let Ok(max_calls) = usize::try_from(cfg.max_calls) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
     let left = unsafe { slice::from_raw_parts(left, dof) };
     let right = unsafe { slice::from_raw_parts(right, dof) };
-    let settings = ConnectConfig::optbench(cfg.max_calls as usize)
+    let settings = ConnectConfig::optbench(max_calls)
         .with_forcetol(cfg.force_tol)
         .with_quench_nodes(cfg.quench_nodes != 0);
     let result = connect(
@@ -2280,11 +2346,13 @@ pub unsafe extern "C" fn rgsaddle_idpp_path(
     if n_images < 3 || n_atoms < 1 {
         return RGSADDLE_SHAPE;
     }
-    let dof = (3 * n_atoms) as usize;
-    let images = n_images as usize;
+    let (Some(dof), Some(total)) = (f64_len(&[3, n_atoms]), f64_len(&[n_images, 3, n_atoms]))
+    else {
+        return RGSADDLE_SHAPE;
+    };
+    let images = total / dof;
     let reactant = unsafe { slice::from_raw_parts(reactant, dof) };
     let product = unsafe { slice::from_raw_parts(product, dof) };
-    let total = dof * images;
     let out = unsafe { slice::from_raw_parts_mut(out, total) };
     let parsed = if cell.is_null() {
         None
@@ -2508,17 +2576,12 @@ pub unsafe extern "C" fn rgsaddle_autoneb_run(
     let Ok(climb_steps) = usize::try_from(cfg.climb_max_steps) else {
         return RGSADDLE_INVALID_PARAMETER;
     };
-    let dof = match (n_atoms as usize).checked_mul(3) {
-        Some(dof) if dof > 0 => dof,
-        _ => return RGSADDLE_SHAPE,
-    };
-    let init_len = match dof.checked_mul(n_init_us) {
-        Some(len) => len,
-        None => return RGSADDLE_SHAPE,
-    };
-    let out_len = match dof.checked_mul(n_max) {
-        Some(len) => len,
-        None => return RGSADDLE_SHAPE,
+    let (Some(dof), Some(init_len), Some(out_len)) = (
+        f64_len(&[3, n_atoms]),
+        f64_len(&[n_init, 3, n_atoms]),
+        f64_len(&[cfg.n_max, 3, n_atoms]),
+    ) else {
+        return RGSADDLE_SHAPE;
     };
     let projection = match cfg.projection {
         0 => ProjectionKind::PlainElasticBand,
@@ -2659,6 +2722,33 @@ mod solid;
 pub use solid::*;
 mod stencil;
 pub use stencil::*;
+
+#[cfg(test)]
+mod lengths {
+    use super::f64_len;
+
+    #[test]
+    fn a_length_is_the_product_of_its_factors() {
+        assert_eq!(f64_len(&[]), Some(1));
+        assert_eq!(f64_len(&[3, 4]), Some(12));
+        assert_eq!(f64_len(&[7, 3, 0]), Some(0));
+    }
+
+    #[test]
+    fn a_negative_factor_has_no_length() {
+        assert_eq!(f64_len(&[-1]), None);
+        assert_eq!(f64_len(&[3, -2]), None);
+    }
+
+    #[test]
+    fn a_length_past_a_slice_has_no_length() {
+        assert_eq!(f64_len(&[3, i64::MAX]), None);
+        let doubles = isize::MAX.unsigned_abs() / std::mem::size_of::<f64>();
+        let fits = i64::try_from(doubles).unwrap();
+        assert_eq!(f64_len(&[fits]), Some(doubles));
+        assert_eq!(f64_len(&[fits + 1]), None);
+    }
+}
 
 #[cfg(test)]
 mod strict_endpoint_status {
