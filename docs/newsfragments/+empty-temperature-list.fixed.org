@@ -1,1 +1,0 @@
-When =RGSADDLE_TEMPS= is set but empty, whitespace only, or splits into zero temperatures, every copper defect-pair reader stops with an error that names the variable and leaves its output file untouched.
