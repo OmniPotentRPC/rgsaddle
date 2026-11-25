@@ -680,6 +680,12 @@ fn lj13_cover_leaves_the_start_more_often_than_soft_mode_displacement() {
         );
     }
     assert!(!report.saddles.is_empty(), "no saddle out of LJ13");
+    let left = report
+        .records
+        .iter()
+        .filter(|r| r.product.is_some())
+        .count();
+    assert!(left >= 2, "{left} of {arms} arms reached another minimum");
     assert!(
         returned < soft,
         "returned {returned} against soft mode {soft}"
