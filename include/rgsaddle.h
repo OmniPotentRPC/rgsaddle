@@ -1299,7 +1299,7 @@ typedef struct {
   int64_t ci_index; /**< Climbing image, or -1. */
   int64_t surface_rows;
   int64_t n_images;
-  int64_t iteration;
+  int64_t iteration; /**< Steps of the last stage alone. */
 } rgsaddle_autoneb_report_t;
 
 rgsaddle_status_t rgsaddle_autoneb_run(const rgsaddle_autoneb_config_t *config,

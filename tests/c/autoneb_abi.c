@@ -147,6 +147,27 @@ static int test_exhausted_budget(void) {
   return 0;
 }
 
+/* With n_max equal to the initial band there is no insertion, so the
+   climb keeps the window and the band session of the first stage. The
+   report counts the climb's one step, not the first stage's steps too. */
+static int test_one_step_climb_on_a_kept_window(void) {
+  rgsaddle_autoneb_config_t cfg;
+  rgsaddle_autoneb_report_t report;
+  host_t host;
+  double out[N_MAX * DOF];
+  default_config(&cfg);
+  cfg.n_max = N_INIT;
+  cfg.local_max_steps = 5;
+  cfg.local_force_tol = 1e-12;
+  cfg.climb_max_steps = 1;
+  cfg.force_tol = 1e-12;
+  CHECK(run(&cfg, &host, out, &report) == RGSADDLE_OK, "a kept window runs");
+  CHECK(report.n_images == N_INIT, "no image is inserted");
+  CHECK(report.status == 0, "one climb step does not converge");
+  CHECK(report.iteration == 1, "iteration is the climb's one step");
+  return 0;
+}
+
 static int test_without_climb(void) {
   rgsaddle_autoneb_config_t cfg;
   rgsaddle_autoneb_report_t report;
@@ -233,8 +254,8 @@ int main(void) {
     fprintf(stderr, "ABI minor disagrees with the header\n");
     return 1;
   }
-  if (test_converged_run() || test_exhausted_budget() || test_without_climb() ||
-      test_error_paths()) {
+  if (test_converged_run() || test_exhausted_budget() || test_one_step_climb_on_a_kept_window() ||
+      test_without_climb() || test_error_paths()) {
     return 1;
   }
   puts("RGSADDLE_AUTONEB_ABI_OK");
