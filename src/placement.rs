@@ -94,7 +94,8 @@ fn point(flat: ArrayView1<f64>, index: usize) -> [f64; 3] {
 /// - [`SaddleError::Invalid`] when a mover is listed twice or the cell has no
 ///   volume.
 /// - [`SaddleError::NonFinite`] when a coordinate or a cell entry is NaN or
-///   infinite.
+///   infinite, or when a mover-site distance or a placed coordinate is not
+///   finite, as when coordinates near `±f64::MAX` overflow their difference.
 ///
 /// # Examples
 ///
@@ -151,22 +152,31 @@ pub fn translate_onto_sites(
     let mut free: Vec<usize> = (0..sites.len() / 3).collect();
     let mut pairs = Vec::with_capacity(loose.len().min(free.len()));
     while !loose.is_empty() && !free.is_empty() {
-        let mut best = (usize::MAX, usize::MAX, f64::INFINITY);
+        let mut best: Option<(usize, usize, f64)> = None;
         for (m, &atom) in loose.iter().enumerate() {
             for (s, &site) in free.iter().enumerate() {
                 let d = fold.distance(point(positions, atom), point(sites, site));
-                if d < best.2 {
-                    best = (m, s, d);
+                if !d.is_finite() {
+                    return Err(SaddleError::NonFinite("placement distance"));
+                }
+                if best.is_none_or(|(_, _, nearest)| d < nearest) {
+                    best = Some((m, s, d));
                 }
             }
         }
-        let atom = loose.remove(best.0);
-        let site = free.remove(best.1);
+        let Some((m, s, _)) = best else {
+            break;
+        };
+        let atom = loose.remove(m);
+        let site = free.remove(s);
         let from = point(positions, atom);
         let to = point(sites, site);
         let d = fold.displacement([to[0] - from[0], to[1] - from[1], to[2] - from[2]]);
         for ax in 0..3 {
             out[3 * atom + ax] = from[ax] + d[ax];
+        }
+        if (0..3).any(|ax| !out[3 * atom + ax].is_finite()) {
+            return Err(SaddleError::NonFinite("placed position"));
         }
         pairs.push((atom, site));
     }
@@ -194,7 +204,8 @@ pub fn translate_onto_sites(
 /// - [`SaddleError::Shape`] when the lengths differ or are not a whole number
 ///   of triples.
 /// - [`SaddleError::NonFinite`] when `factor`, a coordinate or a cell entry is
-///   NaN or infinite.
+///   NaN or infinite, or when a folded displacement or a pushed coordinate
+///   overflows to infinity.
 /// - [`SaddleError::Invalid`] when the cell has no volume.
 ///
 /// # Examples
@@ -239,6 +250,9 @@ pub fn push_past(
         for ax in 0..3 {
             out[3 * atom + ax] = s[ax] + factor * d[ax];
         }
+    }
+    if out.iter().any(|v| !v.is_finite()) {
+        return Err(SaddleError::NonFinite("pushed geometry"));
     }
     Ok(out)
 }
@@ -423,6 +437,50 @@ mod tests {
         let nan = [[f64::NAN, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]];
         let bad = translate_onto_sites(atoms.view(), nan, ALL, &[0], sites.view());
         assert!(matches!(bad, Err(SaddleError::NonFinite(_))));
+    }
+
+    #[test]
+    fn an_overflowing_distance_is_an_error_not_a_panic() {
+        const OPEN: [bool; 3] = [false; 3];
+        let huge = f64::MAX;
+        let atoms = flat(&[[huge, 0.0, 0.0]]);
+        let sites = flat(&[[-huge, 0.0, 0.0]]);
+        for periodic in [ALL, OPEN] {
+            let out = translate_onto_sites(atoms.view(), CUBE, periodic, &[0], sites.view());
+            assert!(
+                matches!(out, Err(SaddleError::NonFinite(_))),
+                "{periodic:?}: {out:?}"
+            );
+        }
+        // The difference is finite, but its square is not.
+        let atoms = flat(&[[0.0, 0.0, 0.0]]);
+        let sites = flat(&[[1e200, 0.0, 0.0]]);
+        let out = translate_onto_sites(atoms.view(), CUBE, OPEN, &[0], sites.view());
+        assert!(matches!(out, Err(SaddleError::NonFinite(_))), "{out:?}");
+        // One overflowing pair among finite ones still refuses the placement.
+        let atoms = flat(&[[0.0, 0.0, 0.0], [huge, 0.0, 0.0]]);
+        let sites = flat(&[[1.0, 0.0, 0.0], [-huge, 0.0, 0.0]]);
+        let out = translate_onto_sites(atoms.view(), CUBE, ALL, &[0, 1], sites.view());
+        assert!(matches!(out, Err(SaddleError::NonFinite(_))), "{out:?}");
+    }
+
+    #[test]
+    fn an_overflowing_push_is_an_error_not_infinity() {
+        let huge = f64::MAX;
+        let reactant = flat(&[[-huge, 0.0, 0.0]]);
+        let saddle = flat(&[[huge, 0.0, 0.0]]);
+        for (periodic, factor) in [(ALL, 0.5), ([false; 3], 0.5), (ALL, 0.0)] {
+            let out = push_past(reactant.view(), saddle.view(), CUBE, periodic, factor);
+            assert!(
+                matches!(out, Err(SaddleError::NonFinite(_))),
+                "{periodic:?} {factor}: {out:?}"
+            );
+        }
+        // The displacement is finite; the push past the saddle is not.
+        let reactant = flat(&[[0.0, 0.0, 0.0]]);
+        let saddle = flat(&[[huge, 0.0, 0.0]]);
+        let out = push_past(reactant.view(), saddle.view(), CUBE, [false; 3], 1.0);
+        assert!(matches!(out, Err(SaddleError::NonFinite(_))), "{out:?}");
     }
 
     #[test]
