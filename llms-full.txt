@@ -5655,7 +5655,7 @@ Only the `publish` job runs in the `pypi` environment and holds `id-token: write
 
 To release a version:
 
-1. Set it in `Cargo.toml`, `pyproject.toml`, `meson.build`, `docs/source/conf.py`, and the install example in `docs/orgmode/getting-started.org`; `tests/package_version.rs` holds the first three equal. Rebuild `llms.txt` and `llms-full.txt` with `python docs/render_llms.py` when narrative pages moved.
+1. Set it in `Cargo.toml`, `pyproject.toml`, `meson.build`, `CITATION.cff`, `codemeta.json`, `.zenodo.json`, `docs/source/conf.py`, and the install example in `docs/orgmode/getting-started.org`; `tests/package_version.rs` holds the first six equal. Rebuild `llms.txt` and `llms-full.txt` with `python docs/render_llms.py` when narrative pages moved.
 2. Collect the fragments with `towncrier build --version <version>` and commit the updated `docs/orgmode/changelog.org`.
 3. Push the release commit to `main`, then push the tag `v<version>` on that commit. The tag runs `publish.yml` and `pypi.yml` on GitHub-hosted runners; neither workflow needs a local publish.
 
