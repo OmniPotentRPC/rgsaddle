@@ -4,6 +4,7 @@
   "version": "0.6.0",
   "description": "rgsaddle finds saddle points on a potential energy surface, the transition states between two minima. It is a Rust library with a C interface and a Python package, and its main searches are: a nudged elastic band (NEB) between two endpoints, with a climbing image; a minimum-mode search from one point, by the dimer method or by Lanczos iteration; an index-1 search on a dense Hessian by restricted-step partitioned rational function optimization (RFO).",
   "license": "MIT",
+  "access_right": "open",
   "creators": [
     {
       "name": "Goswami, Rohit",
