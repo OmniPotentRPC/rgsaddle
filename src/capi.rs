@@ -115,11 +115,12 @@ pub const RGSADDLE_NULL_REPORT: i32 = -4;
 pub const RGSADDLE_SHAPE: i32 = -5;
 /// The RGSADDLE SURFACE FAILED.
 pub const RGSADDLE_SURFACE_FAILED: i32 = -6;
-/// The RGSADDLE NON FINITE.
+/// A required value was NaN or infinite.
 pub const RGSADDLE_NON_FINITE: i32 = -7;
 /// The RGSADDLE SOLVER.
 pub const RGSADDLE_SOLVER: i32 = -8;
-/// The RGSADDLE ABI MISMATCH.
+/// The struct version major is not the library major, or the minor is
+/// older than the call requires.
 pub const RGSADDLE_ABI_MISMATCH: i32 = -9;
 /// The RGSADDLE ALLOC.
 pub const RGSADDLE_ALLOC: i32 = -10;

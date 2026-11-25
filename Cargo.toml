@@ -94,9 +94,11 @@ rgpot-rev = "97ebba0b062128b7dc4637501c4b70ed4944ae9d"
 [dev-dependencies]
 flate2 = "1"
 approx = "0.5"
+cc = "1"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
 sha2 = "0.10"
+tempfile = "3"
 # Tag v3.6.0. Zero dependencies of its own, so it adds no second copy of
 # eindir-core, dlpk or rgmin. Rev 97ebba0b of rgpot-pair pins cc to
 # =1.4.2, which cannot share cc 1.x with the other build dependencies.

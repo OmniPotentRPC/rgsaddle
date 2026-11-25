@@ -123,6 +123,9 @@ impl<S: PointSurface> PointSurface for HarmonicExpansion<'_, S> {
                 "the harmonic expansion Hessian action differs in length from the reference".into(),
             ));
         }
+        if vector.iter().any(|value| !value.is_finite()) {
+            return Err(SaddleError::NonFinite("harmonic expansion Hessian action"));
+        }
         let mut evaluations = 0;
         hessian_action(
             self.surface,
@@ -745,7 +748,7 @@ fn legendre(order: usize, x: f64) -> (f64, f64) {
 
 #[cfg(test)]
 mod tests {
-    use ndarray::array;
+    use ndarray::{Array1, array};
 
     use super::*;
     use crate::minmode::PointSurface;
@@ -939,6 +942,29 @@ mod tests {
             "{} ± {} against {expected}",
             estimate.free_energy,
             estimate.error
+        );
+    }
+
+    struct FiniteEverywhere;
+
+    impl PointSurface for FiniteEverywhere {
+        fn eval(&self, q: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            Ok((0.0, Array1::zeros(q.len())))
+        }
+    }
+
+    #[test]
+    fn hessian_vector_rejects_a_non_finite_vector() {
+        let surface = FiniteEverywhere;
+        let expansion = HarmonicExpansion::new(&surface, HarmonicReference::new(array![0.0, 0.0]));
+        let action = PointSurface::hessian_vector(
+            &expansion,
+            array![0.0, 0.0].view(),
+            array![f64::NAN, 0.0].view(),
+        );
+        assert!(
+            matches!(action, Err(SaddleError::NonFinite(_))),
+            "{action:?}"
         );
     }
 

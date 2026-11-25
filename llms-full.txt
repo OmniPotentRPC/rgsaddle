@@ -4882,6 +4882,10 @@ operations that fix both the vacancy reactant and the chosen saddle.
 
 The constructor rejects non-finite data, non-orthogonal matrices,
 non-bijective permutations, and permutations that map unlike species.
+A lattice translation is not the identity. `operation_is_identity` rejects
+an operation when any translation component exceeds `matching_tolerance`,
+even if the rotation is the identity and the permutation is empty. A pure
+lattice translation therefore does not satisfy the identity requirement.
 Operations that are valid group operations but do not stabilize the
 particular reactant are omitted from \(H\).  Matching, orbit, and
 orthogonality tolerances are explicit fields of
@@ -5000,8 +5004,11 @@ model stored as reference geometry, energy, gradient, and dense Hessian in
 the sampler coordinates of the plane. Those are the coordinates selected by
 `HyperplaneSampleBudget::coordinates` and passed to `md_initialize`.
 
-Until lammpc exposes a mixing hook, lambda sampling fails with a surface
-error. The additive ABI is:
+A lambda of one adds no harmonic force, so the sampler does not require
+the mixing hook. It reads the unmixed potential from the live session,
+which is the thermo potential left by the last constrained evaluation.
+Any other lambda fails with a surface error until lammpc exposes the
+mixing hook. The additive ABI is:
 
 ```c
 typedef struct {
@@ -5025,8 +5032,12 @@ sampler frame. The Hessian is passed already symmetrized. Each MD step adds
 the Cartesian LAMMPS force with the same mass metric it uses for the
 constraint. The hook is not tied to a pair style or a material.
 
-The observable also needs the unmixed full potential. A missing symbol is a
-surface error when lambda is set:
+The observable also needs the unmixed full potential. When
+`lammpc_session_md_potential_energy` is present it is evaluated at the
+Cartesian geometry from `md_state`. When that symbol is absent and the
+requested geometry is still the live geometry, the sampler reads the
+session thermo potential instead. A different geometry, or a session
+with neither source, is a surface error:
 
 ```c
 int lammpc_session_md_potential_energy(
