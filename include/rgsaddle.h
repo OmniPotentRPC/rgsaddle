@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 65u
+#define RGSADDLE_ABI_MINOR 66u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -170,6 +170,7 @@ typedef enum {
    * A solution-landscape search met its node limit or its force-evaluation
    * limit. The report's counts are the nodes already accepted and the
    * evaluations already performed. Node and edge queries have no pathway.
+   * ABI minor 66.
    */
   RGSADDLE_LANDSCAPE_BOUND = -17
 } rgsaddle_status_t;
@@ -890,7 +891,7 @@ typedef struct {
 typedef int (*rgsaddle_hessian_fn)(void *user, int64_t n_dof,
                                   const double *vector, double *action);
 /**
- * Geometry-aware Hessian action. The callback writes the
+ * Geometry-aware Hessian action, ABI minor 66. The callback writes the
  * action at `position` on `vector` into `action`. `position`, `vector`
  * and `action` each hold `n_dof` doubles, and `action` does not alias
  * the inputs. Return 0 on success and a non-zero code on failure. Do not
@@ -1724,7 +1725,7 @@ rgsaddle_status_t rgsaddle_indexk_step(RgsaddleIndexK *session,
                                        rgsaddle_report_t *out);
 
 /**
- * rgsaddle_indexk_step with a geometry-aware Hessian action.
+ * rgsaddle_indexk_step with a geometry-aware Hessian action, ABI minor 66.
  * hessian is called with the geometry at which the action is requested.
  * NULL estimates the action from surface.
  */
@@ -2283,7 +2284,7 @@ rgsaddle_status_t rgsaddle_lineb_solve_counted_rate(const rgsaddle_lineb_config_
                                        rgsaddle_lineb_orbit_t *orbit, rgsaddle_lineb_turning_t *turning,
                                        const double *image_hessian_step, rgsaddle_lineb_rate_diagnostics_t *rate_diagnostics);
 /**
- * Downward solution-landscape search.
+ * Downward solution-landscape search, ABI minor 66.
  * The parent is certified by the saddle-index check, each unstable
  * direction is pushed by `push`, and an index-(k-1) minimum-mode leg
  * follows it. A minimum is an rgmin solve on the true gradient.

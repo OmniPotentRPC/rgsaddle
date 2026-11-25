@@ -162,7 +162,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_stencil_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_create=. Purpose: Create an index-k session. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_step=. Purpose: One index-k step. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_indexk_step_at=. Purpose: rgsaddle_indexk_step with a geometry-aware Hessian action. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_indexk_step_at=. Purpose: rgsaddle_indexk_step with a geometry-aware Hessian action, ABI minor 66. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_modes=. Purpose: Writes n-by-k row-major modes and k curvatures. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_translated=. Purpose: The effective gradient of the last successful step, length 3 * n_atoms. Parameters: the declaration. Units: the caller's.
@@ -295,7 +295,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_solid_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_hessian_fn=. Purpose: Callback typedef in include/rgsaddle.h.
-- =rgsaddle_hessian_at_fn=. Purpose: Geometry-aware Hessian action.
+- =rgsaddle_hessian_at_fn=. Purpose: Geometry-aware Hessian action, ABI minor 66.
 - =rgsaddle_stencil_eval_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_geodesic_chart_fn=. Purpose: Redundant coordinate chart for geodesic interpolation.
 
