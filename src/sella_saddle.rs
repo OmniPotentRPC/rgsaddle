@@ -20,7 +20,7 @@ use crate::minmode::PointSurface;
 use crate::pes::CartesianPes;
 use crate::pes_internal::{CellCartesianPes, CellInternalPes, InternalPes, SellaPes};
 
-/// The SellaSaddleConfig.
+/// Trust-region, eigensolver, and P-RFO controls for [`SellaSaddleSession`].
 ///
 /// Non-exhaustive: start from [`SellaSaddleConfig::default`] and chain
 /// the `with_*` setters.
@@ -140,13 +140,13 @@ enum AtomCeiling {
     Alone,
 }
 
-/// The SellaSaddleReport.
+/// Diagnostics returned by [`SellaSaddleSession::step`] and [`SellaSaddleSession::run`].
 pub struct SellaSaddleReport {
     /// Potential energy in the host's energy unit.
     pub energy: f64,
-    /// Largest absolute force component, in the host's force units.
+    /// Convergence force norm selected by [`SellaSaddleConfig::force_gate`], in the host's force units.
     pub max_force: f64,
-    /// The at saddle.
+    /// `true` once `max_force` is at or below [`SellaSaddleConfig::force_tol`].
     pub at_saddle: bool,
     /// Ratio of the actual energy change to the model's prediction.
     pub rho: f64,
@@ -154,7 +154,7 @@ pub struct SellaSaddleReport {
     pub delta: f64,
 }
 
-/// The SellaSaddleSession.
+/// Step-by-step Sella P-RFO saddle search over Cartesian, internal, or cell charts.
 pub struct SellaSaddleSession {
     pes: SellaPes,
     config: SellaSaddleConfig,
@@ -181,7 +181,7 @@ pub struct SellaSaddleSession {
 }
 
 impl SellaSaddleSession {
-    /// New.
+    /// Build a Cartesian saddle session on `x` (`3N`) with per-atom `masses` (`N`), using the rigid quotient for `N >= 3`.
     pub fn new(
         config: SellaSaddleConfig,
         x: Array1<f64>,
@@ -201,7 +201,7 @@ impl SellaSaddleSession {
         Self::on(config, x, masses, SellaGeom::Chart(chart))
     }
 
-    /// On.
+    /// Build a Cartesian saddle session on `x` (`3N`) with explicit manifold geometry `geom`.
     pub fn on(
         config: SellaSaddleConfig,
         x: Array1<f64>,
@@ -409,7 +409,7 @@ impl SellaSaddleSession {
         self.rho
     }
 
-    /// Geom.
+    /// Active manifold or equality-constraint geometry of the session.
     pub fn geom(&self) -> &SellaGeom {
         &self.geom
     }
@@ -468,17 +468,17 @@ impl SellaSaddleSession {
         self.config.restricted = kind;
     }
 
-    /// Internal pes.
+    /// Internals PES when the session was built with [`Self::on_internal`].
     pub fn internal_pes(&self) -> Option<&InternalPes> {
         self.pes.internal()
     }
 
-    /// Cell pes.
+    /// Variable-cell Cartesian PES when the session was built with [`Self::on_cell`].
     pub fn cell_pes(&self) -> Option<&CellCartesianPes> {
         self.pes.cell()
     }
 
-    /// Cell internal pes.
+    /// Variable-cell internals PES when built with [`Self::on_cell_internal`] or [`Self::on_cell_internal_log`].
     pub fn cell_internal_pes(&self) -> Option<&CellInternalPes> {
         self.pes.cell_internal()
     }
@@ -493,7 +493,7 @@ impl SellaSaddleSession {
         }
     }
 
-    /// Reset.
+    /// Reset the quasi-Newton Hessian, Ritz subspace, trust radius, and atom ceiling at a surface-epoch boundary.
     pub fn reset(&mut self) {
         self.pes.reset();
         self.restart_trust();
@@ -535,7 +535,7 @@ impl SellaSaddleSession {
         Ok(())
     }
 
-    /// Index of the step inside its stage.
+    /// Advance one restricted P-RFO step (and iterative Hessian refinement when due) on `surface`.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<SellaSaddleReport, SaddleError> {
         match &self.pes {
             SellaPes::Internal(_) => self.step_internal(surface),
@@ -1191,7 +1191,7 @@ impl SellaSaddleSession {
         })
     }
 
-    /// Run.
+    /// Step up to `max_steps` iterations, stopping early once [`SellaSaddleReport::at_saddle`] holds.
     pub fn run<S: PointSurface>(
         &mut self,
         surface: &S,

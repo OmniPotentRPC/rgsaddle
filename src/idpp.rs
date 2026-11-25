@@ -1,6 +1,5 @@
 //! Image dependent pair potential initial path.
 //!
-//! Goswami, MethodsX (2026), doi:10.1016/j.mex.2026.103899.
 //! Smidstrup, Pedersen, Stokbro, and Jonsson, J. Chem. Phys. 140,
 //! 214106 (2014), doi:10.1063/1.4878664.
 //!

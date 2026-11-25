@@ -216,7 +216,7 @@ impl PointSurface for ShearWell {
 }
 
 #[test]
-fn variable_cell_double_well_barrier_is_one() {
+fn joint_climber_switch_clears_lbfgs_history_and_converges() {
     let left_r = array![0.25 * L, 0.0, 0.0];
     let right_r = array![-0.25 * L, 0.0, 0.0];
     let left_h = sheared(0.2);
@@ -243,6 +243,9 @@ fn variable_cell_double_well_barrier_is_one() {
         chart_pos.row_mut(i).assign(&r);
         chart_cells.push(h);
     }
+    // This off-path image starts as the highest image. As it relaxes, the
+    // central saddle takes over, exercising the climber-switch history reset.
+    chart_pos[(5, 1)] = 1.0;
     let mut band = SolidNeb::joint(
         BandConfig::default()
             .with_climbing(CiConfig::always())
@@ -261,11 +264,14 @@ fn variable_cell_double_well_barrier_is_one() {
     .unwrap();
     assert!(!band.is_frozen());
     let mut report = band.step(&ShearWell).unwrap();
+    let initial_ci = report.ci_index;
+    let mut switched_climber = false;
     for _ in 0..300 {
         if report.status == BandStatus::Converged {
             break;
         }
         report = band.step(&ShearWell).unwrap();
+        switched_climber |= report.ci_index != initial_ci;
     }
     assert_eq!(
         report.status,
@@ -284,6 +290,10 @@ fn variable_cell_double_well_barrier_is_one() {
     );
     assert!((barrier - 1.0).abs() < 1e-3, "barrier {barrier}");
     assert!((enthalpy - energy).abs() < 1e-12, "no external stress");
+    assert!(
+        switched_climber,
+        "the climbing image should switch on the joint toy surface"
+    );
 }
 
 /// A narrow repulsive wall on top of the double well. The wall stands in

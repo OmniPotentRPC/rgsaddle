@@ -41,6 +41,8 @@ When a linearly interpolated guess between reactant and product crosses a rugged
 * Periodicity
 Positions stay unwrapped Cartesian. =Cell= wraps per-atom differences for the band mechanics through fractional coordinates (rows are lattice vectors; a zero row is a non-periodic axis). Neighbor lists, when a surface wants them, are vesin's job.
 
+The point-defect finite-cell correction is described in @@rst::doc:`elastic dipoles and periodic images <explanation/elastic-dipole>`@@.  It uses =linkcell::Cell= / minimage for the defect separation, Barnett's anisotropic Green function, and a spherical periodic-image order with an explicit error estimate.
+
 * The solid-state reference cell
 The solid-state band is checked against an answer computed without a band. The case is the Bain path from bcc to fcc of LJ (epsilon 1 eV, sigma 1 A), switched to zero over [2.0, 2.2] A. Both atoms of the body-centred tetragonal cell diag(a, a, c) sit on inversion centres, so the atomic force is zero at any cell. The relaxed energy at fixed c/a is then a one-dimensional minimum over the volume. =validation/bain_lj_reference.py= scans it on a 2.5e-4 grid. bcc and fcc are minima, and the saddle sits at c/a 1.09331985, 0.0590356373 eV/atom above bcc. Over the six cell strains that saddle has one negative eigenvalue.
 

@@ -34,8 +34,9 @@
 //! NEBTangent / NEBSpringForce / NEBForceProjection with identical
 //! branch structure.
 //!
-//! Positions are unwrapped Cartesian; a periodic host applies its
-//! minimum-image convention before handing differences in.
+//! Positions are unwrapped Cartesian. [`BandConfig::cell`] makes the
+//! band mechanics take minimum-image differences; the host surface still
+//! receives the unwrapped positions and owns its potential's periodicity.
 //!
 //! [`sparse_hessian::sparse_hessian`] recovers a cutoff Hessian by a
 //! direct Curtis-Powell-Reid partition: a smallest-last distance-2
@@ -74,6 +75,7 @@ pub mod capi;
 pub mod capi_hyperplane;
 pub mod connect;
 pub mod defect_pair;
+pub mod elastic_dipole;
 pub mod error;
 pub mod geodesic;
 pub mod idpp;
@@ -98,6 +100,7 @@ pub mod region;
 pub mod relax;
 pub mod saddle_index;
 pub mod solid_dimer;
+pub mod solid_prefactor;
 pub mod solid_state;
 pub mod spring;
 pub mod ssneb;
@@ -156,6 +159,11 @@ pub use defect_pair::{
 };
 pub use elastic::{
     ElasticMultipole, LocalField, Octupole, Quadrupole, StrainGradient, quadrupole_energy,
+};
+pub use elastic_dipole::{
+    AnisotropicGreen, AnisotropicGreenConfig, CorrectedEnergy, CorrectedRate, DefectDipole,
+    ElasticConstants, ElasticCorrection, ElasticPairState, ElasticRate, GreenSecondDerivative,
+    InteractionEstimate, PeriodicElastic, PeriodicElasticConfig, Tensor4,
 };
 pub use error::SaddleError;
 pub use field::{DefectSource, DirectSolver, FieldSolver, FmmSolver, Kelvin};
@@ -261,6 +269,10 @@ pub use solid_dimer::{
     CellMask, IndexCheck, IndexReport, JointChart, STRAIN_VOIGT, SolidDimer, SolidDimerConfig,
     SolidDimerReport, StressCheck, VineyardIndexError, VineyardIndexReport, certify_vineyard_pair,
     check_cauchy_stress, finite_difference_cauchy_stress, index_at, virial,
+};
+pub use solid_prefactor::{
+    JointHessian, JointHessianConfig, JointVineyard, JointVineyardConfig, joint_hessian,
+    joint_vineyard_prefactor,
 };
 pub use spring::SpringKind;
 pub use ssneb::{SolidImage, SolidNeb, joint_coordinate};

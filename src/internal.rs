@@ -23,11 +23,11 @@ const RANK_TOL: f64 = 1e-10;
 /// Cartesian axis a translation or rotation coordinate tracks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CartAxis {
-    /// The X.
+    /// Cartesian x axis (slot 0).
     X,
-    /// The Y.
+    /// Cartesian y axis (slot 1).
     Y,
-    /// The Z.
+    /// Cartesian z axis (slot 2).
     Z,
 }
 
@@ -421,17 +421,17 @@ impl Manifold for Displacement {
 /// the remaining Sella slots MaxInternalStep weights.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InternalSlot {
-    /// The Translation.
+    /// Rigid translation coordinate.
     Translation,
-    /// The Bond.
+    /// Pairwise bond-length coordinate.
     Bond,
-    /// The Angle.
+    /// Three-atom valence angle coordinate.
     Angle,
-    /// The Dihedral.
+    /// Four-atom torsion dihedral coordinate.
     Dihedral,
-    /// The Other.
+    /// Non-standard internal coordinate such as [`Displacement`].
     Other,
-    /// The Rotation.
+    /// Kabsch quaternion rotation coordinate.
     Rotation,
 }
 

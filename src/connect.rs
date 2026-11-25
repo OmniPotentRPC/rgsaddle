@@ -12,8 +12,8 @@
 //! The first attempt is a min-mode climb from the highest image of an
 //! IDPP band. Goswami, Gunde, and Jónsson, Front. Chem. 14 (2026),
 //! doi:10.3389/fchem.2026.1807063, climb the highest image; Goswami,
-//! arXiv:2603.14737, is the energy-weighted band this search is measured
-//! against. The initial path is the image-dependent pair potential of
+//! MethodsX 16, 103899 (2026), doi:10.1016/j.mex.2026.103899, is the
+//! energy-weighted band this search is measured against. The initial path is the image-dependent pair potential of
 //! Smidstrup, Pedersen, Stokbro, and Jónsson, J. Chem. Phys. 140, 214106
 //! (2014), doi:10.1063/1.4878664. The climb is Lanczos min-mode following
 //! (Malek and Mousseau, Phys. Rev. E 62, 7723 (2000),

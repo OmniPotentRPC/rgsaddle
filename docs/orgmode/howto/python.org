@@ -11,7 +11,7 @@ pip install 'rgsaddle[ase]'
 Wheels are cp310, cp311, cp312-abi3 (CPython 3.12 through 3.15 with the GIL), cp314t and cp315t. There is no musllinux wheel and no cp313t wheel.
 
 * Enum controls
-Eight =IntEnum= classes keep the names and values of the previous module: =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind=. An unknown ordinal raises =ValueError=. =rgsaddle.__version__= is the package version.
+Eight =IntEnum= classes keep the names and values of the previous module: =ForceGate=, =HessUpdate=, =IrcKind=, =MinModeKind=, =EigenDevice=, =ExpandKind=, =CellChart=, =RestrictedKind=. An unknown ordinal raises =ValueError=. =MinModeKind= contains dimer and Lanczos; =RGSADDLE_MINMODE_LOBPCG= belongs to the index-k C ABI and has no Python session. =rgsaddle.__version__= is the package version.
 
 #+begin_src python
 import rgsaddle
@@ -47,11 +47,18 @@ A calculator exception, including =KeyboardInterrupt=, propagates out of =__call
 
 =rgsaddle.Band= is the stepping band and simplified-string session: =Band(positions, ..., string=True, reparametrization="not-a-knot")= takes a batched surface callback receiving =(rows, 3N)= and returning =(energies, gradients)=, with =step=, =run=, =positions=, =set_positions=, =evaluation=, =set_string=, =set_fixed_atoms=, =saddle_index=, =set_saddle_check=, =restart=, and =reset=. =rgsaddle.GrowingString(reactant, product, n_images=11, frontier_tol=0.2, ...)= steps the growing string and hands off to =StringSession= upon join, with =step=, =run=, =n_images=, =nodes_added=, =joined=, =positions=, =ids=, =set_fixed_atoms=, and =saddle_index=. =Band.set_free_end(enabled, side="last", target_energy=None, max_cuts=2, cut_force=0.0, energy_tol=0.001, stability=2, window_offset=1, cubic=True)= enables the free-end adaptive NEB of Zhang, Zhang, Ye, and Zheng @@rst::cite:`zhangFreeEndAdaptive2016`@@ on an existing band (ABI minor 45; a host checks the loaded minor before calling it). =Band.set_refine(enabled=True, threshold=0.0, memory=20)= and =Band.is_refining= install the per-step L-BFGS refine stepper (ABI minor 60). A threshold of 0 selects 0.5, in the host's force units, and =enabled=False= clears it. =Band.target_energy_residual= and =Band.free_end_cuts= report the level-set residual and how many local windows were removed. =Band.evaluation= returns the energies, gradients, and projected interior forces at the positions the last step reported. The worked example is =tests/free_end_neb.rs=. =_core.project_band= projects an evaluated band (including =projection="string"= for the unprojected potential force with optional climbing reflection). =_core.MinMode= and =_core.SellaSaddle= are the point sessions those classes drive; their surface callback receives one image shaped =(1, 3N)= and returns =(energy, gradient)=.
 
+=_core.MinMode= translates with L-BFGS, unlike the FIRE default of Rust's =MinModeConfig= and =rgsaddle_minmode_create= when its method field is zero.
+
+The low-level Python session is intentionally smaller than the C and Rust sessions.
+It does not expose reset, an explicit mode setter, the torque window, HiGHS, force-gate selection, or kappa controls.
+Use the Rust session or the corresponding =rgsaddle_minmode_*= C entry points when a host needs those controls.
+
 * Saddle index
 A converged =_core.MinMode= step certifies the saddle index of its point, as in =howto/minmode=: =SessionReport.saddle_index= is the index on that step and -1 on the others.
 =MinMode.saddle_index()= returns a =SaddleIndex= with =certified=, =index=, =converged=, the ascending =curvatures=, =evaluations=, and the session's =total_evaluations= and =escapes=.
 =MinMode.set_saddle_check(enabled=True, escape_attempts=0, escape_push=0.1, lowest=4, max_actions=100, dr=1e-3, residual_tol=1e-2, negative_tol=1e-3)= replaces the check; =enabled=False= turns it off, and a positive =escape_attempts= pushes a point of index two or more off its extra negative modes and searches again.
 =rgsaddle.saddle_index(surface, x, gradient=None, mode=None, fixed=None, ...)= certifies one point through the same callback, with an optional gradient at =x=, seed mode and =uint8= fixed-atom mask.
+Both Python calls keep the C defaults that are not keyword arguments: block size 2, forward differences, and the library's deterministic seed.
 =rgsaddle.ase.saddle_index(atoms, mode=None, ...)= certifies ASE atoms on their calculator with =FixAtoms= as the mask and leaves them where they were, and =rgsaddle.ase.NEB.saddle_index()= certifies the climbing image of a band that climbs, seeded with its tangent.
 An index above 1 at a converged climbing image says the band stopped on a saddle of higher index, as a band whose start shares a symmetry with the surface can.
 

@@ -1,7 +1,7 @@
 //! Fixed-energy line-integral NEB (LI-NEB).
 //!
 //! The band is the nudged elastic band as practised in Goswami,
-//! arXiv:2603.14737 (2026), doi:10.48550/arXiv.2603.14737, and
+//! MethodsX 16, 103899 (2026), doi:10.1016/j.mex.2026.103899, and
 //! Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026),
 //! doi:10.3389/fchem.2026.1807063, with the improved tangent of
 //! Henkelman and Jónsson, J. Chem. Phys. 113, 9978 (2000),
@@ -23,8 +23,8 @@
 //!
 //! [`fixed_energy_mep_seed`] builds a starting band from an index-one
 //! saddle and its unstable mode, for instance from a climbing-image band
-//! on an IDPP path (Goswami, MethodsX (2026),
-//! doi:10.1016/j.mex.2026.103899). [`crate::FixedEnergyTrajectory`]
+//! on an IDPP path (Smidstrup, Pedersen, Stokbro, and Jónsson,
+//! J. Chem. Phys. 140, 214106 (2014), doi:10.1063/1.4878664). [`crate::FixedEnergyTrajectory`]
 //! integrates the motion along a converged path, the dynamics
 //! Ásgeirsson, Arnaldsson, and Jónsson use to find the temperature at
 //! which the path is an instanton.
