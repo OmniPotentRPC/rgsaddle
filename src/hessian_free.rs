@@ -411,8 +411,8 @@ fn rademacher_unit(n: usize, seed: u64) -> Array1<f64> {
     v / (n as f64).sqrt()
 }
 
-/// Extract the `k` lowest eigenpairs of a symmetric operator via Lanczos with
-/// full two-pass Gram-Schmidt reorthogonalization.
+/// Extract the `k` lowest eigenpairs of a symmetric operator via block Lanczos
+/// with full two-pass Gram-Schmidt reorthogonalization.
 pub fn lanczos_lowest_modes(
     op: &mut dyn HessianAction,
     k: usize,
@@ -431,32 +431,64 @@ pub fn lanczos_lowest_modes(
             "Lanczos tolerance must be finite and non-negative, got {tol}"
         )));
     }
-    let m_max = max_iters.min(n).max(k + 2).min(n);
+    let m_max = max_iters.min(n).max(k);
+    if m_max < k {
+        return Err(SaddleError::Invalid(format!(
+            "Lanczos iteration limit {max_iters} is smaller than requested mode count {k}"
+        )));
+    }
     let mut basis: Vec<Array1<f64>> = Vec::with_capacity(m_max);
     let mut hv_cache: Vec<Array1<f64>> = Vec::with_capacity(m_max);
-    let mut v = rademacher_unit(n, seed);
-    orthonormalize_against(&mut v, &basis);
+    let mut block = Vec::with_capacity(k);
+    for col in 0..k {
+        let mut v = rademacher_unit(
+            n,
+            seed.wrapping_add((col as u64).wrapping_mul(0xD1B5_4A32_D192_ED03)),
+        );
+        if orthonormalize_against(&mut v, &block) > 1.0e-14 {
+            block.push(v);
+        }
+    }
+    for col in 0..n {
+        if block.len() == k {
+            break;
+        }
+        let mut v = Array1::<f64>::zeros(n);
+        v[col] = 1.0;
+        if orthonormalize_against(&mut v, &block) > 1.0e-14 {
+            block.push(v);
+        }
+    }
     let mut n_applies = 0usize;
     let mut best: Option<LanczosSpectrum> = None;
 
-    while basis.len() < m_max {
-        let hv = op.apply(v.view())?;
-        if hv.len() != n {
-            return Err(SaddleError::Shape(format!(
-                "operator returned length {}, expected {n}",
-                hv.len()
-            )));
+    while !block.is_empty() && basis.len() < m_max {
+        block.truncate(m_max - basis.len());
+        let block_len = block.len();
+        let mut next = Vec::with_capacity(block.len());
+        for v in block {
+            let hv = op.apply(v.view())?;
+            if hv.len() != n {
+                return Err(SaddleError::Shape(format!(
+                    "operator returned length {}, expected {n}",
+                    hv.len()
+                )));
+            }
+            if hv.iter().any(|x| !x.is_finite()) {
+                return Err(SaddleError::NonFinite("HessianAction output"));
+            }
+            n_applies += 1;
+            basis.push(v);
+            hv_cache.push(hv);
         }
-        if hv.iter().any(|x| !x.is_finite()) {
-            return Err(SaddleError::NonFinite("HessianAction output"));
+        for hv in &hv_cache[(hv_cache.len() - block_len)..] {
+            let mut w = hv.clone();
+            if orthonormalize_against(&mut w, &basis) > 1.0e-14
+                && orthonormalize_against(&mut w, &next) > 1.0e-14
+            {
+                next.push(w);
+            }
         }
-        n_applies += 1;
-        basis.push(v);
-        hv_cache.push(hv.clone());
-
-        let mut w = hv;
-        let bn = orthonormalize_against(&mut w, &basis);
-
         let m = basis.len();
         if m >= k {
             let mut t = Array2::<f64>::zeros((m, m));
@@ -496,11 +528,7 @@ pub fn lanczos_lowest_modes(
                 break;
             }
         }
-
-        if bn < 1.0e-14 {
-            break;
-        }
-        v = w;
+        block = next;
     }
 
     best.ok_or_else(|| SaddleError::Solver("Lanczos did not reach minimum subspace rank".into()))
@@ -513,7 +541,7 @@ pub struct SlqLogDetRatio {
     pub delta_logdet: f64,
     /// Per-probe paired difference estimates.
     pub per_probe: Vec<f64>,
-    /// Standard error over probes.
+    /// Standard error over probes. This excludes Lanczos quadrature bias.
     pub std_err: f64,
     /// Total operator applications consumed across both operators.
     pub n_applies: usize,
@@ -583,6 +611,9 @@ fn slq_probe(
 ///
 /// Both operators must be positive definite on their subspace (deflate any
 /// unstable or rigid modes first with [`DeflatedAction`]).
+///
+/// `SlqLogDetRatio::std_err` measures probe variance only. It does not include
+/// truncation bias from the finite Lanczos quadrature.
 pub fn slq_logdet_ratio(
     op_a: &mut dyn HessianAction,
     op_b: &mut dyn HessianAction,
@@ -641,6 +672,20 @@ mod tests {
         }
     }
 
+    struct MatrixOp {
+        matrix: Array2<f64>,
+    }
+
+    impl HessianAction for MatrixOp {
+        fn dim(&self) -> usize {
+            self.matrix.nrows()
+        }
+
+        fn apply(&mut self, x: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
+            Ok(self.matrix.dot(&x))
+        }
+    }
+
     #[test]
     fn lanczos_recovers_saddle_mode_and_gap() {
         let vals: Array1<f64> = std::iter::once(-1.7)
@@ -651,6 +696,30 @@ mod tests {
         assert!((spec.eigenvalues[0] + 1.7).abs() < 1.0e-6);
         assert!((spec.eigenvalues[1] - 0.6).abs() < 1.0e-6);
         assert!(spec.residuals.iter().all(|&r| r < 1.0e-6));
+    }
+
+    #[test]
+    fn block_lanczos_resolves_a_scalar_hessian() {
+        let mut op = MatrixOp {
+            matrix: Array2::eye(6) * 3.25,
+        };
+        let spec = lanczos_lowest_modes(&mut op, 6, 6, 1.0e-12, 41).unwrap();
+        assert_eq!(spec.eigenvalues.len(), 6);
+        assert!(
+            spec.eigenvalues
+                .iter()
+                .all(|value| (*value - 3.25).abs() < 1.0e-12)
+        );
+        assert!(spec.residuals.iter().all(|residual| *residual < 1.0e-12));
+    }
+
+    #[test]
+    fn block_lanczos_counts_degenerate_negative_modes() {
+        let matrix = array![[-2.0, 0.0, 0.0], [0.0, -2.0, 0.0], [0.0, 0.0, 4.0]];
+        let mut op = MatrixOp { matrix };
+        let spec = lanczos_lowest_modes(&mut op, 2, 3, 1.0e-12, 17).unwrap();
+        assert!((spec.eigenvalues[0] + 2.0).abs() < 1.0e-12);
+        assert!((spec.eigenvalues[1] + 2.0).abs() < 1.0e-12);
     }
 
     #[test]

@@ -503,6 +503,7 @@ fn vineyard_prefactor_has_one_factor_of_frequency() {
     let scale = rgsaddle::angular_scale_rad_s();
     let expected = scale * (1.0_f64 / mass).sqrt() / (2.0 * std::f64::consts::PI);
     let got = vineyard_prefactor(&[1.0], &[], mass).unwrap();
+    assert_eq!(got.to_bits(), 0x429c_6fd3_177d_e063);
     assert!((got - expected).abs() / expected < 1e-12);
 }
 
@@ -510,6 +511,14 @@ fn vineyard_prefactor_has_one_factor_of_frequency() {
 fn vineyard_rejects_more_than_one_missing_saddle_mode() {
     let error = vineyard_prefactor(&[1.0, 2.0], &[], 1.0).unwrap_err();
     assert!(error.to_string().contains("exactly one"));
+}
+
+#[test]
+fn vineyard_log_mass_cancellation_handles_large_values() {
+    let got = vineyard_prefactor(&[1.0e300], &[], 1.0e300).unwrap();
+    let expected = rgsaddle::angular_scale_rad_s() / (2.0 * std::f64::consts::PI);
+    assert!(got.is_finite());
+    assert!((got - expected).abs() / expected < 1.0e-13);
 }
 
 #[test]
@@ -669,4 +678,154 @@ fn weighted_dense_lanczos_and_slq_vineyard_prefactors_agree() {
     )
     .unwrap();
     assert!((weighted - legacy).abs() / legacy < 1e-12);
+}
+
+#[test]
+fn finite_difference_and_block_lanczos_agree_on_rotated_hessians() {
+    use rgsaddle::{
+        FiniteDifference, VineyardConfig, dense_hessian, fd_hessian_from_surface,
+        vineyard_prefactor_dense_matrices, vineyard_prefactor_lanczos,
+    };
+
+    #[derive(Clone)]
+    struct MatrixSurface {
+        hessian: Array2<f64>,
+    }
+
+    impl PointSurface for MatrixSurface {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let gradient = self.hessian.dot(&x);
+            Ok((0.5 * x.dot(&gradient), gradient))
+        }
+    }
+
+    fn random_orthogonal(n: usize) -> Array2<f64> {
+        let mut state = 0xA076_1D64_78BD_642F_u64;
+        let mut q = Array2::<f64>::zeros((n, n));
+        for col in 0..n {
+            let mut v = Array1::<f64>::zeros(n);
+            for value in &mut v {
+                state ^= state >> 12;
+                state ^= state << 25;
+                state ^= state >> 27;
+                *value = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) as f64 / u64::MAX as f64) - 0.5;
+            }
+            for prior in 0..col {
+                let projection = v.dot(&q.column(prior));
+                v.scaled_add(-projection, &q.column(prior));
+            }
+            let norm = v.dot(&v).sqrt();
+            v /= norm;
+            q.column_mut(col).assign(&v);
+        }
+        q
+    }
+
+    fn rotated(q: &Array2<f64>, eigenvalues: &[f64]) -> Array2<f64> {
+        let diagonal = Array2::from_diag(&Array1::from_vec(eigenvalues.to_vec()));
+        q.dot(&diagonal).dot(&q.t())
+    }
+
+    let n = 6;
+    let q = random_orthogonal(n);
+    let x = Array1::from_vec(vec![0.2, -0.4, 0.1, 0.3, -0.2, 0.5]);
+    for eigenvalues in [
+        vec![1.0, 2.0, 4.0, 7.0, 11.0, 16.0],
+        vec![-3.0, 1.0, 2.0, 4.0, 7.0, 9.0],
+        vec![-3.0, -1.0, 2.0, 4.0, 7.0, 9.0],
+    ] {
+        let hessian = rotated(&q, &eigenvalues);
+        let surface = MatrixSurface {
+            hessian: hessian.clone(),
+        };
+        let (finite, _) =
+            dense_hessian(&surface, x.view(), 1.0e-4, FiniteDifference::Central).unwrap();
+        assert!(
+            finite
+                .iter()
+                .zip(hessian.iter())
+                .all(|(left, right)| (left - right).abs() < 1.0e-10)
+        );
+        let mut action =
+            fd_hessian_from_surface(&surface, x.clone(), 1.0e-4, FiniteDifference::Central)
+                .unwrap();
+        let spectrum = rgsaddle::lanczos_lowest_modes(&mut action, n, n, 1.0e-10, 23).unwrap();
+        for (actual, expected) in spectrum.eigenvalues.iter().zip(&eigenvalues) {
+            assert!((actual - expected).abs() < 1.0e-9);
+        }
+    }
+
+    let min_hessian = rotated(&q, &[2.0, 3.0, 5.0, 7.0, 11.0, 13.0]);
+    let saddle_hessian = rotated(&q, &[-1.5, 3.0, 5.0, 7.0, 11.0, 13.0]);
+    let masses = [2.0, 3.0, 5.0, 7.0, 11.0, 13.0];
+    let config = VineyardConfig::default();
+    let dense = vineyard_prefactor_dense_matrices(
+        min_hessian.view(),
+        saddle_hessian.view(),
+        &masses,
+        &config,
+    )
+    .unwrap();
+    let min_surface = MatrixSurface {
+        hessian: min_hessian,
+    };
+    let saddle_surface = MatrixSurface {
+        hessian: saddle_hessian,
+    };
+    let mut min_action =
+        fd_hessian_from_surface(&min_surface, x.clone(), 1.0e-4, FiniteDifference::Central)
+            .unwrap()
+            .with_masses_amu(&masses)
+            .unwrap();
+    let mut saddle_action =
+        fd_hessian_from_surface(&saddle_surface, x, 1.0e-4, FiniteDifference::Central)
+            .unwrap()
+            .with_masses_amu(&masses)
+            .unwrap();
+    let lanczos = vineyard_prefactor_lanczos(
+        &mut min_action,
+        &mut saddle_action,
+        config.positive_tol,
+        config.negative_tol,
+        1.0e-10,
+        31,
+    )
+    .unwrap();
+    assert!((lanczos.prefactor_hz - dense.prefactor_hz).abs() / dense.prefactor_hz < 1.0e-9);
+
+    let degenerate = rotated(&q, &[-2.0, -2.0, 3.0, 5.0, 7.0, 11.0]);
+    let dense_error = vineyard_prefactor_dense_matrices(
+        rotated(&q, &[2.0, 3.0, 4.0, 5.0, 7.0, 11.0]).view(),
+        degenerate.view(),
+        &[1.0; 6],
+        &config,
+    )
+    .unwrap_err();
+    assert!(dense_error.to_string().contains("found 2 negative mode"));
+    let minimum = MatrixSurface {
+        hessian: rotated(&q, &[2.0, 3.0, 4.0, 5.0, 7.0, 11.0]),
+    };
+    let saddle = MatrixSurface {
+        hessian: degenerate,
+    };
+    let mut min_action = fd_hessian_from_surface(
+        &minimum,
+        Array1::zeros(n),
+        1.0e-4,
+        FiniteDifference::Central,
+    )
+    .unwrap();
+    let mut saddle_action =
+        fd_hessian_from_surface(&saddle, Array1::zeros(n), 1.0e-4, FiniteDifference::Central)
+            .unwrap();
+    let lanczos_error = vineyard_prefactor_lanczos(
+        &mut min_action,
+        &mut saddle_action,
+        config.positive_tol,
+        config.negative_tol,
+        1.0e-10,
+        37,
+    )
+    .unwrap_err();
+    assert!(lanczos_error.to_string().contains("found 2 negative mode"));
 }
