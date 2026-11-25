@@ -1,0 +1,3 @@
+=ArtStatus::LostCurvature= is deprecated and no longer produced.
+An =ArtSession= climb whose lowest curvature turns non-negative now recovers the carried mode or restarts from the last accepted index-1 point, and a loss that outlasts =ArtConfig::index_one_recovery_attempts= is returned as =SaddleError::ArtIndexOneLost=.
+The variant stays so that existing matches still compile.

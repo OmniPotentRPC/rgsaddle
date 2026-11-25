@@ -136,6 +136,12 @@ pub enum ArtStatus {
     /// A quench energy is not below the saddle.
     NotDownhill,
     /// The lowest curvature became non-negative during the climb.
+    ///
+    /// No longer produced. The climb now recovers the carried mode or
+    /// restarts from the last accepted index-1 point, and a loss that
+    /// outlasts [`ArtConfig::index_one_recovery_attempts`] is returned as
+    /// [`SaddleError::ArtIndexOneLost`].
+    #[deprecated(note = "never produced; curvature loss is `SaddleError::ArtIndexOneLost`")]
     LostCurvature,
     /// The push budget, the climb budget, or [`ArtSession::run`]'s cap was spent.
     Exhausted,
@@ -2946,6 +2952,55 @@ mod tests {
         assert_eq!(session.force_call_count(), 10);
         assert_eq!(calls.len(), 3);
         assert!((calls[0].position[0] + 0.93).abs() < 1e-12);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn lost_curvature_is_an_error_not_a_status() {
+        let config = ArtConfig::default()
+            .with_mode(
+                MinModeConfig::default()
+                    .with_kind(MinModeKind::Lanczos)
+                    .with_krylov_dim(3)
+                    .with_max_rotations(3)
+                    .with_dr(1e-4),
+            )
+            .with_index_one_recovery_attempts(2);
+        let mut session = ArtSession::new(
+            config,
+            Array1::zeros(3),
+            array![1.0, 0.0, 0.0],
+            array![1.0, 0.0, 0.0],
+        )
+        .unwrap();
+        session.leg = Leg::Climbing;
+        session.phase = ArtPhase::Lanczos;
+        session.gradient.fill(0.0);
+        session.energy = 0.0;
+        session.max_force = 1.0;
+        session.curvature = -1.0;
+        session.save_index_one_checkpoint();
+        let surface = RotatedQuadratic {
+            negative: 1.0,
+            positive: 4.0,
+            cosine: 0.5,
+            sine: 3.0_f64.sqrt() / 2.0,
+        };
+
+        let error = session.run(&surface, 100).unwrap_err();
+
+        assert!(matches!(
+            error,
+            SaddleError::ArtIndexOneLost { attempts: 2, curvature, .. } if curvature >= 0.0
+        ));
+        assert_ne!(session.status(), ArtStatus::LostCurvature);
+        assert_eq!(session.status(), ArtStatus::Running);
+        let reads = session
+            .phases
+            .iter()
+            .filter(|&&phase| phase == ArtPhase::Lanczos)
+            .count();
+        assert_eq!(reads, 3);
     }
 
     fn run_well() -> Vec<ArtForceCall> {

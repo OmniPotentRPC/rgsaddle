@@ -305,10 +305,8 @@ pub enum ArmFailure {
     NotDownhill,
     /// Both quenches are distinct minima and neither is the start.
     Disconnected,
-    /// The lowest curvature became non-negative during the climb, so
-    /// the event stopped before any quench.
-    LostCurvature,
-    /// ART could not recover the tracked index-1 mode.
+    /// ART could not recover the tracked index-1 mode. This is how a
+    /// climb whose lowest curvature stays non-negative ends.
     IndexOneLost {
         /// Recovery attempts made before the arm stopped.
         attempts: usize,
@@ -893,9 +891,11 @@ impl DirectionCover {
                 ArmTrial::connected(arm, saddle, saddle_energy, product, product_energy, calls)
             }
             ArtStatus::Reverted => ArmTrial::returned(arm, calls),
-            ArtStatus::LostCurvature => ArmTrial::failed(arm, ArmFailure::LostCurvature, calls),
             ArtStatus::Irreversible => ArmTrial::failed(arm, ArmFailure::Disconnected, calls),
-            ArtStatus::NotIndexOne => ArmTrial::failed(arm, ArmFailure::NotIndexOne, calls),
+            #[allow(deprecated)]
+            ArtStatus::NotIndexOne | ArtStatus::LostCurvature => {
+                ArmTrial::failed(arm, ArmFailure::NotIndexOne, calls)
+            }
             ArtStatus::NotDownhill => ArmTrial::failed(arm, ArmFailure::NotDownhill, calls),
             ArtStatus::Exhausted | ArtStatus::Running => ArmTrial::non_converged(arm, calls),
         }
