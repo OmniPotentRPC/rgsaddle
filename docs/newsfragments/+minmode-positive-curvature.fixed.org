@@ -1,1 +1,1 @@
-A minimum mode step reports convergence only when the curvature along the mode is negative, and a step that leaves the atoms where they were does not count as an iteration.
+A minimum mode step reports convergence only when the curvature along the mode is negative. Every step counts as an iteration, including one that leaves the atoms where they were, so a host loop capped on ~iteration~ stops at a stationary point of positive curvature.

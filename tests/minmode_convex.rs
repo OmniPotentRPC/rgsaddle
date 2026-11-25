@@ -73,7 +73,7 @@ fn a_start_at_positive_curvature_does_not_report_converged() {
 }
 
 #[test]
-fn a_step_that_does_not_move_is_not_an_iteration() {
+fn a_step_that_does_not_move_is_still_an_iteration() {
     // max_move of 0 leaves the translation to the solver. A zero force
     // at positive curvature has nothing to follow, so the atoms stay.
     let config = MinModeConfig::default()
@@ -85,10 +85,23 @@ fn a_step_that_does_not_move_is_not_an_iteration() {
     let report = session.step(&Quadratic { curvature: 2.0 }).unwrap();
     assert_ne!(report.status, MinModeStatus::Converged);
     assert!(report.curvature > 0.0, "{report:?}");
-    assert_eq!(report.iteration, 0, "{report:?}");
+    assert_eq!(report.iteration, 1, "{report:?}");
     assert!(
         session.position().iter().all(|value| value.abs() < 1e-15),
         "{:?}",
         session.position()
     );
+}
+
+#[test]
+fn run_stops_at_its_cap_on_a_stationary_minimum() {
+    let config = MinModeConfig::default()
+        .with_kind(MinModeKind::Dimer)
+        .with_force_tol(1.0)
+        .with_max_move(0.0);
+    let mut session =
+        MinModeSession::new(config, array![0.0, 0.0, 0.0], array![1.0, 0.0, 0.0]).unwrap();
+    let report = session.run(&Quadratic { curvature: 2.0 }, 7).unwrap();
+    assert_eq!(report.status, MinModeStatus::Running, "{report:?}");
+    assert_eq!(report.iteration, 7, "{report:?}");
 }
