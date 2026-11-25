@@ -295,6 +295,7 @@ pub mod field;
 pub mod force;
 pub mod force_match;
 pub mod geom;
+pub mod hessian_free;
 pub mod internal;
 pub mod kappa;
 pub mod linalg;
@@ -320,6 +321,12 @@ pub use eigensolve::{
     EigenDevice, ExpandKind, dense_logabsdet, eigh_on, exact_eigh, exact_eigvalsh, expand,
     faer_eigh, lowest_on, rayleigh_ritz, rayleigh_ritz_iter, relative_zero_tolerance, solve_dense,
     solve_dense_matrix, spd_logdet,
+};
+
+pub use hessian_free::{
+    DeflatedAction, FdHessianAction, HessianAction, LanczosSpectrum, SlqLogDetRatio,
+    fd_hessian_from_forces, fd_hessian_from_surface, lanczos_lowest_modes, orthonormal_basis,
+    slq_logdet_ratio,
 };
 
 pub use force::ForceGate;
