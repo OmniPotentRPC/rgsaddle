@@ -19,7 +19,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
 default = ["faer"]
-capi = ["lineb-interpolated-hessian"]
+capi = ["lineb-interpolated-hessian", "ohtst"]
 par = ["rgmin/par"]
 highs = ["rgmin/highs"]
 ohtst = []

@@ -4239,6 +4239,24 @@ mod torque_window_abi_tests {
     }
 
     #[test]
+    fn config_parsers_reject_nonzero_flags() {
+        let mut config = std::mem::MaybeUninit::<RgsaddleArtNConfig>::uninit();
+        assert_eq!(
+            unsafe { rgsaddle_artn_config_default(config.as_mut_ptr()) },
+            RGSADDLE_OK
+        );
+        let mut config = unsafe { config.assume_init() };
+        config.flags = 1;
+
+        let session = session_of(1, 1e-4);
+        assert_eq!(
+            unsafe { rgsaddle_minmode_set_artn(session, &config) },
+            RGSADDLE_INVALID_PARAMETER
+        );
+        unsafe { rgsaddle_minmode_free(session) };
+    }
+
+    #[test]
     fn artn_abi_defaults_and_opt_in_are_pinned() {
         let mut config = std::mem::MaybeUninit::<RgsaddleArtNConfig>::uninit();
         assert_eq!(

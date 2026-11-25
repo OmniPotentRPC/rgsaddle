@@ -6,6 +6,7 @@ The hosted [[https://docs.rs/rgsaddle][Rust API reference]] includes the default
 =cargo doc --no-deps --features capi,ohtst,readcon-db --open= builds these pages from a checkout.
 The =lammps= feature adds the LAMMPS adapter to a local documentation build.
 Runnable examples open =BandSession=, =AutoNeb=, =OcinebSession=, =MinModeSession=, =Index1Session=, =IndexKSession=, =SolidDimer=, =SolidNeb=, =Stencil= and the =ohtst= module, and, with =--features capi=, the C band, min-mode and stencil handles.
+=meson -Dfortran=enabled= adds the Fortran 2008 =rgsaddle= module on the same C ABI.
 =cargo test --doc= runs them.
 Every public configuration struct is non-exhaustive.
 Start from =Default= or the type's named constructor and chain the =with_*= setters, as in =BandConfig::default().with_force_tol(1e-3)=.
@@ -287,7 +288,7 @@ For config minors 5 through 62 this field is read as given, so 0 disables the an
 From minor 63, 0 keeps the Rust default unless flag bit 0, =RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL=, is set; then 0 disables it.
 The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 63 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
-=RGSADDLE_ABI_MINOR= is 65.
+=RGSADDLE_ABI_MINOR= is 66.
 =rgsaddle_band_set_dynamic= (minor 65) sets or clears =DynamicNeb= on a band.
 =rgsaddle_dyneb_mask= (minor 65) applies that mask to a projected band.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
@@ -315,6 +316,7 @@ The feature macro =RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS= advertises
 =rgsaddle_lineb_solve_counted_diagnostics=. Its final two optional signed
 64-bit outputs give the number of negative and total retained fluctuation
 modes. Each reports =-1= for a path-only or failed solve.
+From minor 66, =rgsaddle_pafi_*= exposes an ordered path, overdamped sampling controls, adaptive rounds, a barrier result and a bulk profile, and =rgsaddle_ohtst_*= exposes a fixed dividing plane, plane sampling and shooting controls, a transmission result and a bulk \(\kappa(t)\) curve. The bulk readers set =written= to the required length and return =RGSADDLE_INVALID_PARAMETER= without writing arrays when capacity is too small. Their point callback may run concurrently on Rayon worker threads. A dynamically loading host checks =rgsaddle_abi_version()= for major 1 and minor 66 or newer before resolving these symbols.
 
 From minor 60, =rgsaddle_band_set_refine= installs or clears the per-step L-BFGS refine stepper, and =rgsaddle_band_is_refining= reports whether the last first-order step used it. A host checks =rgsaddle_abi_version()= for minor 60 or newer. The worked example is =tests/band_refine.rs=.
 The request flags are =RGSADDLE_REQ_ONE_IMAGE= (bit 0) and =RGSADDLE_REQ_CLIMBING_IMAGE= (bit 1).
@@ -330,6 +332,7 @@ The surface writes energy and the Cartesian gradient for one image.
 It also carries the kind (=s=, =u=, or =f=), the Hessian index and the evaluation count.
 That count includes the finite differences that decide a step or an index.
 The Lanczos acceptance does not build a dense Hessian.
+=howto/fortran= wraps this ABI for Fortran with finalizer-backed handles for band, min-mode, PAFI, and OH-TST sessions (=rgsaddle_pafi_*= and =rgsaddle_ohtst_*=, ABI minor 66).
 Band flag bit 2 is =RGSADDLE_BAND_CI_AFTER=.
 It arms the climbing image under =ci_trigger_force= or =ci_trigger_factor= times the first force.
 Either of the two may be 0.

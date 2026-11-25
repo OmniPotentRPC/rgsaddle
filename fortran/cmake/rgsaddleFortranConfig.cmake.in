@@ -1,0 +1,52 @@
+# Installed next to the library. Paths are relative to this file so a
+# relocated prefix still resolves.
+get_filename_component(_rgsaddle_fortran_prefix "${CMAKE_CURRENT_LIST_DIR}/@RGSADDLE_PREFIX_FROM_CONFIG@" ABSOLUTE)
+
+set(rgsaddleFortran_VERSION "@RGSADDLE_FORTRAN_VERSION@")
+set(rgsaddleFortran_PREFIX "${_rgsaddle_fortran_prefix}")
+set(rgsaddleFortran_MODULE_DIR "${rgsaddleFortran_PREFIX}/@RGSADDLE_FORTRAN_MODULE_REL@")
+set(rgsaddleFortran_INCLUDE_DIR "${rgsaddleFortran_PREFIX}/@RGSADDLE_FORTRAN_INCLUDE_REL@")
+set(rgsaddleFortran_LIB_DIR "${rgsaddleFortran_PREFIX}/@RGSADDLE_FORTRAN_LIB_REL@")
+
+find_library(
+  rgsaddleFortran_LIBRARY
+  NAMES rgsaddle_fortran
+  PATHS "${rgsaddleFortran_LIB_DIR}"
+  NO_DEFAULT_PATH
+)
+if(NOT rgsaddleFortran_LIBRARY)
+  find_library(rgsaddleFortran_LIBRARY NAMES rgsaddle_fortran)
+endif()
+
+if(NOT rgsaddleFortran_CAPI_LIBRARY)
+  find_library(
+    rgsaddleFortran_CAPI_LIBRARY
+    NAMES rgsaddle
+    PATHS "${rgsaddleFortran_LIB_DIR}"
+    NO_DEFAULT_PATH
+  )
+endif()
+if(NOT rgsaddleFortran_CAPI_LIBRARY)
+  find_library(rgsaddleFortran_CAPI_LIBRARY NAMES rgsaddle)
+endif()
+
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(
+  rgsaddleFortran
+  REQUIRED_VARS
+    rgsaddleFortran_LIBRARY
+    rgsaddleFortran_CAPI_LIBRARY
+  VERSION_VAR rgsaddleFortran_VERSION
+)
+
+if(rgsaddleFortran_FOUND AND NOT TARGET rgsaddle::fortran)
+  add_library(rgsaddle::fortran UNKNOWN IMPORTED)
+  set_target_properties(
+    rgsaddle::fortran
+    PROPERTIES
+      IMPORTED_LOCATION "${rgsaddleFortran_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES
+        "${rgsaddleFortran_INCLUDE_DIR};${rgsaddleFortran_MODULE_DIR}"
+      INTERFACE_LINK_LIBRARIES "${rgsaddleFortran_CAPI_LIBRARY}"
+  )
+endif()

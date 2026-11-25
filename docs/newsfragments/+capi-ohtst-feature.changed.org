@@ -1,0 +1,1 @@
+The =capi= feature now includes =ohtst= so the C ABI always exposes the PAFI and OH-TST session entry points when =capi= is enabled.

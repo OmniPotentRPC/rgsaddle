@@ -1,11 +1,22 @@
 /**
  * @file rgsaddle.h
- * @brief C ABI for the rgsaddle band, minimum-mode, and index-1 sessions.
+ * @brief C ABI for rgsaddle search, PAFI, and OH-TST sessions.
  *
  * The stepping contract in C. The host owns the loop: create a
  * session, call step until it reports converged (or until the host's
  * own policy says otherwise), reset at a surface-epoch boundary,
  * free. `rgsaddle_connect` is the run-to-completion double-ended search.
+ * ABI minor 66 adds opaque PAFI and OH-TST handles with create,
+ * set-config, run, result, profile or curve, and free calls. This is a
+ * fixed subset of the Rust APIs: PAFI exposes path sampling and OH-TST
+ * exposes one fixed dividing plane with sampling and shooting controls.
+ * Their create calls return NULL for every failure. Status-returning
+ * calls use OK for success; NULL_SESSION, NULL_SURFACE, or NULL_REPORT
+ * for that null input; ABI_MISMATCH for another config major;
+ * INVALID_PARAMETER for an invalid config or short output; NO_EVALUATION
+ * before a run stores a result; SHAPE for an invalid capacity, overflow,
+ * or incompatible shape; SURFACE_FAILED for any nonzero callback return;
+ * and NON_FINITE or SOLVER for those calculation failures.
  *
  * Layout discipline follows dlpack.h, the same as the rest of the
  * stack: every wire struct opens with an rgsaddle_version_t and a
@@ -13,6 +24,14 @@
  * (RGSADDLE_ABI_MISMATCH), fixed-width integers only, and the
  * surface callback takes one request struct so its contract can grow
  * without a new symbol.
+ *
+ * Before resolving symbols added by a minor version, a dynamic host
+ * checks `rgsaddle_abi_version()` (major in the high 16 bits, minor in
+ * the low 16). PAFI and OH-TST point callbacks may overlap on Rayon
+ * worker threads; their `user` state must be thread-safe. Their profile
+ * and curve readers report a short capacity with
+ * RGSADDLE_INVALID_PARAMETER, write the required length to `written`,
+ * and leave the output arrays unchanged.
  *
  * Units are the caller's; the sessions are unit-agnostic. Positions
  * are unwrapped Cartesian, image-major (image stride 3 * n_atoms).
@@ -28,7 +47,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 65u
+#define RGSADDLE_ABI_MINOR 66u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -708,6 +727,204 @@ rgsaddle_status_t rgsaddle_minmode_mode(const RgsaddleMinMode *session,
 /** Clear optimizer/rotation history, carried curvature, and the centre cache. */
 rgsaddle_status_t rgsaddle_minmode_reset(RgsaddleMinMode *session);
 void rgsaddle_minmode_free(RgsaddleMinMode *session);
+
+/** Opaque PAFI session handle, ABI minor 66. */
+typedef struct RgsaddlePafi RgsaddlePafi;
+
+/**
+ * Point-surface callback used by PAFI and OH-TST handles, ABI minor 66.
+ *
+ * The library may call this concurrently on rayon worker threads during
+ * PAFI and OH-TST runs. Host state reachable through `user` must therefore
+ * be thread-safe.
+ */
+typedef rgsaddle_status_t (*rgsaddle_point_surface_fn)(
+    void *user, int64_t n_dof, const double *position, double *energy,
+    double *gradient);
+
+/**
+ * PAFI configuration, ABI minor 66. The caller stamps version and zeroes
+ * flags. Create and set-config reject any nonzero flag with
+ * RGSADDLE_INVALID_PARAMETER.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double thermal;
+  double mobility;
+  double time_step;
+  int64_t thermalize;
+  int64_t stride;
+  int64_t samples;
+  int64_t blocks;
+  uint64_t seed;
+  int32_t fix_com;
+  int64_t retain;
+  /** Positive target error enables adaptive rounds; non-positive means one pass. */
+  double target_error;
+  int64_t max_rounds;
+} rgsaddle_pafi_config_t;
+
+/** PAFI barrier summary after rgsaddle_pafi_run, ABI minor 66. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double barrier;
+  double barrier_error;
+  int64_t dividing;
+  int64_t samples;
+  int64_t evaluations;
+} rgsaddle_pafi_result_t;
+
+/**
+ * Create a PAFI session from path frames, ABI minor 66. `frames` is row-major
+ * `n_frames` by `n_dof`. `arcs`, when non-NULL and `n_arcs > 0`, holds
+ * increasing arc values; otherwise arc lengths are built from the
+ * frames.
+ */
+RgsaddlePafi *rgsaddle_pafi_create(const rgsaddle_pafi_config_t *config,
+                                   int64_t n_frames, int64_t n_dof,
+                                   const double *frames, const double *arcs,
+                                   int64_t n_arcs);
+/**
+ * Replace the PAFI configuration between runs, ABI minor 66. Returns
+ * RGSADDLE_NULL_SESSION for a NULL session before reading `config`,
+ * RGSADDLE_INVALID_PARAMETER for a NULL config, RGSADDLE_ABI_MISMATCH
+ * for another major, and the status of the first refused field
+ * otherwise. A refused config leaves the session unchanged.
+ */
+rgsaddle_status_t rgsaddle_pafi_set_config(
+    RgsaddlePafi *session, const rgsaddle_pafi_config_t *config);
+/**
+ * Run PAFI and store the profile in the session, ABI minor 66.
+ * `surface` may be called concurrently on rayon worker threads.
+ */
+rgsaddle_status_t rgsaddle_pafi_run(RgsaddlePafi *session,
+                                    rgsaddle_point_surface_fn surface,
+                                    void *user);
+/**
+ * Read the last PAFI barrier summary, ABI minor 66. Returns RGSADDLE_SHAPE and leaves
+ * `out` unchanged when the summed evaluation count does not fit in
+ * `int64_t`.
+ */
+rgsaddle_status_t rgsaddle_pafi_result(const RgsaddlePafi *session,
+                                       rgsaddle_pafi_result_t *out);
+/**
+ * Read the full stored profile, ABI minor 66. `capacity` is the writable length of
+ * every non-NULL array output. When `capacity` is shorter than the
+ * stored profile the call returns RGSADDLE_INVALID_PARAMETER and, if
+ * `written` is non-NULL, sets `*written` to the number of points the
+ * profile needs. The output arrays are left unchanged in that case.
+ */
+rgsaddle_status_t rgsaddle_pafi_profile(const RgsaddlePafi *session,
+                                        double *arcs, double *gradients,
+                                        double *gradient_errors,
+                                        double *free_energy,
+                                        double *free_energy_errors,
+                                        int64_t capacity, int64_t *written);
+/** Free a PAFI session, ABI minor 66. */
+void rgsaddle_pafi_free(RgsaddlePafi *session);
+
+/** Opaque OH-TST session handle, ABI minor 66. */
+typedef struct RgsaddleOhtst RgsaddleOhtst;
+
+/**
+ * OH-TST sample integrator kind for rgsaddle_ohtst_config_t, ABI minor 66:
+ * 0 BAOAB, 1 GHMC.
+ */
+typedef enum {
+  RGSADDLE_OHTST_INTEGRATOR_BAOAB = 0,
+  RGSADDLE_OHTST_INTEGRATOR_GHMC = 1
+} rgsaddle_ohtst_integrator_t;
+
+/**
+ * OH-TST trajectory counting kind for rgsaddle_ohtst_config_t, ABI minor 66:
+ * 0 final state, 1 first crossing.
+ */
+typedef enum {
+  RGSADDLE_OHTST_COUNT_FINAL = 0,
+  RGSADDLE_OHTST_COUNT_FIRST_CROSSING = 1
+} rgsaddle_ohtst_counting_t;
+
+/**
+ * OH-TST configuration, ABI minor 66. The caller stamps version and zeroes
+ * flags. Create and set-config reject any nonzero flag with
+ * RGSADDLE_INVALID_PARAMETER.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double thermal;
+  double sample_time_step;
+  double sample_friction;
+  int64_t sample_burn_in;
+  int64_t sample_stride;
+  int64_t sample_records;
+  int64_t sample_blocks;
+  uint64_t sample_seed;
+  int64_t sample_retain;
+  int32_t sample_integrator; /**< rgsaddle_ohtst_integrator_t */
+  double shooting_friction;
+  double shooting_time_step;
+  int64_t shooting_steps;
+  int64_t shooting_check_every;
+  int64_t shooting_commit;
+  int64_t shooting_shots;
+  int64_t shooting_blocks;
+  uint64_t shooting_seed;
+  int32_t counting; /**< rgsaddle_ohtst_counting_t */
+} rgsaddle_ohtst_config_t;
+
+/** OH-TST summary after rgsaddle_ohtst_run, ABI minor 66. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double kappa;
+  double error;
+  int64_t shots;
+  int64_t unassigned;
+  int64_t reactive;
+  int64_t recrossed;
+  int64_t evaluations;
+} rgsaddle_ohtst_result_t;
+
+/**
+ * Create an OH-TST session on one dividing plane, ABI minor 66. `point` and `normal`
+ * each hold `n_dof` doubles.
+ */
+RgsaddleOhtst *rgsaddle_ohtst_create(const rgsaddle_ohtst_config_t *config,
+                                     int64_t n_dof, const double *point,
+                                     const double *normal);
+/**
+ * Replace the OH-TST configuration between runs, ABI minor 66. The statuses follow
+ * rgsaddle_pafi_set_config: RGSADDLE_NULL_SESSION first, then
+ * RGSADDLE_INVALID_PARAMETER for a NULL config, then
+ * RGSADDLE_ABI_MISMATCH for another major.
+ */
+rgsaddle_status_t rgsaddle_ohtst_set_config(
+    RgsaddleOhtst *session, const rgsaddle_ohtst_config_t *config);
+/**
+ * Sample the plane, run transmission shooting, and store the result, ABI minor 66.
+ * `surface` may be called concurrently on rayon worker threads.
+ */
+rgsaddle_status_t rgsaddle_ohtst_run(RgsaddleOhtst *session,
+                                     rgsaddle_point_surface_fn surface,
+                                     void *user);
+/** Read the last OH-TST transmission summary, ABI minor 66. */
+rgsaddle_status_t rgsaddle_ohtst_result(const RgsaddleOhtst *session,
+                                        rgsaddle_ohtst_result_t *out);
+/**
+ * Read the stored κ(t) curve, ABI minor 66. `capacity` is the writable length of every
+ * non-NULL output. When `capacity` is shorter than the stored curve the
+ * call returns RGSADDLE_INVALID_PARAMETER and, if `written` is non-NULL,
+ * sets `*written` to the number of points the curve needs. The output
+ * arrays are left unchanged in that case.
+ */
+rgsaddle_status_t rgsaddle_ohtst_curve(const RgsaddleOhtst *session,
+                                       double *times, double *kappa_of_t,
+                                       int64_t capacity, int64_t *written);
+/** Free an OH-TST session, ABI minor 66. */
+void rgsaddle_ohtst_free(RgsaddleOhtst *session);
 
 typedef enum {
   RGSADDLE_HESS_POWELL = 0,
