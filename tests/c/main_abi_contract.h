@@ -27,6 +27,7 @@ _Static_assert(RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES == -15,
 _Static_assert(RGSADDLE_REFINE_NONE == 0, "refine method NONE");
 _Static_assert(RGSADDLE_REFINE_LBFGS == 1, "refine method LBFGS");
 _Static_assert(RGSADDLE_NOT_CONVERGED == -16, "status NOT_CONVERGED");
+_Static_assert(RGSADDLE_LANDSCAPE_BOUND == -17, "status LANDSCAPE_BOUND");
 
 typedef struct {
   uint32_t major;
@@ -413,10 +414,35 @@ typedef RgsaddleIndexK *(*abi35_signature_rgsaddle_indexk_create)(
     const double *modes);
 _Static_assert(_Generic(&rgsaddle_indexk_create, abi35_signature_rgsaddle_indexk_create: 1, default: 0), "rgsaddle_indexk_create signature");
 
+/* The pins below spell out the function-pointer types so that a change to
+ * rgsaddle_hessian_fn or rgsaddle_hessian_at_fn cannot rewrite its own guard. */
+typedef int (*abi15_pinned_hessian_fn)(void *user, int64_t n_dof, const double *vector,
+                                       double *action);
+_Static_assert(_Generic((rgsaddle_hessian_fn)0, abi15_pinned_hessian_fn: 1, default: 0), "rgsaddle_hessian_fn keeps the original signature");
+_Static_assert(sizeof(abi15_pinned_hessian_fn) == sizeof(rgsaddle_hessian_fn), "rgsaddle_hessian_fn size");
+
+typedef int (*abinext_pinned_hessian_at_fn)(void *user, int64_t n_dof, const double *position,
+                                          const double *vector, double *action);
+_Static_assert(_Generic((rgsaddle_hessian_at_fn)0, abinext_pinned_hessian_at_fn: 1, default: 0), "rgsaddle_hessian_at_fn signature");
+_Static_assert(_Generic((rgsaddle_hessian_at_fn)0, abi15_pinned_hessian_fn: 0, default: 1), "rgsaddle_hessian_at_fn is distinct from rgsaddle_hessian_fn");
+
 typedef rgsaddle_status_t (*abi35_signature_rgsaddle_indexk_step)(
-    RgsaddleIndexK *session, rgsaddle_surface_fn surface, rgsaddle_hessian_fn hessian, void *user,
+    RgsaddleIndexK *session, rgsaddle_surface_fn surface,
+    int (*hessian)(void *user, int64_t n_dof, const double *vector, double *action), void *user,
     rgsaddle_report_t *out);
 _Static_assert(_Generic(&rgsaddle_indexk_step, abi35_signature_rgsaddle_indexk_step: 1, default: 0), "rgsaddle_indexk_step signature");
+
+typedef rgsaddle_status_t (*abinext_signature_rgsaddle_indexk_step_at)(
+    RgsaddleIndexK *session, rgsaddle_surface_fn surface, abinext_pinned_hessian_at_fn hessian,
+    void *user, rgsaddle_report_t *out);
+_Static_assert(_Generic(&rgsaddle_indexk_step_at, abinext_signature_rgsaddle_indexk_step_at: 1, default: 0), "rgsaddle_indexk_step_at signature");
+
+typedef rgsaddle_status_t (*abi15_signature_rgsaddle_kappa_dimer_force)(
+    const rgsaddle_kappa_config_t *config, int64_t n_dof, const double *gradient,
+    const double *mode, int64_t n_excluded, const double *excluded,
+    int (*hessian)(void *user, int64_t n_dof, const double *vector, double *action), void *user,
+    double *force, rgsaddle_kappa_report_t *report);
+_Static_assert(_Generic(&rgsaddle_kappa_dimer_force, abi15_signature_rgsaddle_kappa_dimer_force: 1, default: 0), "rgsaddle_kappa_dimer_force signature");
 
 typedef rgsaddle_status_t (*abi35_signature_rgsaddle_indexk_position)(const RgsaddleIndexK *session,
                                                                      double *out);
@@ -686,6 +712,37 @@ _Static_assert(_Generic(&rgsaddle_band_set_refine, abi60_signature_rgsaddle_band
 
 typedef int32_t (*abi60_signature_rgsaddle_band_is_refining)(const RgsaddleBand *band);
 _Static_assert(_Generic(&rgsaddle_band_is_refining, abi60_signature_rgsaddle_band_is_refining: 1, default: 0), "rgsaddle_band_is_refining signature");
+typedef rgsaddle_status_t (*landscape_signature_rgsaddle_landscape_config_default)(
+    rgsaddle_landscape_config_t *out);
+_Static_assert(_Generic(&rgsaddle_landscape_config_default, landscape_signature_rgsaddle_landscape_config_default: 1, default: 0), "rgsaddle_landscape_config_default signature");
+
+typedef RgsaddleLandscape *(*landscape_signature_rgsaddle_landscape_create)(
+    const rgsaddle_landscape_config_t *config, int64_t n_atoms, const double *position,
+    const double *modes, int32_t k);
+_Static_assert(_Generic(&rgsaddle_landscape_create, landscape_signature_rgsaddle_landscape_create: 1, default: 0), "rgsaddle_landscape_create signature");
+
+typedef rgsaddle_status_t (*landscape_signature_rgsaddle_landscape_run)(
+    RgsaddleLandscape *session, rgsaddle_surface_fn surface, abinext_pinned_hessian_at_fn hessian,
+    void *user, rgsaddle_landscape_report_t *out);
+_Static_assert(_Generic(&rgsaddle_landscape_run, landscape_signature_rgsaddle_landscape_run: 1, default: 0), "rgsaddle_landscape_run signature");
+
+typedef rgsaddle_status_t (*landscape_signature_rgsaddle_landscape_node)(
+    const RgsaddleLandscape *session, int64_t node, double *position, double *energy,
+    int32_t *index, double *curvatures, int32_t curvature_capacity, int32_t *n_curvatures,
+    int64_t *evaluations);
+_Static_assert(_Generic(&rgsaddle_landscape_node, landscape_signature_rgsaddle_landscape_node: 1, default: 0), "rgsaddle_landscape_node signature");
+
+typedef rgsaddle_status_t (*landscape_signature_rgsaddle_landscape_modes)(
+    const RgsaddleLandscape *session, int64_t node, double *modes, int32_t *n_columns);
+_Static_assert(_Generic(&rgsaddle_landscape_modes, landscape_signature_rgsaddle_landscape_modes: 1, default: 0), "rgsaddle_landscape_modes signature");
+
+typedef rgsaddle_status_t (*landscape_signature_rgsaddle_landscape_edge)(
+    const RgsaddleLandscape *session, int64_t edge, int64_t *parent, int64_t *child,
+    int32_t *direction, int32_t *sign, int64_t *evaluations);
+_Static_assert(_Generic(&rgsaddle_landscape_edge, landscape_signature_rgsaddle_landscape_edge: 1, default: 0), "rgsaddle_landscape_edge signature");
+
+typedef void (*landscape_signature_rgsaddle_landscape_free)(RgsaddleLandscape *session);
+_Static_assert(_Generic(&rgsaddle_landscape_free, landscape_signature_rgsaddle_landscape_free: 1, default: 0), "rgsaddle_landscape_free signature");
 
 _Static_assert(sizeof(rgsaddle_geodesic_config_t) == 104, "geodesic config size");
 _Static_assert(_Alignof(rgsaddle_geodesic_config_t) == 8, "geodesic config alignment");
