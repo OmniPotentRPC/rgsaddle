@@ -417,6 +417,84 @@ fn gap_policy_tries_every_centre_before_a_second_direction() {
     ));
 }
 
+fn bowl_connected(cover: &mut DirectionCover, point: usize, product: f64) {
+    let arm = rgsaddle::ArmId { atom: 0, point };
+    cover
+        .record(rgsaddle::ArmTrial::connected(
+            arm,
+            array![0.5 * product, 0.0, 0.0],
+            0.125 * product * product,
+            array![product, 0.0, 0.0],
+            0.5 * product * product,
+            1,
+        ))
+        .unwrap();
+}
+
+/// Largest angle from an untried point to its nearest tried one.
+fn widest_gap(cover: &DirectionCover, tried: &[usize]) -> f64 {
+    let points = cover.cover();
+    (0..points.len())
+        .filter(|point| !tried.contains(point))
+        .map(|point| {
+            tried
+                .iter()
+                .map(|&other| {
+                    let u = points[point];
+                    let v = points[other];
+                    (u[0] * v[0] + u[1] * v[1] + u[2] * v[2])
+                        .clamp(-1.0, 1.0)
+                        .acos()
+                })
+                .fold(std::f64::consts::PI, f64::min)
+        })
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn gap_counts_the_start_beside_one_product() {
+    let mut cover = DirectionCover::new(
+        &Bowl,
+        Array1::zeros(3),
+        None,
+        9,
+        DirectionCoverConfig::default(),
+    )
+    .unwrap();
+    bowl_connected(&mut cover, 0, 1.0);
+    let pick = cover.suggest().unwrap().unwrap();
+    let expected = 2.0 * widest_gap(&cover, &[0]);
+    assert_eq!(pick.policy, ArmPolicy::Gap);
+    assert!(
+        (pick.score - expected).abs() < 1e-12,
+        "score {} against start and one product {expected}",
+        pick.score
+    );
+}
+
+#[test]
+fn gap_counts_the_start_beside_two_products() {
+    let mut cover = DirectionCover::new(
+        &Bowl,
+        Array1::zeros(3),
+        None,
+        9,
+        DirectionCoverConfig::default(),
+    )
+    .unwrap();
+    bowl_connected(&mut cover, 0, 1.0);
+    bowl_connected(&mut cover, 1, 2.0);
+    let report = cover.coverage().unwrap();
+    assert_eq!(report.products.len(), 2);
+    let pick = report.next.unwrap();
+    let expected = 3.0 * widest_gap(&cover, &[0, 1]);
+    assert!(
+        (pick.score - expected).abs() < 1e-12,
+        "score {} against start and two products {expected}",
+        pick.score
+    );
+}
+
 /// Müller-Brown in (x, y) plus a stiff harmonic z: one atom.
 struct MullerBrown;
 
@@ -493,7 +571,7 @@ fn muller_brown_low_saddles_are_recovered() {
         .with_minimum_rmsd_tol(1e-2);
     let mut chooser = DirectionCover::new(&MullerBrown, minimum, None, 1, config).unwrap();
     let report = chooser
-        .run(&MullerBrown, CoverBudget::default().with_max_arms(16))
+        .run(&MullerBrown, CoverBudget::default().with_max_arms(48))
         .unwrap();
     let mut lines = Vec::new();
     for record in &report.records {

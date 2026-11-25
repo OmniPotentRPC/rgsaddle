@@ -1109,13 +1109,13 @@ impl DirectionCover {
             .collect();
         near.sort_by(|a, b| a.0.total_cmp(&b.0));
         let gap = near[0].0;
-        let mut states: Vec<State> = Vec::new();
+        let mut states = vec![State::Start];
         for &(_, state) in near.iter().take(BOUNDARY_NEIGHBOURS) {
             if state != State::Unlabelled && !states.contains(&state) {
                 states.push(state);
             }
         }
-        gap * states.len().max(1) as f64
+        gap * states.len() as f64
     }
 
     fn barrier_model(&self) -> Option<BarrierModel> {
