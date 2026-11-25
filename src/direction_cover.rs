@@ -69,7 +69,8 @@
 //! [`ArmPolicy::ExpectedImprovement`] is the expected improvement of
 //! Jones, Schonlau and Welch (*J. Global Optim.* **1998**, *13*, 455,
 //! <https://doi.org/10.1023/A:1008306431147>) on the barrier, from a
-//! Gaussian process on each centre's sphere, times the gap fraction
+//! Gaussian process on each centre's sphere with a Gaussian kernel of
+//! the chordal distance, times the gap fraction
 //! \(\gamma/\pi\). [`ArmPolicy::Auto`] takes the expected improvement
 //! once two different barriers are known and the gap score before; the
 //! suggestion names the policy that produced it.
@@ -110,6 +111,8 @@ const COVER_STEP_MAX: f64 = 0.2;
 const COVER_STEP_SHRINK: f64 = 2.5;
 /// Tried directions whose products count toward a gap's boundary.
 const BOUNDARY_NEIGHBOURS: usize = 3;
+/// Diagonal of the barrier kernel matrix added per unit variance.
+const KERNEL_NUGGET: f64 = 1e-8;
 
 /// Which score orders the untried arms.
 #[non_exhaustive]
@@ -166,8 +169,10 @@ pub struct DirectionCoverConfig {
     pub minimum_rmsd_tol: f64,
     /// Score that orders the untried arms.
     pub policy: ArmPolicy,
-    /// Angular length scale of the expected-improvement kernel, in
-    /// radians. 0.6 by default.
+    /// Length scale of the expected-improvement kernel, a Gaussian of
+    /// the chordal distance between unit directions. The chord is the
+    /// angle in radians for small angles. 0.6 by default; any finite
+    /// positive value keeps the kernel positive definite.
     pub length_scale: f64,
     /// Margin subtracted from the best barrier in the expected
     /// improvement. Zero by default.
@@ -1043,7 +1048,9 @@ impl DirectionCover {
     /// # Errors
     ///
     /// [`SaddleError::Invalid`] for [`ArmPolicy::ExpectedImprovement`]
-    /// before two different barriers are recorded.
+    /// before two different barriers are recorded, and
+    /// [`SaddleError::Singular`] when the barrier kernel matrix of a
+    /// centre cannot be factored.
     pub fn suggest(&self) -> Result<Option<ArmSuggestion>, SaddleError> {
         Ok(self.suggest_batch(1)?.into_iter().next())
     }
@@ -1057,12 +1064,12 @@ impl DirectionCover {
     pub fn suggest_batch(&self, count: usize) -> Result<Vec<ArmSuggestion>, SaddleError> {
         let model = match self.config.policy {
             ArmPolicy::Gap => None,
-            ArmPolicy::ExpectedImprovement => Some(self.barrier_model().ok_or_else(|| {
+            ArmPolicy::ExpectedImprovement => Some(self.barrier_model()?.ok_or_else(|| {
                 SaddleError::Invalid(
                     "expected improvement needs two different recorded barriers".into(),
                 )
             })?),
-            ArmPolicy::Auto => self.barrier_model(),
+            ArmPolicy::Auto => self.barrier_model()?,
         };
         let mut tried = self.tried.clone();
         let mut done = self.done.clone();
@@ -1129,7 +1136,7 @@ impl DirectionCover {
         gap * states.len() as f64
     }
 
-    fn barrier_model(&self) -> Option<BarrierModel> {
+    fn barrier_model(&self) -> Result<Option<BarrierModel>, SaddleError> {
         let mut points = vec![Vec::new(); self.centres.len()];
         let mut values = Vec::new();
         for record in &self.records {
@@ -1140,25 +1147,25 @@ impl DirectionCover {
             }
         }
         if values.len() < 2 {
-            return None;
+            return Ok(None);
         }
         let mean = values.iter().sum::<f64>() / values.len() as f64;
         let variance =
             values.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (values.len() - 1) as f64;
         if !(variance > 0.0 && variance.is_finite()) {
-            return None;
+            return Ok(None);
         }
         let best = values.iter().copied().fold(f64::INFINITY, f64::min);
         let centres = points
             .into_iter()
             .map(|obs| CentreModel::fit(obs, mean, variance, self.config.length_scale))
-            .collect();
-        Some(BarrierModel {
+            .collect::<Result<_, _>>()?;
+        Ok(Some(BarrierModel {
             centres,
             mean,
             variance,
             target: best - self.config.ei_margin,
-        })
+        }))
     }
 
     /// Pick, run and record arms until the budget or the cover is spent.
@@ -1279,7 +1286,26 @@ struct CentreModel {
 }
 
 impl CentreModel {
-    fn fit(obs: Vec<([f64; 3], f64)>, mean: f64, variance: f64, length_scale: f64) -> Self {
+    /// Fit the barriers of one centre.
+    ///
+    /// The kernel matrix is positive semi-definite, so the nugget
+    /// [`KERNEL_NUGGET`] times the variance bounds its smallest
+    /// eigenvalue from below. Scaled to a unit diagonal, that bound is
+    /// about `KERNEL_NUGGET`, and Demmel's sufficient condition for
+    /// Cholesky in floating point, smallest eigenvalue above
+    /// \(n\gamma_{n+1} \approx n^2 u\) (Higham, *Accuracy and Stability of
+    /// Numerical Algorithms*, 2nd ed., Theorem 10.7), then holds for
+    /// fewer than 9000 tried directions on the centre.
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Singular`] when a pivot is not positive.
+    fn fit(
+        obs: Vec<([f64; 3], f64)>,
+        mean: f64,
+        variance: f64,
+        length_scale: f64,
+    ) -> Result<Self, SaddleError> {
         let n = obs.len();
         let points: Vec<[f64; 3]> = obs.iter().map(|(p, _)| *p).collect();
         let mut k = Array2::zeros((n, n));
@@ -1287,17 +1313,17 @@ impl CentreModel {
             for j in 0..n {
                 k[(i, j)] = variance * kernel(points[i], points[j], length_scale);
             }
-            k[(i, i)] += 1e-8 * variance;
+            k[(i, i)] += KERNEL_NUGGET * variance;
         }
-        let factor = cholesky(&k);
+        let factor = cholesky(&k)?;
         let residual = Array1::from_iter(obs.iter().map(|(_, y)| y - mean));
         let weights = cholesky_solve(&factor, &residual);
-        Self {
+        Ok(Self {
             points,
             weights,
             factor,
             length_scale,
-        }
+        })
     }
 }
 
@@ -1329,12 +1355,26 @@ impl BarrierModel {
     }
 }
 
+/// Gaussian of the chordal distance, \(\exp(-\lVert a-b\rVert^2/2\ell^2)\).
+///
+/// It is the Gaussian kernel of \(\mathbb{R}^3\) restricted to the unit
+/// sphere, so its Gram matrix on distinct directions is positive
+/// definite for every \(\ell > 0\). The Gaussian of the geodesic angle
+/// is not positive definite on \(S^2\) for long length scales (Feragen,
+/// Lauze and Hauberg, CVPR 2015). For small angles the chord is the
+/// angle.
 fn kernel(a: [f64; 3], b: [f64; 3], length_scale: f64) -> f64 {
-    let theta = angle(a, b);
-    (-0.5 * theta * theta / (length_scale * length_scale)).exp()
+    let chord2 = (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2);
+    (-0.5 * chord2 / (length_scale * length_scale)).exp()
 }
 
-fn cholesky(a: &Array2<f64>) -> Array2<f64> {
+/// Lower Cholesky factor of a symmetric positive definite matrix.
+///
+/// # Errors
+///
+/// [`SaddleError::Singular`] with the row of the first pivot that is not
+/// finite and positive.
+fn cholesky(a: &Array2<f64>) -> Result<Array2<f64>, SaddleError> {
     let n = a.nrows();
     let mut l = Array2::zeros((n, n));
     for i in 0..n {
@@ -1344,13 +1384,16 @@ fn cholesky(a: &Array2<f64>) -> Array2<f64> {
                 sum -= l[(i, k)] * l[(j, k)];
             }
             if i == j {
-                l[(i, i)] = sum.max(f64::MIN_POSITIVE).sqrt();
+                if !(sum.is_finite() && sum > 0.0) {
+                    return Err(SaddleError::Singular(i));
+                }
+                l[(i, i)] = sum.sqrt();
             } else {
                 l[(i, j)] = sum / l[(j, j)];
             }
         }
     }
-    l
+    Ok(l)
 }
 
 fn forward_substitute(l: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
@@ -1739,6 +1782,110 @@ mod tests {
             folded > octahedron + 0.5,
             "signed directions are not folded"
         );
+    }
+
+    /// Smallest pivot of an unguarded Cholesky factorization of `a`.
+    fn smallest_pivot(a: &Array2<f64>) -> f64 {
+        let n = a.nrows();
+        let mut l = Array2::<f64>::zeros((n, n));
+        let mut smallest = f64::INFINITY;
+        for i in 0..n {
+            for j in 0..=i {
+                let mut sum = a[(i, j)];
+                for k in 0..j {
+                    sum -= l[(i, k)] * l[(j, k)];
+                }
+                if i == j {
+                    smallest = smallest.min(sum);
+                    l[(i, i)] = sum.abs().sqrt();
+                } else {
+                    l[(i, j)] = sum / l[(j, j)];
+                }
+            }
+        }
+        smallest
+    }
+
+    fn cover_gram(points: &[[f64; 3]], length_scale: f64) -> Array2<f64> {
+        let n = points.len();
+        let mut k = Array2::zeros((n, n));
+        for i in 0..n {
+            for j in 0..n {
+                k[(i, j)] = kernel(points[i], points[j], length_scale);
+            }
+            k[(i, i)] += 1e-8;
+        }
+        k
+    }
+
+    #[test]
+    fn barrier_kernel_is_positive_definite_on_the_cover() {
+        let cover = sphere_cover(64, 400, 7);
+        let negative: Vec<(f64, f64)> = [0.1, 0.6, 1.0, 1.5, 2.0, 3.0, 10.0, 100.0]
+            .into_iter()
+            .map(|length_scale| {
+                (
+                    length_scale,
+                    smallest_pivot(&cover_gram(&cover, length_scale)),
+                )
+            })
+            .filter(|&(_, pivot)| pivot <= 0.0)
+            .collect();
+        assert!(
+            negative.is_empty(),
+            "(length scale, smallest Cholesky pivot): {negative:?}"
+        );
+    }
+
+    #[test]
+    fn barrier_posterior_interpolates_at_a_long_length_scale() {
+        let cover = sphere_cover(64, 400, 7);
+        let (seen, held_out) = cover.split_at(48);
+        let obs: Vec<([f64; 3], f64)> = seen
+            .iter()
+            .map(|&u| (u, 1.0 + 0.3 * u[2] + 0.1 * u[0] * u[1]))
+            .collect();
+        let values: Vec<f64> = obs.iter().map(|(_, y)| *y).collect();
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        let variance =
+            values.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (values.len() - 1) as f64;
+        let centre = CentreModel::fit(obs.clone(), mean, variance, 2.0).unwrap();
+        let cross = |u: [f64; 3]| {
+            Array1::from_iter(
+                centre
+                    .points
+                    .iter()
+                    .map(|&p| variance * kernel(u, p, centre.length_scale)),
+            )
+        };
+        let worst = obs
+            .iter()
+            .map(|&(u, y)| (mean + cross(u).dot(&centre.weights) - y).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            worst < 1e-3 * variance.sqrt(),
+            "posterior mean misses an observed barrier by {worst}"
+        );
+        for &u in held_out {
+            let v = forward_substitute(&centre.factor, &cross(u));
+            let posterior = variance - v.dot(&v);
+            assert!(
+                posterior > 0.0 && posterior <= variance,
+                "posterior variance {posterior} outside (0, {variance}] at {u:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cholesky_refuses_an_indefinite_matrix() {
+        let indefinite = ndarray::array![[1.0, 2.0], [2.0, 1.0]];
+        assert!(matches!(
+            cholesky(&indefinite),
+            Err(SaddleError::Singular(1))
+        ));
+        let definite = ndarray::array![[4.0, 2.0], [2.0, 3.0]];
+        let l = cholesky(&definite).unwrap();
+        assert!((l.dot(&l.t()) - &definite).iter().all(|e| e.abs() < 1e-12));
     }
 
     #[test]
