@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 65u
+#define RGSADDLE_ABI_MINOR 66u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1243,24 +1243,24 @@ rgsaddle_status_t rgsaddle_idpp_path(int64_t n_images, int64_t n_atoms,
                                      double max_move, double *out);
 
 /**
- * AutoNEB flag bit 0. The climb stage reflects the
+ * AutoNEB flag bit 0, ABI minor 66. The climb stage reflects the
  * climbing image. Clear to stop after the insertions.
  */
 #define RGSADDLE_AUTONEB_CLIMB (1ull << 0)
 /**
- * AutoNEB flag bit 1. New images are relaxed on the
+ * AutoNEB flag bit 1, ABI minor 66. New images are relaxed on the
  * image-dependent pair potential. Clear for a straight minimum-image
  * midpoint.
  */
 #define RGSADDLE_AUTONEB_IDPP (1ull << 1)
 /**
- * AutoNEB flag bit 2. The window keeps the mean
+ * AutoNEB flag bit 2, ABI minor 66. The window keeps the mean
  * Cartesian force. Clear removes it, as the band does by default.
  */
 #define RGSADDLE_AUTONEB_KEEP_TRANSLATION (1ull << 2)
 
 /**
- * Run-to-completion AutoNEB.
+ * Run-to-completion AutoNEB, ABI minor 66.
  *
  * Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016).
  * The host supplies the endpoints and any intermediate guesses in

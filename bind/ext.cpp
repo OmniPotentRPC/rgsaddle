@@ -2355,7 +2355,7 @@ NB_MODULE(_core, m) {
               "remove_translation: bool = False, space_energy_ratio: float = 0.5, max_move: float = 0.2, "
               "idpp: bool = False, cell: numpy.typing.NDArray[numpy.float64] | None = None, "
               "fixed: numpy.typing.NDArray[numpy.uint8] | None = None) -> AutonebReport"),
-      "Run AutoNEB to completion. positions is (n_init >= 2, 3N). "
+      "Run AutoNEB to completion (ABI minor 66). positions is (n_init >= 2, 3N). "
       "surface(x) receives (rows, 3N) and returns (energies, gradients). One row is one force call. "
       "The search stays on the calling thread.");
 
