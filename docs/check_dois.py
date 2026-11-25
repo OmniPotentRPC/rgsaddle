@@ -6,6 +6,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import subprocess
 import sys
 import time
 import unicodedata
@@ -17,7 +18,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 USER_AGENT = "rgsaddle-documentation-link-check/0.6 (mailto:rgoswami@ieee.org)"
-DOI_URL = re.compile(r"https://doi\.org/([^\s>)\]]+)", re.IGNORECASE)
+DOI_URL = re.compile(
+    r"https://doi\.org/(10\.\d{4,9}/[-._;()/:A-Z0-9%]+)",
+    re.IGNORECASE,
+)
 DOI_TEXT = re.compile(
     r"\bdoi:(10\.[-._;()/:<>A-Z0-9]+)",
     re.IGNORECASE,
@@ -25,7 +29,34 @@ DOI_TEXT = re.compile(
 DOI_FIELD = re.compile(r"^\s*doi\s*=\s*[{\"']([^}\"']+)", re.IGNORECASE | re.MULTILINE)
 BIB_ENTRY = re.compile(r"(?ms)^@(\w+)\s*\{\s*([^,\s]+)\s*,(.*?)(?=^@\w+\s*\{|\Z)")
 BIB_FIELD = re.compile(r"(?m)^\s*([A-Za-z0-9_-]+)\s*=\s*")
-SUFFIXES = {".bib", ".h", ".md", ".org", ".rs"}
+DOCUMENTATION_SUFFIXES = {
+    ".adoc",
+    ".asciidoc",
+    ".bib",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".csv",
+    ".h",
+    ".hpp",
+    ".html",
+    ".json",
+    ".lean",
+    ".md",
+    ".mdx",
+    ".org",
+    ".py",
+    ".pyi",
+    ".rs",
+    ".rst",
+    ".sh",
+    ".sollya",
+    ".tex",
+    ".toml",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
 
 LATEX_DROP_MACROS = re.compile(
     r"\\(?:"
@@ -166,13 +197,34 @@ def parse_bib_entries(path: Path) -> list[tuple[str, dict[str, str]]]:
     return entries
 
 
+def tracked_documentation_files() -> list[Path]:
+    """Return tracked files whose extensions can contain documentation."""
+    output = subprocess.check_output(
+        ["git", "ls-files", "-z"],
+        cwd=ROOT,
+    )
+    return sorted(
+        ROOT / raw.decode("utf-8")
+        for raw in output.split(b"\0")
+        if raw and Path(raw.decode("utf-8")).suffix.lower() in DOCUMENTATION_SUFFIXES
+    )
+
+
 def bib_files() -> list[Path]:
     """Return tracked BibTeX files under `docs/`."""
-    return sorted(
+    return [
         path
-        for path in (ROOT / "docs").rglob("*.bib")
-        if path.is_file() and "build" not in path.parts
-    )
+        for path in tracked_documentation_files()
+        if path.suffix.lower() == ".bib" and path.is_relative_to(ROOT / "docs")
+    ]
+
+
+def normalize_doi_url(raw: str) -> str:
+    """Decode a DOI URL target and remove surrounding prose punctuation."""
+    doi = urllib.parse.unquote(raw).rstrip(".,;")
+    while doi.endswith(")") and doi.count(")") > doi.count("("):
+        doi = doi[:-1]
+    return doi
 
 
 def cited_dois(only_bibs: list[Path] | None = None) -> dict[str, list[str]]:
@@ -181,23 +233,10 @@ def cited_dois(only_bibs: list[Path] | None = None) -> dict[str, list[str]]:
     if only_bibs is not None:
         files = only_bibs
     else:
-        roots = [ROOT / "README.md", ROOT / "docs", ROOT / "include", ROOT / "src"]
-        files = [roots[0]]
-        for directory in roots[1:]:
-            files.extend(
-                path
-                for path in directory.rglob("*")
-                if path.is_file()
-                and path.suffix in SUFFIXES
-                and "build" not in path.parts
-                and (path.suffix == ".bib" or "source" not in path.parts[:-1])
-            )
+        files = tracked_documentation_files()
     for path in files:
         text = path.read_text(encoding="utf-8")
-        url_dois = [
-            urllib.parse.unquote(match.group(1)).rstrip(".,;")
-            for match in DOI_URL.finditer(text)
-        ]
+        url_dois = [normalize_doi_url(match.group(1)) for match in DOI_URL.finditer(text)]
         without_urls = DOI_URL.sub("", text)
         text_dois = [
             match.group(1).rstrip(".,;:)")
