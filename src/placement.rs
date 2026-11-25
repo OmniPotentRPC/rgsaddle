@@ -103,9 +103,9 @@ impl Fold {
             return out;
         }
         let mut s = self.fractional(d);
-        for ax in 0..3 {
-            if self.periodic[ax] {
-                s[ax] -= shift(s[ax]);
+        for (value, &periodic) in s.iter_mut().zip(&self.periodic) {
+            if periodic {
+                *value -= shift(*value);
             }
         }
         self.cartesian(s)

@@ -99,10 +99,10 @@ fn the_nearer_dumbbell_atom_is_the_one_that_moves() {
     };
     let other = movers.iter().copied().find(|&m| m != moved).unwrap();
     assert!(fold(atoms[moved]) < fold(atoms[other]));
-    for atom in 0..atoms.len() {
+    for (atom, row) in atoms.iter().enumerate() {
         if atom != moved {
-            for ax in 0..3 {
-                assert_eq!(placed.positions[3 * atom + ax], atoms[atom][ax]);
+            for (ax, &value) in row.iter().enumerate() {
+                assert_eq!(placed.positions[3 * atom + ax], value);
             }
         }
     }
@@ -114,8 +114,8 @@ fn a_push_past_a_hop_saddle_lands_beyond_the_midpoint() {
     let reactant = flat(&sites);
     let mut saddle_rows = sites.clone();
     let hop = [A0 / 4.0, A0 / 4.0, 0.0];
-    for ax in 0..3 {
-        saddle_rows[1][ax] += hop[ax];
+    for (value, step) in saddle_rows[1].iter_mut().zip(hop) {
+        *value += step;
     }
     let saddle = flat(&saddle_rows);
     let pushed = push_past(reactant.view(), saddle.view(), cell(), [true; 3], 0.5).unwrap();
