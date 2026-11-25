@@ -186,7 +186,11 @@ pub struct TricsReport {
     pub path: Array2<f64>,
     /// Overlapping diagnostic segments.
     pub segments: Vec<TricsSegment>,
-    /// Endpoint splice iterations. Zero means one system covered the path.
+    /// Endpoint splice iterations that interpolated the segments.
+    ///
+    /// Zero means no segment was spliced: either one system covered
+    /// the path, or every segment holds only its two endpoints (three
+    /// images split in two), so the initial path is returned as given.
     pub splice_iterations: usize,
 }
 
@@ -1145,6 +1149,16 @@ fn splice_path(
     mut segments: Vec<TricsSegment>,
     config: &TricsConfig,
 ) -> Result<TricsReport, SaddleError> {
+    if segments
+        .iter()
+        .all(|segment| segment.end - segment.start < 2)
+    {
+        return Ok(TricsReport {
+            path: initial.to_owned(),
+            segments,
+            splice_iterations: 0,
+        });
+    }
     let mut endpoints: Vec<[Array1<f64>; 2]> = segments
         .iter()
         .map(|segment| {
@@ -2788,6 +2802,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn three_images_in_two_segments_report_no_splice() {
+        let angles = [0.0_f64, 30.0, 60.0];
+        let mut initial = Array2::zeros((angles.len(), 9));
+        for (image, degrees) in angles.into_iter().enumerate() {
+            let (sine, cosine) = degrees.to_radians().sin_cos();
+            initial
+                .row_mut(image)
+                .assign(&array![-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, cosine, sine, 0.0]);
+        }
+        let config = TricsConfig::default().with_diagnostic_threshold(0);
+        let report = trics_path(initial.view(), &config).unwrap();
+        assert_eq!(report.segments.len(), 2);
+        assert_eq!(report.splice_iterations, 0);
+        assert_eq!(report.path, initial);
     }
 
     #[test]
