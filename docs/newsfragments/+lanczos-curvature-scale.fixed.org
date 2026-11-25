@@ -1,0 +1,4 @@
+A Lanczos Ritz value near zero is now measured against the curvature scale of the estimate, the largest Hessian action norm it has formed, instead of an absolute threshold.
+When the Ritz value has no magnitude of its own, the residual stop, the torque window, the relative change of the Ritz value, and the first-product early return divide by that scale.
+The Krylov breakdown test is relative to the same scale.
+Multiplying the Hessian by any factor, as a change of energy or length units does, leaves every Lanczos stop and the returned mode unchanged.
