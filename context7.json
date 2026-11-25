@@ -1,0 +1,40 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "rgsaddle",
+  "description": "Band (NEB) and minimum-mode saddle searches in Rust over rgmin steppers.",
+  "folders": [
+    "docs/orgmode",
+    "examples",
+    "include",
+    "python"
+  ],
+  "excludeFolders": [
+    "docs/source",
+    "docs/build",
+    "docs/newsfragments",
+    "newsfragments",
+    "changelog.d",
+    "benches",
+    "benchmarks",
+    "bench",
+    "benchflow",
+    "subprojects",
+    "third_party",
+    "tests",
+    "scripts",
+    "ci",
+    ".github",
+    "branding",
+    ".pixi",
+    "formal",
+    "validation"
+  ],
+  "excludeFiles": [
+    "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
+    "LICENSE"
+  ],
+  "rules": [
+    "Band and minimum-mode searches take one rgmin Solver step; the host owns the loop."
+  ]
+}
