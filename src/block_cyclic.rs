@@ -716,17 +716,28 @@ mod tests {
         let mut diag = vec![vec![1.0, 0.0, 0.0, 1.0]; 3];
         diag[1].pop();
         let err = logdet_cyclic_blocks(&diag, 2, 0.2).expect_err("ragged");
-        assert!(matches!(err, SaddleError::Shape(_)));
+        assert!(
+            matches!(err, SaddleError::Shape(ref msg) if msg.contains("cyclic logdet expected")),
+            "{err}"
+        );
         diag[1] = vec![1.0, f64::NAN, 0.0, 1.0];
         let err = logdet_cyclic_strict(&diag, 2, 0.2).expect_err("nan");
-        assert!(matches!(err, SaddleError::NonFinite(_)));
+        assert!(
+            matches!(err, SaddleError::NonFinite("cyclic logdet")),
+            "{err}"
+        );
         let err = factor_cyclic(&sample_blocks(2, 3).0, 0, 0.2, 0.0).expect_err("empty");
         assert!(matches!(err, SaddleError::Invalid(_)));
         let (diag, _) = sample_blocks(2, 3);
         let err = logdet_cyclic_strict(&diag, 2, f64::NAN).expect_err("nan spring");
-        assert!(matches!(err, SaddleError::NonFinite(_)));
+        assert!(matches!(
+            err,
+            SaddleError::NonFinite("cyclic logdet spring")
+        ));
         let err = factor_cyclic(&diag, 2, 0.2, f64::INFINITY).expect_err("infinite shift");
-        assert!(matches!(err, SaddleError::NonFinite(_)));
+        assert!(matches!(err, SaddleError::NonFinite("cyclic factor")));
+        let err = factor_cyclic(&sample_blocks(2, 2).0, 2, 0.2, 0.0).expect_err("two beads");
+        assert!(matches!(err, SaddleError::Invalid(_)));
         let mut vectors = Array2::zeros((1, 1));
         vectors[(0, 0)] = f64::NAN;
         let err = gemm_symmetric_inverse(&vectors, &[1.0]).expect_err("nan vector");
@@ -757,6 +768,10 @@ mod tests {
         assert!(!refine_triggered(0.0, 1.0));
         // `max(1, ‖b‖)` keeps a tiny right-hand side from lowering the bar.
         assert!(!refine_triggered(1e-12, 1e-8));
+        // A right-hand scale above 1 distinguishes multiplication from division.
+        assert!(!refine_triggered(2e-11, 2.0));
+        assert!(refine_triggered(2e-11 * 1.0000001, 2.0));
+        assert!(refine_triggered(1e-10, 2.0));
         assert_eq!(SOLVE_REFINE_TOLERANCE, 1e-11);
 
         // A zero spring leaves each Hilbert block independent, so the explicit
@@ -799,6 +814,22 @@ mod tests {
         let easy_report = easy.solve_report(&b).expect("easy solve");
         assert_eq!(easy_report.corrections, 0);
         assert!(easy_report.residual < SOLVE_REFINE_TOLERANCE);
+
+        let (diag, spring) = sample_blocks(3, 4);
+        let tau = 0.37;
+        let shifted = factor_cyclic(&diag, 3, spring, tau).expect("shifted factor");
+        let mut blocks = diag.clone();
+        for block in &mut blocks {
+            for i in 0..3 {
+                block[i * 3 + i] += tau;
+            }
+        }
+        let x_shift: Vec<f64> = (0..12).map(|i| (i as f64) * 0.05 - 0.2).collect();
+        let rhs = cyclic_matvec(&blocks, 3, spring, &x_shift);
+        let solved = shifted.solve(&rhs).expect("shifted solve");
+        for (got, want) in solved.iter().zip(&x_shift) {
+            assert!((got - want).abs() < 1e-8, "{got} vs {want}");
+        }
     }
 
     #[test]
@@ -817,5 +848,68 @@ mod tests {
         let (_, n_neg) = dense_inertia(&dense_cyclic(&diag, n, spring));
         assert_eq!(got.n_negative, n_neg);
         assert_eq!(n_neg, 1);
+    }
+
+    #[test]
+    fn pivot_choice_odd_ring_and_closing_index_are_pinned() {
+        let eye = vec![2.0, 0.0, 0.0, 2.0];
+        let ill = vec![1.0, 0.0, 0.0, 50.0];
+        let zero = vec![0.0; 4];
+        assert!((pivot_quality(&eye, 2).expect("eye") - 1.0).abs() < 1e-12);
+        assert!((pivot_quality(&ill, 2).expect("ill") - 0.02).abs() < 1e-12);
+        assert_eq!(pivot_quality(&zero, 2).expect("zero"), 0.0);
+        assert_eq!(
+            best_pivot_index(&[ill.clone(), eye.clone(), ill.clone()], 2).expect("later"),
+            1
+        );
+        assert_eq!(
+            best_pivot_index(&[eye.clone(), eye.clone(), ill.clone()], 2).expect("tie"),
+            0
+        );
+
+        // The best-conditioned block is negative, so the open chain's first
+        // complement contributes both negative eigenvalues.
+        let mut leading = vec![eye.clone(), ill.clone(), eye.clone()];
+        leading[0] = vec![-3.0, 0.0, 0.0, -3.0];
+        assert_eq!(best_pivot_index(&leading, 2).expect("leading"), 0);
+        let leading_inertia = logdet_cyclic_strict(&leading, 2, 0.0).expect("leading inertia");
+        assert_eq!(leading_inertia.n_negative, 2);
+        let want_log = 2.0 * 3.0_f64.ln() + 50.0_f64.ln() + 2.0 * 2.0_f64.ln();
+        assert!(
+            (leading_inertia.log_abs_det - want_log).abs() < 1e-8,
+            "{} vs {want_log}",
+            leading_inertia.log_abs_det
+        );
+
+        // The worst-conditioned block is the closing one and carries the sign.
+        let mut closing = vec![eye.clone(), eye.clone(), ill.clone()];
+        closing[2] = vec![-5.0, 0.0, 0.0, -0.05];
+        assert_eq!(best_pivot_index(&closing, 2).expect("closing pivot"), 0);
+        let closing_inertia = logdet_cyclic_strict(&closing, 2, 0.0).expect("closing inertia");
+        assert_eq!(closing_inertia.n_negative, 2);
+
+        let mut singular = vec![eye.clone(); 4];
+        singular[3] = zero;
+        let err = factor_cyclic(&singular, 2, 0.0, 0.0).expect_err("factor index");
+        assert!(matches!(err, SaddleError::Singular(3)), "{err}");
+        let err = logdet_cyclic_strict(&singular, 2, 0.0).expect_err("logdet index");
+        assert!(matches!(err, SaddleError::Singular(3)), "{err}");
+
+        let mut near = vec![eye; 3];
+        near[1] = vec![1.0, 0.0, 0.0, 1e-16];
+        let err = logdet_cyclic_strict(&near, 2, 0.0).expect_err("near zero");
+        assert!(matches!(err, SaddleError::Singular(_)), "{err}");
+
+        let n = 2usize;
+        let p = 5usize;
+        let (diag, spring) = sample_blocks(n, p);
+        let factor = factor_cyclic(&diag, n, spring, 0.0).expect("odd factor");
+        let x_true: Vec<f64> = (0..p * n).map(|i| (i as f64) * 0.13 - 0.4).collect();
+        let rhs = cyclic_matvec(&diag, n, spring, &x_true);
+        let report = factor.solve_report(&rhs).expect("odd solve");
+        assert_eq!(report.corrections, 0, "residual {}", report.residual);
+        for (got, want) in report.solution.iter().zip(&x_true) {
+            assert!((got - want).abs() < 1e-8, "{got} vs {want}");
+        }
     }
 }
