@@ -13,19 +13,24 @@
 //!   `saddle + f * (saddle - reactant)`, the push that activation-relaxation
 //!   searches make before they minimize. A factor of `0` returns the saddle.
 //!
-//! Every displacement goes through one minimum-image fold. An axis is folded
-//! only when `periodic` says so, and a displacement that lies exactly half a
-//! cell away keeps its sign: the fold rounds half toward zero. The `cell`
-//! rows are the lattice vectors, and an axis that is not periodic still has
-//! to make the cell invertible, but its length is never used.
+//! Every displacement goes through one minimum-image fold, the shortest
+//! image under whole periodic lattice vectors. An axis is folded only when
+//! `periodic` says so. In an orthogonal cell the fold rounds each periodic
+//! fraction half toward zero, so a displacement that lies exactly half a
+//! cell away keeps its sign. In a sheared or skewed cell rounding the
+//! fractions is not the minimum image, and the neighbouring images are
+//! searched. The `cell` rows are the lattice vectors, and an axis that is
+//! not periodic still has to make the cell invertible, but its length is
+//! never used.
 //!
 //! Positions, sites and the cell are in Angstrom, and positions and sites are
 //! flat atom-major `[x0, y0, z0, x1, ...]`.
 
 use ndarray::{Array1, ArrayView1};
 
-use crate::cell_log::{M3, m3_det, m3_inv};
+use crate::cell_log::M3;
 use crate::error::SaddleError;
+use crate::occupancy::Images;
 
 /// Atoms placed by [`translate_onto_sites`].
 #[derive(Clone, Debug, PartialEq)]
@@ -39,88 +44,24 @@ pub struct SitePlacement {
 }
 
 /// Minimum-image fold of a displacement in one cell.
-struct Fold {
-    cell: M3,
-    inv: M3,
-    diagonal: bool,
-    periodic: [bool; 3],
-}
+struct Fold(Images);
 
 impl Fold {
     fn new(cell: M3, periodic: [bool; 3]) -> Result<Self, SaddleError> {
         if cell.iter().flatten().any(|v| !v.is_finite()) {
             return Err(SaddleError::NonFinite("placement cell"));
         }
-        let volume = m3_det(cell).abs();
-        if !(volume.is_finite() && volume > 0.0) {
-            return Err(SaddleError::Invalid("the cell must have a volume".into()));
-        }
-        let diagonal = (0..3).all(|i| (0..3).all(|j| i == j || cell[i][j] == 0.0));
-        Ok(Self {
-            cell,
-            inv: m3_inv(cell)?,
-            diagonal,
-            periodic,
-        })
+        Ok(Self(Images::new(cell, periodic)?))
     }
 
-    fn fractional(&self, d: [f64; 3]) -> [f64; 3] {
-        if self.diagonal {
-            return [
-                d[0] / self.cell[0][0],
-                d[1] / self.cell[1][1],
-                d[2] / self.cell[2][2],
-            ];
-        }
-        let mut s = [0.0; 3];
-        for (i, value) in s.iter_mut().enumerate() {
-            *value = d[0] * self.inv[0][i] + d[1] * self.inv[1][i] + d[2] * self.inv[2][i];
-        }
-        s
-    }
-
-    fn cartesian(&self, s: [f64; 3]) -> [f64; 3] {
-        let mut d = [0.0; 3];
-        for (j, value) in d.iter_mut().enumerate() {
-            *value = s[0] * self.cell[0][j] + s[1] * self.cell[1][j] + s[2] * self.cell[2][j];
-        }
-        d
-    }
-
-    /// `d` moved by whole lattice vectors until each periodic fraction lies in
-    /// `[-1/2, 1/2]`. A fraction exactly at `±1/2` is left alone.
     fn displacement(&self, d: [f64; 3]) -> [f64; 3] {
-        if !self.periodic.iter().any(|&p| p) {
-            return d;
-        }
-        if self.diagonal {
-            let mut out = d;
-            for ax in 0..3 {
-                if self.periodic[ax] {
-                    out[ax] = d[ax] - self.cell[ax][ax] * shift(d[ax] / self.cell[ax][ax]);
-                }
-            }
-            return out;
-        }
-        let mut s = self.fractional(d);
-        for (value, &periodic) in s.iter_mut().zip(&self.periodic) {
-            if periodic {
-                *value -= shift(*value);
-            }
-        }
-        self.cartesian(s)
+        self.0.displacement(d)
     }
 
     fn distance(&self, a: [f64; 3], b: [f64; 3]) -> f64 {
         let d = self.displacement([b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
         (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
     }
-}
-
-/// Whole cells to subtract from the fraction `s`, rounding half toward zero.
-fn shift(s: f64) -> f64 {
-    let steps = (s.abs() - 0.5).ceil().max(0.0);
-    steps.copysign(s)
 }
 
 fn point(flat: ArrayView1<f64>, index: usize) -> [f64; 3] {

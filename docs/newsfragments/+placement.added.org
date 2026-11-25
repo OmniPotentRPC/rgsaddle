@@ -1,4 +1,4 @@
 ~translate_onto_sites~ puts chosen atoms onto a list of sites, nearest pair first, each by its minimum-image displacement, and returns the geometry with the pairs it took in ~SitePlacement~.
 ~push_past~ returns ~saddle + factor * (saddle - reactant)~ with the displacement of every atom folded to its minimum image, the push that activation-relaxation searches make before they minimize.
-Both take the lattice as one vector per row and a ~periodic~ mask for the axes that are folded; a displacement of exactly half a cell keeps its sign.
+Both take the lattice as one vector per row and a ~periodic~ mask for the axes that are folded, and fold to the shortest image, searching the neighbouring images when the cell is not orthogonal; in an orthogonal cell a displacement of exactly half a cell keeps its sign.
 Neither relaxes anything or knows what a defect is.
