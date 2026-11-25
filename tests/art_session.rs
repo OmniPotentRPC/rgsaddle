@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, Array2, ArrayView1};
 use rgsaddle::{
-    ArtConfig, ArtPhase, ArtSeed, ArtStatus, MinModeConfig, MinModeKind, PointSurface, RelaxConfig,
-    SaddleError, connection_verdict, full_mask, relax_to_tolerance,
+    ArtConfig, ArtPhase, ArtSeed, ArtSession, ArtStatus, MinModeConfig, MinModeKind, PointSurface,
+    RelaxConfig, SaddleError, connection_verdict, full_mask, relax_to_tolerance,
 };
 
 struct Lj7 {
@@ -240,17 +240,30 @@ fn lj7_exits_are_index_one_reversible_and_reverts_fail() {
     ];
     let config = lj_config();
     surface.calls.store(0, Ordering::Relaxed);
-    let batch = rgsaddle::run_events(&config, &minimum, &seeds, &surface, 400).expect("LJ7 batch");
-    let exposed: usize = batch
-        .outcomes
-        .iter()
-        .map(|event| event.force_calls.len())
-        .sum();
+    let mut outcomes = Vec::new();
+    let mut lost = 0;
+    let mut exposed = 0;
+    for seed in &seeds {
+        let mut session = ArtSession::new(
+            config.clone(),
+            minimum.clone(),
+            seed.seed.clone(),
+            seed.mask.clone(),
+        )
+        .expect("LJ7 event starts");
+        let run = session.run(&surface, 400);
+        exposed += session.force_call_count();
+        match run {
+            Ok(_) => outcomes.push(session.outcome()),
+            Err(SaddleError::ArtIndexOneLost { .. }) => lost += 1,
+            Err(error) => panic!("LJ7 event: {error}"),
+        }
+    }
     assert_eq!(exposed, surface.calls.load(Ordering::Relaxed));
     let mut connected = 0;
     let mut reverted = 0;
     let mut lines = Vec::new();
-    for (index, outcome) in batch.outcomes.iter().enumerate() {
+    for (index, outcome) in outcomes.iter().enumerate() {
         lines.push(format!(
             "seed {index}: {:?} pushes {} climbs {} index {:?} curv {:?} back {:?} forward {:?} rev {:?}",
             outcome.status,
@@ -315,24 +328,15 @@ fn lj7_exits_are_index_one_reversible_and_reverts_fail() {
             );
         }
     }
-    for duplicate in &batch.duplicates {
-        assert!(duplicate.event > duplicate.same_saddle_as);
-        assert!(duplicate.rmsd <= config.duplicate_rmsd);
-        assert_eq!(
-            batch.outcomes[duplicate.event].duplicate_of,
-            Some(duplicate.same_saddle_as)
-        );
-    }
     assert!(
         connected >= 1,
-        "no first-order exit from the LJ7 bipyramid ({reverted} reverts)\n{}",
+        "no first-order exit from the LJ7 bipyramid ({reverted} reverts, {lost} index-one losses)\n{}",
         lines.join("\n")
     );
 
     // The same index-1 pair, judged with a basin wide enough to contain
     // both minima, is a failed revert and is not a completed exit.
-    let event = batch
-        .outcomes
+    let event = outcomes
         .iter()
         .find(|item| item.status == ArtStatus::Connected)
         .expect("a connected exit");

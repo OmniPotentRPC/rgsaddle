@@ -708,3 +708,146 @@ fn scaling_with_cluster_size() {
         );
     }
 }
+
+/// Quick linear-cost sanity comparison used by `NOTES.md`.
+/// `cargo test +1.88.0 --release --test direction_cover quick_direction_cover_sanity -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn quick_direction_cover_sanity() {
+    struct IndependentWells {
+        calls: AtomicUsize,
+    }
+
+    impl PointSurface for IndependentWells {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let mut energy = 0.0;
+            let mut gradient = Array1::zeros(x.len());
+            for atom in 0..x.len() / 3 {
+                let a = x[3 * atom] - 2.0 * atom as f64;
+                let b = x[3 * atom + 1];
+                let c = x[3 * atom + 2];
+                energy += 0.25 * (a * a - 1.0).powi(2) + 0.5 * (b * b + c * c);
+                gradient[3 * atom] = a * a * a - a;
+                gradient[3 * atom + 1] = b;
+                gradient[3 * atom + 2] = c;
+            }
+            Ok((energy, gradient))
+        }
+    }
+
+    fn config() -> DirectionCoverConfig {
+        let mode = MinModeConfig::default()
+            .with_kind(MinModeKind::Lanczos)
+            .with_saddle_check(None)
+            .with_krylov_dim(4)
+            .with_max_rotations(4)
+            .with_force_tol(0.02)
+            .with_max_move(0.1);
+        let relax = RelaxConfig::default()
+            .with_force_tol(0.02)
+            .with_max_steps(100)
+            .with_max_atom_move(0.1)
+            .with_initial_step(0.05);
+        DirectionCoverConfig::default()
+            .with_cover_points(16)
+            .with_kick_radius(0.0)
+            .with_art_max_steps(200)
+            .with_saddle_rmsd_tol(0.005)
+            .with_minimum_rmsd_tol(0.005)
+            .with_art(
+                ArtConfig::default()
+                    .with_mode(mode)
+                    .with_perpendicular(relax.clone())
+                    .with_quench(relax.with_force_tol(0.001))
+                    .with_push_length(0.8)
+                    .with_push_step(0.3)
+                    .with_max_pushes(12)
+                    .with_max_climbs(25)
+                    .with_push_over(0.25)
+                    .with_basin_rmsd(0.005)
+                    .with_duplicate_rmsd(0.005)
+                    .with_saddle(SaddleIndexCheck::default().with_max_actions(20)),
+            )
+    }
+
+    for atoms in [75, 500, 4_000] {
+        let arms = 12;
+        let mut minimum = Array1::zeros(3 * atoms);
+        for atom in 0..atoms {
+            minimum[3 * atom] = 2.0 * atom as f64 - 1.0;
+        }
+        let mut active = vec![false; atoms];
+        active[0] = true;
+        let surface = IndependentWells {
+            calls: AtomicUsize::new(0),
+        };
+        let mut cover =
+            DirectionCover::new(&surface, minimum.clone(), Some(&active), 19, config()).unwrap();
+        surface.calls.store(0, Ordering::Relaxed);
+        let started = Instant::now();
+        let report = cover
+            .run(&surface, CoverBudget::default().with_max_arms(arms))
+            .unwrap();
+        let cover_ms = 1e3 * started.elapsed().as_secs_f64() / report.records.len() as f64;
+        let left = report
+            .records
+            .iter()
+            .filter(|record| record.product.is_some())
+            .count();
+        let calls_per_saddle = if report.saddles.is_empty() {
+            f64::NAN
+        } else {
+            report.force_calls as f64 / report.saddles.len() as f64
+        };
+        surface.calls.store(0, Ordering::Relaxed);
+        let started = Instant::now();
+        let (returned, _) = soft_mode_returned_independent(&surface, &minimum, arms, 0.8);
+        let soft_calls = surface.calls.load(Ordering::Relaxed);
+        let soft_ms = 1e3 * started.elapsed().as_secs_f64() / arms as f64;
+        println!(
+            "{atoms} cover: left {left}/{} saddles {} calls/saddle {calls_per_saddle:.0} ms/arm {cover_ms:.3}; soft: left {:.0}/{arms} saddles 0 calls/saddle -- ms/arm {soft_ms:.3} calls {soft_calls}",
+            report.records.len(),
+            report.saddles.len(),
+            arms as f64 * (1.0 - returned),
+        );
+    }
+
+    fn soft_mode_returned_independent(
+        surface: &IndependentWells,
+        minimum: &Array1<f64>,
+        arms: usize,
+        length: f64,
+    ) -> (f64, usize) {
+        let mut back = 0;
+        for arm in 0..arms {
+            let mut seed = Array1::zeros(minimum.len());
+            seed[1 + arm % (minimum.len() - 1)] = 1.0;
+            let mut session = MinModeSession::new(
+                MinModeConfig::default()
+                    .with_kind(MinModeKind::Lanczos)
+                    .with_krylov_dim(4)
+                    .with_max_rotations(4),
+                minimum.clone(),
+                seed,
+            )
+            .unwrap();
+            let mode = session.estimate_mode(surface).unwrap().mode;
+            let landed = relax_to_tolerance(
+                surface,
+                minimum + &(&mode * length),
+                OPEN,
+                &quench_config().with_max_steps(100),
+            )
+            .unwrap();
+            let delta = &landed.positions - minimum;
+            if (delta.dot(&delta) / arms as f64).sqrt() < 0.02 {
+                back += 1;
+            }
+        }
+        (
+            back as f64 / arms as f64,
+            surface.calls.load(Ordering::Relaxed),
+        )
+    }
+}

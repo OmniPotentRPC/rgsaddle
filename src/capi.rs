@@ -561,6 +561,7 @@ pub(crate) fn status_of(err: &SaddleError) -> i32 {
         SaddleError::NonFinite(_) => RGSADDLE_NON_FINITE,
         SaddleError::Solver(_) | SaddleError::Singular(_) => RGSADDLE_SOLVER,
         SaddleError::Invalid(_) => RGSADDLE_INVALID_PARAMETER,
+        SaddleError::ArtIndexOneLost { .. } => RGSADDLE_SOLVER,
         SaddleError::Stalled(_) => RGSADDLE_STALLED,
         SaddleError::NotEquilibrated { .. } => RGSADDLE_NOT_EQUILIBRATED,
         SaddleError::InsufficientEffectiveSamples { .. } => RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES,
