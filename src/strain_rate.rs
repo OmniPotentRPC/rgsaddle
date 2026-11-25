@@ -146,12 +146,13 @@ impl Strain {
     }
 }
 
-/// Symmetric elastic dipole, in eV.
+/// Symmetric elastic dipole, in the caller's energy unit.
 ///
 /// The sign is Varvenne and Clouet's: the interaction energy in an applied
 /// strain is `-P : ε`. Build one with [`Self::from_stress`] or
 /// [`Self::from_forces`]. [`Self::from_tensor`] accepts a tensor that
-/// already uses that sign.
+/// already uses that sign. The energy unit must match associated barrier
+/// values.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ElasticDipole {
     tensor: M3,
@@ -162,8 +163,9 @@ impl ElasticDipole {
     ///
     /// `volume` is the cell volume. `defect` and `bulk` are Cauchy stresses
     /// of the defective cell and the perfect cell at the same homogeneous
-    /// strain. The bulk subtraction is the homogeneous-stress correction
-    /// after Eq. (8) of Varvenne and Clouet.
+    /// strain. The result uses the energy unit implied by volume times stress.
+    /// The bulk subtraction is the homogeneous-stress correction after Eq.
+    /// (8) of Varvenne and Clouet.
     pub fn from_stress(volume: f64, defect: M3, bulk: M3) -> Result<Self, SaddleError> {
         Ok(Self {
             tensor: elastic_dipole(volume, defect, bulk)?,
@@ -174,7 +176,8 @@ impl ElasticDipole {
     ///
     /// `P_ij = Σ_a (X_i^a F_j^a + X_j^a F_i^a) / 2`. The resultant and the
     /// torque must already vanish, as they do for Kanzaki forces of a
-    /// relaxed defect. Positions and forces are Cartesian.
+    /// relaxed defect. Positions and forces are Cartesian. The result uses
+    /// the energy unit implied by position times force.
     pub fn from_forces(positions: &[[f64; 3]], forces: &[[f64; 3]]) -> Result<Self, SaddleError> {
         if positions.len() != forces.len() {
             return Err(SaddleError::Shape(
@@ -223,7 +226,7 @@ impl ElasticDipole {
         Ok(Self { tensor })
     }
 
-    /// Symmetric 3×3 elastic-dipole tensor in eV.
+    /// Symmetric 3×3 elastic-dipole tensor in the caller's energy unit.
     pub fn tensor(self) -> M3 {
         self.tensor
     }
