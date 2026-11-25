@@ -547,3 +547,126 @@ fn force_dipole_matches_the_first_moment() {
     assert!((tensor[0][1] - 2.0).abs() < 1e-12);
     assert!((tensor[1][0] - 2.0).abs() < 1e-12);
 }
+
+#[test]
+fn weighted_dense_lanczos_and_slq_vineyard_prefactors_agree() {
+    use ndarray::{Array1, ArrayView1};
+    use rgsaddle::{
+        FdHessianAction, FiniteDifference, PointSurface, SaddleError, VineyardConfig,
+        mass_weight_atom_hessian, vineyard_prefactor, vineyard_prefactor_dense,
+        vineyard_prefactor_dense_matrices, vineyard_prefactor_lanczos, vineyard_prefactor_slq,
+        vineyard_prefactor_weighted,
+    };
+
+    struct QuadraticSurface {
+        stiffness: Vec<f64>,
+    }
+
+    impl PointSurface for QuadraticSurface {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let mut e = 0.0;
+            let mut g = Array1::zeros(x.len());
+            for (i, (&xi, &ki)) in x.iter().zip(&self.stiffness).enumerate() {
+                e += 0.5 * ki * xi * xi;
+                g[i] = ki * xi;
+            }
+            Ok((e, g))
+        }
+    }
+
+    let k_min = vec![2.0, 3.5, 5.0, 7.0, 9.0, 11.0];
+    let k_sad = vec![-1.5, 3.5, 5.0, 7.0, 9.0, 11.0];
+    let atom_masses = [63.546, 26.9815385];
+    let dof_masses = [
+        atom_masses[0],
+        atom_masses[0],
+        atom_masses[0],
+        atom_masses[1],
+        atom_masses[1],
+        atom_masses[1],
+    ];
+
+    let mut h_min = Array2::zeros((6, 6));
+    let mut h_sad = Array2::zeros((6, 6));
+    for i in 0..6 {
+        h_min[(i, i)] = k_min[i];
+        h_sad[(i, i)] = k_sad[i];
+    }
+
+    let d_min = mass_weight_atom_hessian(h_min.view(), &atom_masses).unwrap();
+    let d_sad = mass_weight_atom_hessian(h_sad.view(), &atom_masses).unwrap();
+    assert!((d_min[(0, 0)] - 2.0 / 63.546).abs() < 1e-12);
+    assert!((d_sad[(3, 3)] - 7.0 / 26.9815385).abs() < 1e-12);
+
+    let cfg = VineyardConfig::default();
+    let r_mat =
+        vineyard_prefactor_dense_matrices(h_min.view(), h_sad.view(), &dof_masses, &cfg).unwrap();
+
+    let min_surf = QuadraticSurface {
+        stiffness: k_min.clone(),
+    };
+    let sad_surf = QuadraticSurface {
+        stiffness: k_sad.clone(),
+    };
+    let x0 = Array1::zeros(6);
+    let r_dense = vineyard_prefactor_dense(
+        &min_surf,
+        x0.view(),
+        &sad_surf,
+        x0.view(),
+        &dof_masses,
+        &cfg,
+    )
+    .unwrap();
+    assert!((r_dense.prefactor_hz - r_mat.prefactor_hz).abs() / r_mat.prefactor_hz < 1e-8);
+    assert_eq!(r_dense.evaluations, 2 * 12);
+
+    let mut min_op =
+        rgsaddle::fd_hessian_from_surface(&min_surf, x0.clone(), 1.0e-3, FiniteDifference::Central)
+            .unwrap()
+            .with_masses_amu(&dof_masses)
+            .unwrap();
+    let mut sad_op =
+        rgsaddle::fd_hessian_from_surface(&sad_surf, x0.clone(), 1.0e-3, FiniteDifference::Central)
+            .unwrap()
+            .with_masses_amu(&dof_masses)
+            .unwrap();
+    let r_lanczos =
+        vineyard_prefactor_lanczos(&mut min_op, &mut sad_op, 1.0e-8, 1.0e-4, 1.0e-10, 17).unwrap();
+    assert!((r_lanczos.prefactor_hz - r_mat.prefactor_hz).abs() / r_mat.prefactor_hz < 1e-8);
+
+    let mut min_op_slq = FdHessianAction::new(
+        x0.clone(),
+        |x| Ok(&Array1::from_vec(k_min.clone()) * &x),
+        1.0e-3,
+        FiniteDifference::Central,
+    )
+    .unwrap()
+    .with_masses_amu(&dof_masses)
+    .unwrap();
+    let sad_op_slq = FdHessianAction::new(
+        x0,
+        |x| Ok(&Array1::from_vec(k_sad.clone()) * &x),
+        1.0e-3,
+        FiniteDifference::Central,
+    )
+    .unwrap()
+    .with_masses_amu(&dof_masses)
+    .unwrap();
+    let r_slq =
+        vineyard_prefactor_slq(&mut min_op_slq, sad_op_slq, 8, 6, 9, 12, 1.0e-8, 1.0e-4).unwrap();
+    assert!((r_slq.prefactor_hz - r_mat.prefactor_hz).abs() / r_mat.prefactor_hz < 1e-5);
+
+    // Uniform mass matches legacy scalar-mass helper.
+    let uniform = [63.546; 6];
+    let r_uni =
+        vineyard_prefactor_dense_matrices(h_min.view(), h_sad.view(), &uniform, &cfg).unwrap();
+    let legacy = vineyard_prefactor(&k_min, &k_sad[1..], 63.546).unwrap();
+    assert!((r_uni.prefactor_hz - legacy).abs() / legacy < 1e-12);
+    let weighted = vineyard_prefactor_weighted(
+        &k_min.iter().map(|v| v / 63.546).collect::<Vec<_>>(),
+        &k_sad[1..].iter().map(|v| v / 63.546).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert!((weighted - legacy).abs() / legacy < 1e-12);
+}

@@ -280,9 +280,12 @@ pub use stencil::{
 pub use strain_rate::{
     BOLTZMANN_EV_PER_K, CurvatureBound, ElasticDipole, Estimate, HopVariant, LINEAR_FOLD_EV,
     NEGATIVE_CURVATURE, SaddleSeed, SearchReason, Strain, StrainResponse, TranslationalSplit,
-    Trust, TrustPolicy, activation_volume, angular_scale_rad_s, arrhenius,
-    compliance_from_stiffness, cubic_rotations, double_dot, elastic_dipole, rotation_x,
+    Trust, TrustPolicy, VineyardConfig, VineyardReport, activation_volume, angular_scale_rad_s,
+    arrhenius, compliance_from_stiffness, cubic_rotations, dense_hessian, double_dot,
+    elastic_dipole, mass_weight_atom_hessian, mass_weight_hessian, rotation_x,
     split_translational_modes, symmetrize, transform_tensor, vineyard_prefactor,
+    vineyard_prefactor_dense, vineyard_prefactor_dense_matrices, vineyard_prefactor_from_spectra,
+    vineyard_prefactor_lanczos, vineyard_prefactor_slq, vineyard_prefactor_weighted,
 };
 pub use tangent::TangentKind;
 
