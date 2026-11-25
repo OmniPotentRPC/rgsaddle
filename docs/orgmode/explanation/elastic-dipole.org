@@ -13,7 +13,7 @@ P = -V (sigma_defect - sigma_bulk).
 The potential is not part of these types.  A host evaluates the relaxed bulk and defect configurations with rgpot, obtains stress (or homogeneous-strain derivatives) from rgpot strain requests, and passes the results to rgsaddle.  Atomic geometry remains in =linkcell::Cell=; its re-exported minimage displacement is used for the defect separation.  No second neighbour list or minimum-image convention is hidden in the elastic layer.
 
 * Anisotropic Green function
-=ElasticConstants= accepts a full \(C_{ijkl}\), conventional Voigt \(C_{IJ}\), cubic \(C_{11},C_{12},C_{44}\), or isotropic Lamé constants.  It checks elastic symmetries and the acoustic tensor.  =AnisotropicGreen= evaluates Barnett's half-circle integral and Barnett's analytic second derivative, D. M. Barnett, Phys. Status Solidi B 49, 741 (1972), doi:10.1002/pssb.2220490238.  There is no finite-difference fallback.
+=ElasticConstants= accepts a full \(C_{ijkl}\), conventional Voigt \(C_{IJ}\), cubic \(C_{11},C_{12},C_{44}\), or isotropic Lamé constants.  It checks elastic symmetries and requires each sampled acoustic tensor to be positive definite.  A positive determinant is not sufficient, because two negative eigenvalues leave the determinant positive.  =AnisotropicGreen= evaluates Barnett's half-circle integral and Barnett's analytic second derivative, D. M. Barnett, Phys. Status Solidi B 49, 741 (1972), doi:10.1002/pssb.2220490238.  There is no finite-difference fallback.
 
 For separation \(r\), source \(P^a\), and target \(P^b\), the interaction is
 
@@ -31,7 +31,7 @@ correction = E_infinite - E_periodic_images
 E_corrected = E_atomistic_periodic + correction.
 #+end_example
 
-=correct_energy= handles one pair state, =correct_landscape= maps a whole energy landscape, and =correct_rate_catalogue= applies the reactant and saddle corrections before rebuilding the harmonic rate.  Every result carries an absolute error estimate.  The periodic energy includes the cross interaction with every image and one half of each defect's interaction with its own nonzero images.  Consequently a barrier remains correct when a defect dipole changes between the reactant and saddle states.
+=correct_energy= handles one pair state, =correct_landscape= maps a whole energy landscape, and =correct_rate_catalogue= applies the reactant and saddle corrections before rebuilding the harmonic rate.  A corrected harmonic rate that is not finite is rejected.  Every result carries an absolute error estimate.  The periodic energy includes the cross interaction with every image and one half of each defect's interaction with its own nonzero images.  Consequently a barrier remains correct when a defect dipole changes between the reactant and saddle states.
 
 The smoke cell-size test synthesizes the atomistic long-range contribution from the same periodic sum, then verifies that adding the correction removes its cell drift for several separations and box lengths.  The full copper job is driven by =scripts/benchmark-elastic-dipole.sh=.  It runs every size in =RGSADDLE_REPEATS= and records the field-free and dipole-corrected \(V_{iv}\) estimators as separate rows.
 

@@ -17,6 +17,11 @@
 //! and Clouet, Phys. Rev. B 88, 134102 (2013),
 //! doi:10.1103/PhysRevB.88.134102.  Repeating the angular quadrature and the
 //! outer image sphere supplies the reported numerical error estimate.
+//! An acoustic inverse is performed only for a positive definite tensor.
+//! Sylvester's criterion requires every leading principal minor of the
+//! symmetric part to be positive, because a positive determinant still
+//! allows two negative eigenvalues.  A corrected harmonic rate that is not
+//! finite is rejected.
 
 use crate::error::SaddleError;
 use crate::strain_rate::{BOLTZMANN_EV_PER_K, ElasticDipole};
@@ -35,6 +40,10 @@ pub struct ElasticConstants {
 
 impl ElasticConstants {
     /// Validate a tensor with the minor and major elastic symmetries.
+    ///
+    /// Each sampled acoustic tensor must be positive definite. A positive
+    /// determinant does not prove that: two negative eigenvalues leave the
+    /// determinant positive.
     pub fn from_tensor(tensor: Tensor4) -> Result<Self, SaddleError> {
         if !tensor
             .iter()
@@ -71,9 +80,11 @@ impl ElasticConstants {
             }
         }
         let constants = Self { tensor };
-        // Strong ellipticity is needed by every acoustic inverse.  These
-        // crystal directions catch invalid cubic/orthotropic inputs early;
-        // Barnett quadrature checks every direction it actually uses.
+        // Strong ellipticity requires a positive definite acoustic tensor in
+        // every direction.  These crystal directions catch invalid
+        // cubic/orthotropic inputs early.  Barnett quadrature checks every
+        // direction it actually uses, and `invert3` applies Sylvester's
+        // criterion rather than accepting a positive determinant.
         for direction in [
             [1.0, 0.0, 0.0],
             [0.0, 1.0, 0.0],
@@ -495,6 +506,8 @@ impl PeriodicElastic {
     }
 
     /// Correct barriers and harmonic rates for a rate catalogue.
+    ///
+    /// The corrected harmonic rate must be finite.
     pub fn correct_rate_catalogue(
         &self,
         cell: &linkcell::Cell,
@@ -519,6 +532,9 @@ impl PeriodicElastic {
                 let infinite_barrier = saddle.infinite - reactant.infinite;
                 let rate_hz = rate.prefactor_hz
                     * (-infinite_barrier / (BOLTZMANN_EV_PER_K * rate.temperature_k)).exp();
+                if !rate_hz.is_finite() {
+                    return Err(SaddleError::NonFinite("corrected harmonic rate"));
+                }
                 Ok(CorrectedRate {
                     raw_barrier,
                     infinite_barrier,
@@ -703,18 +719,61 @@ fn acoustic(constants: Tensor4, direction: [f64; 3]) -> [[f64; 3]; 3] {
     matrix
 }
 
-fn invert3(matrix: [[f64; 3]; 3]) -> Result<[[f64; 3]; 3], SaddleError> {
-    let det = matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
+fn determinant3(matrix: [[f64; 3]; 3]) -> f64 {
+    matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
         - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
-        + matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0]);
-    let scale = matrix
+        + matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0])
+}
+
+fn symmetric_part(matrix: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let off_01 = f64::midpoint(matrix[0][1], matrix[1][0]);
+    let off_02 = f64::midpoint(matrix[0][2], matrix[2][0]);
+    let off_12 = f64::midpoint(matrix[1][2], matrix[2][1]);
+    [
+        [matrix[0][0], off_01, off_02],
+        [off_01, matrix[1][1], off_12],
+        [off_02, off_12, matrix[2][2]],
+    ]
+}
+
+fn max_abs3(matrix: [[f64; 3]; 3]) -> f64 {
+    matrix
         .iter()
         .flatten()
-        .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+        .fold(0.0_f64, |largest, value| largest.max(value.abs()))
+}
+
+fn acoustic_positive_definite(matrix: [[f64; 3]; 3]) -> bool {
+    // Positive definiteness is the quadratic form, so Sylvester's criterion
+    // applies to the symmetric part.  Every leading principal minor must be
+    // positive.  A positive determinant is not enough: two negative
+    // eigenvalues leave it positive and the tensor indefinite.
+    let symmetric = symmetric_part(matrix);
+    let scale = max_abs3(symmetric);
+    let relative = f64::EPSILON.sqrt();
+    let minors = [
+        symmetric[0][0],
+        symmetric[0][0] * symmetric[1][1] - symmetric[0][1] * symmetric[1][0],
+        determinant3(symmetric),
+    ];
+    let floors = [
+        relative * scale,
+        relative * scale * scale,
+        relative * scale * scale * scale,
+    ];
+    minors
+        .into_iter()
+        .zip(floors)
+        .all(|(minor, floor)| minor.is_finite() && minor > floor)
+}
+
+fn invert3(matrix: [[f64; 3]; 3]) -> Result<[[f64; 3]; 3], SaddleError> {
+    let det = determinant3(matrix);
+    let scale = max_abs3(matrix);
     let determinant_floor = f64::EPSILON.sqrt() * scale * scale * scale;
-    if !(det.is_finite() && det > determinant_floor) {
+    if !acoustic_positive_definite(matrix) || !(det.is_finite() && det > determinant_floor) {
         return Err(SaddleError::Invalid(
-            "elastic acoustic tensor is not positive and invertible".into(),
+            "elastic acoustic tensor is not positive definite".into(),
         ));
     }
     let inverse_det = 1.0 / det;
@@ -800,4 +859,69 @@ fn contract_kernel_abs(left: [[f64; 3]; 3], kernel: Tensor4, right: [[f64; 3]; 3
         }
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invert3;
+    use crate::error::SaddleError;
+
+    fn multiply_residual(matrix: [[f64; 3]; 3], inverse: [[f64; 3]; 3]) -> f64 {
+        let mut largest = 0.0_f64;
+        for (i, row) in matrix.iter().enumerate() {
+            let mut product = [0.0_f64; 3];
+            for (entry, inverse_row) in row.iter().zip(inverse) {
+                for (slot, coefficient) in product.iter_mut().zip(inverse_row) {
+                    *slot += entry * coefficient;
+                }
+            }
+            for (column, value) in product.iter().enumerate() {
+                let diagonal = if i == column { 1.0 } else { 0.0 };
+                largest = largest.max((value - diagonal).abs());
+            }
+        }
+        largest
+    }
+
+    fn assert_rejected(matrix: [[f64; 3]; 3]) {
+        let error = invert3(matrix).expect_err("acoustic tensor must be rejected");
+        assert!(
+            matches!(
+                error,
+                SaddleError::Invalid(ref message) if message.contains("not positive definite")
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn positive_definite_acoustic_tensor_inverts() {
+        let matrix = [[4.0, 1.0, 0.2], [1.0, 3.0, 0.5], [0.2, 0.5, 2.0]];
+        let inverse = invert3(matrix).expect("positive definite acoustic tensor");
+        let residual = multiply_residual(matrix, inverse);
+        assert!(
+            residual <= 16.0 * f64::EPSILON,
+            "inverse residual {residual}"
+        );
+    }
+
+    #[test]
+    fn negative_acoustic_eigenvalue_is_rejected() {
+        // Eigenvalues 1, 1, -1. The determinant is negative.
+        assert_rejected([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]]);
+    }
+
+    #[test]
+    fn indefinite_acoustic_tensor_with_positive_determinant_is_rejected() {
+        // Eigenvalues 2, -1, -1. The determinant is 2.
+        assert_rejected([[2.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]);
+    }
+
+    #[test]
+    fn skewed_acoustic_tensor_with_indefinite_symmetric_part_is_rejected() {
+        // Leading minors of this stored matrix are 1, 1, and 1. The
+        // symmetric part is [[1, 2, 0], [2, 1, 0], [0, 0, 1]], whose
+        // quadratic form takes both signs.
+        assert_rejected([[1.0, 4.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    }
 }

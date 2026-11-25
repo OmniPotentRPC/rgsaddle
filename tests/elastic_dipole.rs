@@ -2,7 +2,8 @@
 
 use rgsaddle::{
     AnisotropicGreen, AnisotropicGreenConfig, DefectDipole, ElasticConstants, ElasticDipole,
-    ElasticPairState, Kelvin, PeriodicElastic, PeriodicElasticConfig,
+    ElasticPairState, ElasticRate, Kelvin, PeriodicElastic, PeriodicElasticConfig, SaddleError,
+    arrhenius,
 };
 
 fn shear_dipole(value: f64) -> ElasticDipole {
@@ -16,6 +17,30 @@ fn shear_dipole(value: f64) -> ElasticDipole {
 
 fn cubic_constants() -> ElasticConstants {
     ElasticConstants::cubic(10.0, 4.0, 2.0).expect("stable cubic tensor")
+}
+
+fn catalogue_state(energy: f64) -> ElasticPairState {
+    ElasticPairState {
+        energy,
+        first: DefectDipole {
+            position: [0.0, 0.0, 0.0],
+            dipole: shear_dipole(1.2),
+        },
+        second: DefectDipole {
+            position: [3.0, 1.0, 0.5],
+            dipole: shear_dipole(-0.9),
+        },
+    }
+}
+
+fn rate_corrector() -> PeriodicElastic {
+    PeriodicElastic::new(
+        cubic_constants(),
+        PeriodicElasticConfig::default()
+            .with_green(AnisotropicGreenConfig::default().with_angular_points(32))
+            .with_image_shells(2),
+    )
+    .expect("periodic corrector")
 }
 
 #[test]
@@ -268,4 +293,91 @@ fn homogeneous_strain_and_residual_stress_routes_agree() {
             (from_stress - from_strain).abs() <= 8.0 * f64::EPSILON * from_stress.abs().max(1.0)
         );
     }
+}
+
+#[test]
+fn indefinite_cubic_acoustic_tensor_is_rejected() {
+    // C11 > 0 and C44 < 0 makes every sampled acoustic tensor indefinite
+    // with a positive determinant: the [100] eigenvalues are C11, C44, C44,
+    // and C12 = 12 keeps the [110] and [111] determinants positive too.
+    // A determinant test therefore accepts this tensor.
+    let error = ElasticConstants::cubic(10.0, 12.0, -1.0)
+        .expect_err("indefinite acoustic tensor must be rejected");
+    assert!(
+        matches!(
+            error,
+            SaddleError::Invalid(ref message) if message.contains("not positive definite")
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn correct_rate_catalogue_rejects_non_finite_rates() {
+    let corrector = rate_corrector();
+    let cell = linkcell::Cell::ortho(12.0, 12.0, 12.0).expect("cubic cell");
+    let reactant = catalogue_state(0.0);
+    let saddle = catalogue_state(-1.0e6);
+    let reactant_energy = corrector
+        .correct_energy(&cell, reactant)
+        .expect("reactant correction");
+    let saddle_energy = corrector
+        .correct_energy(&cell, saddle)
+        .expect("saddle correction");
+    let barrier = saddle_energy.infinite - reactant_energy.infinite;
+    assert!(
+        barrier < -100.0,
+        "barrier {barrier} must overflow the Arrhenius factor at 300 K"
+    );
+    let error = corrector
+        .correct_rate_catalogue(
+            &cell,
+            &[ElasticRate {
+                reactant,
+                saddle,
+                prefactor_hz: 1.0e12,
+                temperature_k: 300.0,
+            }],
+        )
+        .expect_err("an overflowing harmonic rate must be reported");
+    assert!(
+        matches!(error, SaddleError::NonFinite("corrected harmonic rate")),
+        "{error}"
+    );
+}
+
+#[test]
+fn correct_rate_catalogue_keeps_a_finite_arrhenius_rate() {
+    let corrector = rate_corrector();
+    let cell = linkcell::Cell::ortho(12.0, 12.0, 12.0).expect("cubic cell");
+    let prefactor_hz = 1.0e12;
+    let temperature_k = 300.0;
+    let barrier = 0.5;
+    let corrected = corrector
+        .correct_rate_catalogue(
+            &cell,
+            &[ElasticRate {
+                reactant: catalogue_state(0.0),
+                saddle: catalogue_state(barrier),
+                prefactor_hz,
+                temperature_k,
+            }],
+        )
+        .expect("a modest barrier has a finite rate");
+    assert_eq!(corrected.len(), 1);
+    let row = corrected[0];
+    assert_eq!(row.raw_barrier, barrier);
+    assert!(
+        (row.infinite_barrier - barrier).abs() <= 1.0e-8,
+        "infinite barrier {} raw {barrier}",
+        row.infinite_barrier
+    );
+    assert!(row.rate_hz.is_finite(), "rate {}", row.rate_hz);
+    let expected = arrhenius(prefactor_hz, row.infinite_barrier, temperature_k);
+    let scale = expected.abs().max(1.0);
+    assert!(
+        (row.rate_hz - expected).abs() <= 16.0 * f64::EPSILON * scale,
+        "rate {} expected {expected}",
+        row.rate_hz
+    );
 }

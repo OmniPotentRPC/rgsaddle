@@ -1,0 +1,6 @@
+The acoustic inverse rejects a tensor that is not positive definite.
+Sylvester's criterion requires every leading principal minor of the
+symmetric part to be positive, which a positive determinant does not
+guarantee.
+=PeriodicElastic::correct_rate_catalogue= rejects a corrected harmonic rate
+that is not finite.
