@@ -514,7 +514,9 @@ pub struct AtomCoverage {
     /// [`covering_radius_s2`] of the tried directions, radians. Pi when
     /// none is tried.
     pub covering_radius: f64,
-    /// Distinct states (the start and product ids) the tried arms led to.
+    /// Distinct states among the start and the products the tried arms
+    /// led to. The start always counts, as in the [`ArmPolicy::Gap`]
+    /// score, so this is one on a centre with no product yet.
     pub states: usize,
 }
 
@@ -1228,7 +1230,7 @@ impl DirectionCover {
                     .iter()
                     .map(|&(p, _)| self.cover[p])
                     .collect();
-                let mut states: Vec<State> = Vec::new();
+                let mut states = vec![State::Start];
                 for &(_, state) in &self.tried[slot] {
                     if state != State::Unlabelled && !states.contains(&state) {
                         states.push(state);

@@ -495,6 +495,38 @@ fn gap_counts_the_start_beside_two_products() {
     );
 }
 
+#[test]
+fn coverage_states_count_the_start() {
+    let mut cover = DirectionCover::new(
+        &Bowl,
+        Array1::zeros(3),
+        None,
+        9,
+        DirectionCoverConfig::default(),
+    )
+    .unwrap();
+    let states = |cover: &DirectionCover| cover.coverage().unwrap().atoms[0].states;
+    assert_eq!(states(&cover), 1, "nothing tried");
+    let failed = rgsaddle::ArmId { atom: 0, point: 2 };
+    cover
+        .record(rgsaddle::ArmTrial::failed(
+            failed,
+            rgsaddle::ArmFailure::NotIndexOne,
+            1,
+        ))
+        .unwrap();
+    assert_eq!(states(&cover), 1, "a failed arm adds no state");
+    let returned = rgsaddle::ArmId { atom: 0, point: 3 };
+    cover
+        .record(rgsaddle::ArmTrial::returned(returned, 1))
+        .unwrap();
+    assert_eq!(states(&cover), 1, "a return is the start");
+    bowl_connected(&mut cover, 0, 1.0);
+    assert_eq!(states(&cover), 2, "start and one product");
+    bowl_connected(&mut cover, 1, 2.0);
+    assert_eq!(states(&cover), 3, "start and two products");
+}
+
 /// Müller-Brown in (x, y) plus a stiff harmonic z: one atom.
 struct MullerBrown;
 
