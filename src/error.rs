@@ -54,4 +54,21 @@ pub enum SaddleError {
     /// A dense factorization or spectrum hit a zero or underflowed pivot or mode.
     #[error("singular matrix at pivot or mode {0}")]
     Singular(usize),
+    /// A solution-landscape search stopped because a configured limit was met.
+    ///
+    /// The counts are the nodes already accepted and the force evaluations
+    /// already performed. The pathway is not returned in a truncated form.
+    #[error(
+        "solution-landscape search reached the {kind} limit of {limit} with {nodes} nodes and {evaluations} force evaluations"
+    )]
+    LandscapeBound {
+        /// Which configured limit was met.
+        kind: crate::landscape::LandscapeBoundKind,
+        /// The configured limit.
+        limit: usize,
+        /// Critical points accepted before the search stopped.
+        nodes: usize,
+        /// Force evaluations performed before the search stopped.
+        evaluations: usize,
+    },
 }
