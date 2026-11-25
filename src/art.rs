@@ -581,6 +581,10 @@ pub struct ArtReport {
 }
 
 /// A finished or partial event.
+///
+/// Non-exhaustive: [`ArtSession::outcome`] and [`run_events`] build it,
+/// and a pattern on it needs `..`.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct ArtOutcome {
     /// Verdict. [`ArtStatus::Running`] if the host stopped early.
