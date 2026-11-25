@@ -410,6 +410,61 @@ mod tests {
     }
 
     #[test]
+    fn a_tie_goes_to_the_earlier_mover_then_the_lower_site() {
+        let cell = [[20.0, 0.0, 0.0], [0.0, 20.0, 0.0], [0.0, 0.0, 20.0]];
+        let sheared = [[20.0, 0.0, 0.0], [6.0, 20.0, 0.0], [0.0, 0.0, 20.0]];
+        for cell in [cell, sheared] {
+            // Both atoms are exactly one Angstrom from the site.
+            let atoms = flat(&[[4.0, 5.0, 5.0], [6.0, 5.0, 5.0]]);
+            let site = flat(&[[5.0, 5.0, 5.0]]);
+            for movers in [[0, 1], [1, 0]] {
+                let out =
+                    translate_onto_sites(atoms.view(), cell, ALL, &movers, site.view()).unwrap();
+                let (moved, stayed) = (movers[0], movers[1]);
+                assert_eq!(out.pairs, vec![(moved, 0)]);
+                close(out.positions[3 * moved], 5.0);
+                assert_eq!(out.positions[3 * stayed], atoms[3 * stayed]);
+            }
+            // The atom is exactly one Angstrom from both sites.
+            let atom = flat(&[[5.0, 5.0, 5.0]]);
+            let sites = flat(&[[6.0, 5.0, 5.0], [4.0, 5.0, 5.0]]);
+            let out = translate_onto_sites(atom.view(), cell, ALL, &[0], sites.view()).unwrap();
+            assert_eq!(out.pairs, vec![(0, 0)]);
+            close(out.positions[0], 6.0);
+        }
+    }
+
+    #[test]
+    fn a_sheared_cell_folds_only_its_periodic_axes() {
+        let cell = [[10.0, 0.0, 0.0], [3.0, 10.0, 0.0], [0.0, 0.0, 10.0]];
+        let origin = flat(&[[0.0; 3]]);
+        let place = |periodic: [bool; 3], site: [f64; 3]| {
+            let out =
+                translate_onto_sites(origin.view(), cell, periodic, &[0], flat(&[site]).view())
+                    .unwrap();
+            [out.positions[0], out.positions[1], out.positions[2]]
+        };
+        // b is open. A thousand b plus half an Angstrom along x folds along a
+        // to x = 0.5 and keeps the whole open displacement along y; the
+        // fraction along a alone is 0.05 and would leave x at 3000.5.
+        let got = place([true, false, true], [3000.5, 10000.0, 0.0]);
+        close(got[0], 0.5);
+        close(got[1], 10000.0);
+        close(got[2], 0.0);
+        // a is open. Only whole b are taken off: two of them leave
+        // (19, -9.5, 0), shorter than the one the b fraction 1.05 rounds to.
+        let got = place([false, true, true], [25.0, 10.5, 0.0]);
+        close(got[0], 19.0);
+        close(got[1], -9.5);
+        close(got[2], 0.0);
+        // c is open and orthogonal to the sheared plane; z is never folded.
+        let got = place([true, true, false], [3.5, 10.0, 37.0]);
+        close(got[0], 0.5);
+        close(got[1], 0.0);
+        close(got[2], 37.0);
+    }
+
+    #[test]
     fn bad_input_is_named() {
         let atoms = flat(&[[0.0; 3]]);
         let sites = flat(&[[1.0; 3]]);
