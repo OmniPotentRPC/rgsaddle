@@ -495,6 +495,10 @@ impl PeriodicElastic {
     }
 
     /// Correct barriers and harmonic rates for a rate catalogue.
+    ///
+    /// A corrected barrier or rate that is not finite, such as the overflow
+    /// of a strongly negative barrier at low temperature, returns
+    /// [`SaddleError::NonFinite`] instead of an infinite `rate_hz`.
     pub fn correct_rate_catalogue(
         &self,
         cell: &linkcell::Cell,
@@ -517,8 +521,14 @@ impl PeriodicElastic {
                 let saddle = self.correct_energy(cell, rate.saddle)?;
                 let raw_barrier = rate.saddle.energy - rate.reactant.energy;
                 let infinite_barrier = saddle.infinite - reactant.infinite;
+                if !infinite_barrier.is_finite() {
+                    return Err(SaddleError::NonFinite("infinite-cell barrier"));
+                }
                 let rate_hz = rate.prefactor_hz
                     * (-infinite_barrier / (BOLTZMANN_EV_PER_K * rate.temperature_k)).exp();
+                if !rate_hz.is_finite() {
+                    return Err(SaddleError::NonFinite("corrected harmonic rate"));
+                }
                 Ok(CorrectedRate {
                     raw_barrier,
                     infinite_barrier,
