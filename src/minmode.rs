@@ -1612,28 +1612,20 @@ impl RitzWork {
     }
 }
 
-/// First-product return. `rel_tol` is the connect climb's fraction of
-/// `|λ|` (denominator 1 when `λ` is 0). Without it, the stock estimate
-/// returns only when the previous solve converged and the Rayleigh
-/// quotient still agrees with `rotation_tol`, against the curvature
-/// scale `|H q_0|` of the first product.
+/// First-product return. `rel_tol` is the connect climb's relative Ritz
+/// tolerance. Without it, the stock estimate returns only when the
+/// previous solve converged and the Rayleigh quotient still agrees with
+/// `rotation_tol`. Both comparisons use the curvature scale `|H q_0|`
+/// of the first product.
 fn lanczos_quit_early(stop: &LanczosStop, rayleigh: f64, scale: f64, rotation_tol: f64) -> bool {
     if let Some(tol) = stop.rel_tol {
-        if !stop.previous.is_finite() {
-            return false;
-        }
-        let scale = if stop.previous.abs() > 0.0 {
-            stop.previous.abs()
-        } else {
-            1.0
-        };
-        return (rayleigh - stop.previous).abs() <= tol * scale;
+        return ritz_value_agreed(rayleigh, stop.previous, scale, tol);
     }
     stop.early && ritz_value_agreed(rayleigh, stop.previous, scale, rotation_tol)
 }
 
-/// Relative change of successive lowest Ritz values. `rel_tol` uses the
-/// connect denominator; otherwise the stock guarded comparison against
+/// Relative change of successive lowest Ritz values. `rel_tol` replaces
+/// the stock tolerance without changing the guarded comparison against
 /// the curvature scale `scale`.
 fn lanczos_ritz_agreed(
     rel_tol: Option<f64>,
@@ -1645,11 +1637,7 @@ fn lanczos_ritz_agreed(
     let Some(old) = previous else {
         return false;
     };
-    if let Some(tol) = rel_tol {
-        let scale = if old.abs() > 0.0 { old.abs() } else { 1.0 };
-        return (theta - old).abs() <= tol * scale;
-    }
-    ritz_value_agreed(theta, old, scale, rotation_tol)
+    ritz_value_agreed(theta, old, scale, rel_tol.unwrap_or(rotation_tol))
 }
 
 /// Lowest eigenpair of the symmetric tridiagonal (alpha, beta), with
@@ -1725,6 +1713,10 @@ fn jacobi_eigen(a: &mut [f64], v: &mut Vec<f64>, n: usize) {
     for i in 0..n {
         v[i * n + i] = 1.0;
     }
+    let scale = a
+        .iter()
+        .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+    let off_tolerance = 1e-12 * scale;
     for _sweep in 0..64 {
         let mut off = 0.0;
         for i in 0..n {
@@ -1732,12 +1724,12 @@ fn jacobi_eigen(a: &mut [f64], v: &mut Vec<f64>, n: usize) {
                 off += value * value;
             }
         }
-        if off <= 1e-24 {
+        if off <= off_tolerance * off_tolerance {
             break;
         }
         for p in 0..n {
             for qi in (p + 1)..n {
-                if a[p * n + qi].abs() < 1e-18 {
+                if a[p * n + qi].abs() <= 1e-18 * scale {
                     continue;
                 }
                 let theta = (a[qi * n + qi] - a[p * n + p]) / (2.0 * a[p * n + qi]);
@@ -1806,6 +1798,8 @@ struct LanczosCarry {
     beta: Vec<f64>,
     /// Lowest Ritz value after the previous action.
     theta: Option<f64>,
+    /// Largest Hessian action norm formed by this basis.
+    scale: f64,
 }
 
 /// A FIRE translation the per-atom cap shortened while the curvature
@@ -2187,8 +2181,8 @@ impl MinModeSession {
     /// one iteration once the rotational force is under one (eOn
     /// `torque_max`), and a Lanczos estimate stops once two vectors
     /// leave the Ritz residual divided by the absolute Ritz value under
-    /// one. A Ritz value near zero compares that residual with one
-    /// directly. `None`, the default, keeps the window on for a
+    /// one. A Ritz value near zero uses the estimate's curvature scale
+    /// as the divisor. `None`, the default, keeps the window on for a
     /// dimer exactly when its angle test is disabled and `rotation_tol`
     /// is at least the stock 1e-4. Lanczos keeps the window only while
     /// no [`MinModeSession::set_lanczos_rel_tol`] is set.
@@ -2892,6 +2886,7 @@ impl MinModeSession {
                 alpha: Vec::new(),
                 beta: Vec::new(),
                 theta: None,
+                scale: 0.0,
             });
         }
         let Some(mut carry) = self.lanczos_carry.take() else {
@@ -2927,6 +2922,7 @@ impl MinModeSession {
                 return Err(err);
             }
         };
+        carry.scale = carry.scale.max(hv.dot(&hv).sqrt());
         let a = crate::stencil::curvature_along(hv.view(), carry.q[j].view());
         carry.alpha.push(a);
         let mut w = &hv - &(&carry.q[j] * a);
@@ -2940,7 +2936,7 @@ impl MinModeSession {
         let b = w.dot(&w).sqrt();
         let (theta, s) = lowest_ritz(&carry.alpha, &carry.beta);
         let capped = carry.alpha.len() == dim;
-        let coefficients = if !capped && b > 1e-12 {
+        let coefficients = if !capped && b > 1e-12 * carry.scale {
             carry.beta.push(b);
             carry.q.push(w / b);
             let target = extrapolated_eigenvalue(&carry.alpha, &carry.beta, carry.theta, theta);
@@ -4703,8 +4699,8 @@ mod tests {
 
     /// The seed has a zero Rayleigh quotient on `diag(-1, 1, 2, 4)`, so
     /// the first Ritz value takes the near-zero fallback. An absolute
-    /// fallback accepted the seed at the 1e-3 scale and refined it at
-    /// 1e3. Against the curvature scale every scale makes the same
+    /// fallback accepted the seed at the 1e-13 scale and refined it at
+    /// 1e13. Against the curvature scale every scale makes the same
     /// decisions and returns the same lowest mode.
     #[test]
     fn lanczos_decisions_survive_rescaling_the_hessian() {
@@ -4724,7 +4720,7 @@ mod tests {
         assert!(unit.rotations > 1, "{unit:?}");
         assert!(unit_ready, "{unit:?}");
         assert!(unit.mode[0].abs() > 0.99, "{unit:?}");
-        for factor in [1.0e-3, 1.0e3] {
+        for factor in [1.0e-13, 1.0e13] {
             let (scaled, ready) = estimate(factor);
             assert_eq!(scaled.rotations, unit.rotations, "factor {factor:e}");
             assert_eq!(scaled.evaluations, unit.evaluations, "factor {factor:e}");

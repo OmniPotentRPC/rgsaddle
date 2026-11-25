@@ -169,6 +169,16 @@ impl PointSurface for Anisotropic {
     }
 }
 
+struct ScaledAnisotropic(f64);
+
+impl PointSurface for ScaledAnisotropic {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let g = Array1::from_iter(x.iter().zip(D.iter()).map(|(xi, di)| self.0 * di * xi));
+        let e = 0.5 * x.iter().zip(g.iter()).map(|(a, b)| a * b).sum::<f64>();
+        Ok((e, g))
+    }
+}
+
 struct CountingPoint<'a, S: PointSurface> {
     inner: &'a S,
     calls: AtomicUsize,
@@ -431,6 +441,37 @@ fn lanczos_push_follows_the_lowest_mode_one_action_at_a_time() {
     let report = session.step(&surface).unwrap();
     assert!(report.evaluations >= 1);
     assert!(session.mode()[0].abs() > 0.99);
+}
+
+#[test]
+fn lanczos_push_iterations_are_invariant_to_hessian_scale() {
+    let pushed = |factor: f64| {
+        let config = MinModeConfig::default()
+            .with_kind(MinModeKind::Lanczos)
+            .with_rotation_tol(1e-6)
+            .with_krylov_dim(1);
+        let x = Array1::from(vec![0.1, -0.2, 0.05, 0.3, -0.1, 0.02]);
+        let seed = Array1::from(vec![0.3, 0.5, 0.4, 0.4, 0.4, 0.4]);
+        let mut session = MinModeSession::new(config, x, seed).unwrap();
+        let surface = ScaledAnisotropic(factor);
+        let mut actions = 0usize;
+        for _ in 0..12 {
+            session.push_estimate(&surface).unwrap();
+            actions += 1;
+            if session.mode()[0].abs() >= 0.99 {
+                break;
+            }
+        }
+        (actions, session.mode().to_owned())
+    };
+
+    let (unit_actions, unit_mode) = pushed(1.0);
+    assert_eq!(unit_actions, 4);
+    for factor in [1.0e-13, 1.0e13] {
+        let (actions, mode) = pushed(factor);
+        assert_eq!(actions, unit_actions, "factor {factor:e}");
+        assert!((mode.dot(&unit_mode).abs() - 1.0).abs() < 1.0e-9);
+    }
 }
 
 #[test]

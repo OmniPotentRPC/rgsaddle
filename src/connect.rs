@@ -2347,9 +2347,51 @@ fn eigh_dense(matrix: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
 
 #[cfg(test)]
 mod tests {
-    use super::relax_idpp;
-    use super::upper_distances;
-    use super::{TranslationMemory, improved_tangent};
+    use super::*;
+    use ndarray::array;
+
+    #[test]
+    fn connect_lanczos_iterations_are_invariant_to_hessian_scale() {
+        let estimate = |factor: f64| {
+            let diagonal = [-1.0, 1.0, 2.0, 4.0, 6.0, 8.0];
+            let start = Array1::zeros(6);
+            let seed = array![8.0_f64.sqrt(), 2.0_f64.sqrt(), 1.0, 1.0, 0.0, 0.0] / 12.0_f64.sqrt();
+            let mut energy_force = |x: &[f64]| {
+                let gradient = x
+                    .iter()
+                    .zip(diagonal)
+                    .map(|(&xi, curvature)| factor * curvature * xi)
+                    .collect::<Vec<_>>();
+                let energy = 0.5 * x.iter().zip(&gradient).map(|(xi, gi)| xi * gi).sum::<f64>();
+                Ok((energy, gradient.into_iter().map(|value| -value).collect()))
+            };
+            let callback: &mut SurfaceFn<'_> = &mut energy_force;
+            let surface = CallbackSurface {
+                f: callback,
+                extra: Vec::new(),
+                project_rigid: false,
+            };
+            let settings = Settings::default();
+            let config = MinModeConfig::default()
+                .with_kind(MinModeKind::Lanczos)
+                .with_krylov_dim(settings.lanczos_iterations.max(1))
+                .with_saddle_check(None);
+            let mut session = MinModeSession::new(config, start, seed).expect("connect session");
+            session
+                .set_lanczos_rel_tol(Some(settings.lanczos_rel_tol))
+                .expect("relative tolerance");
+            session.estimate_mode(&surface).expect("mode estimate")
+        };
+
+        let unit = estimate(1.0);
+        assert!(unit.rotations > 1, "{unit:?}");
+        assert!(unit.mode[0].abs() > 0.99, "{unit:?}");
+        for factor in [1.0e-13, 1.0e13] {
+            let scaled = estimate(factor);
+            assert_eq!(scaled.rotations, unit.rotations, "factor {factor:e}");
+            assert!((scaled.mode.dot(&unit.mode).abs() - 1.0).abs() < 1.0e-9);
+        }
+    }
 
     #[test]
     fn idpp_separates_a_crossed_pair() {
