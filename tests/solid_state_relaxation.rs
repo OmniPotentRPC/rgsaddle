@@ -148,7 +148,7 @@ fn coupled_atom_strain_relaxation_reaches_the_small_cell_minimum() {
     start[3] = 0.08 * chart.jacobian();
     let relaxed = relax(
         &CoupledCell {
-            analytic_stress: true,
+            analytic_stress: false,
         },
         &chart,
         start,
@@ -184,6 +184,9 @@ fn external_stress_gives_the_elastic_strain_response() {
     );
     let strain = chart.strain(relaxed.view()).unwrap()[0][0];
     assert!((strain + pressure / c11).abs() < 1.0e-8);
+    let (positions, relaxed_cell) = chart.geometry(relaxed.view()).unwrap();
+    let displacement = positions[0] - SITE * relaxed_cell[0][0];
+    assert!((displacement - COUPLING * strain).abs() < 1.0e-8);
 }
 
 #[test]

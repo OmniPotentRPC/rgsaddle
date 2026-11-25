@@ -23,7 +23,7 @@ E_ab = P^b_ij G_ik,jl(r) P^a_kl.
 
 The periodic trapezoid rule is evaluated on nested angular meshes.
 Their difference is the angular error estimate.
-The isotropic test compares the result with Kelvin's closed form Green function.
+The isotropic test compares the dipole interaction with Kelvin's closed form result.
 The cubic test uses the exact =[100]= result of Dederichs and Leibfried, Phys. Rev. 188, 1175 (1969), doi:10.1103/PhysRev.188.1175: \(G_{xx,xx}=1/(2 pi C_{44}r^3)\), while choosing constants that are not isotropic.
 
 * Periodic correction
@@ -41,6 +41,6 @@ The full copper job is driven by =scripts/benchmark-elastic-dipole.sh=.
 It builds the defect-pair catalogue once, runs the network volume calculation for every size in =RGSADDLE_REPEATS=, and records the uncorrected and vector-dipole \(V_{iv}\) estimators as separate rows.
 
 * Copper reference status
-The opt-in Mishin Cu EAM test relaxes a vacancy and a =[100]= dumbbell in a 2048-atom reference cell, derives their dipoles from the residual stress, and records finite symmetric tensors.
+The opt-in Mishin Cu EAM test uses a reference supercell with 2048 lattice sites by default, relaxes a vacancy and a =[100]= dumbbell, derives their dipoles from the residual stress, and records finite symmetric tensors.
 No published tensor for those two defects using exactly the 2001 Mishin parameterization and this fixed-cell convention was identified, so the test does not assert an unrelated potential's numbers.
 Mishin et al., Phys. Rev. B 63, 224106 (2001), doi:10.1103/PhysRevB.63.224106, report defect energetics and elastic constants, not these residual-stress dipole tensors.
