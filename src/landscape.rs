@@ -19,8 +19,10 @@
 //! Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025),
 //! doi:10.1021/acs.jctc.5c00866), the search pushes a finite step along
 //! one unstable eigenvector and follows index-(k-1) HiOSD dynamics until
-//! that search converges. The point is certified, stored if it is new,
-//! and the search repeats on it. Index 0 is a minimum: the leg is an
+//! that search converges. The point is certified and stored when its
+//! index is exactly one less than the parent. A leg that lands on any
+//! other index returns [`SaddleError::Solver`], and the search repeats
+//! on an accepted child. Index 0 is a minimum: the leg is an
 //! [`rgmin`](https://github.com/OmniPotentRPC/rgmin) solve on the true
 //! gradient, not a reflected force.
 //!
@@ -106,9 +108,11 @@ impl std::fmt::Display for LandscapeBoundKind {
 /// Non-exhaustive: start from [`LandscapeConfig::default`] and chain the
 /// `with_*` setters.
 ///
-/// `search.k` is replaced on each leg by the child index. The child
-/// index-k search clears `search.search.saddle_check` and
-/// `search.search.artn` on its own copy, so a certificate escape does not
+/// `search.k` is replaced on each leg by the child index, and
+/// `search.negative_tol` is replaced by `certificate.negative_tol`, so leg
+/// convergence and certification always agree on which curvatures count
+/// as negative. The child index-k search clears `search.search.saddle_check`
+/// and `search.search.artn` on its own copy, so a certificate escape does not
 /// run inside a leg. The landscape certifies every accepted point with
 /// [`LandscapeConfig::certificate`]. `certificate.escape` is not read.
 ///
@@ -160,9 +164,20 @@ with_setters!(LandscapeConfig {
     with_cell => cell: opt Cell,
 });
 
+impl LandscapeConfig {
+    /// Set the negative-curvature threshold for both child index-k legs
+    /// and saddle-index certification.
+    #[must_use]
+    pub fn with_negative_tol(mut self, negative_tol: f64) -> Self {
+        self.certificate.negative_tol = negative_tol;
+        self.search.negative_tol = negative_tol;
+        self
+    }
+}
+
 impl Default for LandscapeConfig {
     fn default() -> Self {
-        let mut search = IndexKConfig::default();
+        let mut search = IndexKConfig::default().with_negative_tol(crate::NEGATIVE_CURVATURE_TOL);
         search.search.saddle_check = None;
         Self {
             duplicate_distance: DEFAULT_DUPLICATE_DISTANCE,
@@ -257,6 +272,11 @@ impl LandscapeConfig {
         if self.search.max_block_iterations == 0 {
             return Err(SaddleError::Invalid(
                 "block iteration cap must be positive".into(),
+            ));
+        }
+        if !(self.search.negative_tol.is_finite() && self.search.negative_tol >= 0.0) {
+            return Err(SaddleError::Invalid(
+                "negative curvature tolerance must be finite and non-negative".into(),
             ));
         }
         if let Some(check) = &search.saddle_check {
@@ -585,9 +605,9 @@ impl LandscapeSession {
             position.view(),
             self.config.duplicate_distance,
         )? {
-            if nodes[known].index >= parent_index {
+            if nodes[known].index != child_index {
                 return Err(SaddleError::Solver(format!(
-                    "downward leg from node {} direction {} returned index {} at node {known}",
+                    "downward leg from node {} direction {} returned index {} at node {known}, child index is {child_index}",
                     leg.parent, leg.direction, nodes[known].index
                 )));
             }
@@ -599,9 +619,9 @@ impl LandscapeSession {
                 "child saddle-index certificate did not converge".into(),
             ));
         }
-        if certified.index.index >= parent_index {
+        if certified.index.index != child_index {
             return Err(SaddleError::Solver(format!(
-                "downward leg from node {} direction {} certified index {}",
+                "downward leg from node {} direction {} certified index {}, child index is {child_index}",
                 leg.parent, leg.direction, certified.index.index
             )));
         }
@@ -654,7 +674,8 @@ impl LandscapeSession {
         let config = IndexKConfig::new(k, search)
             .with_residual_tol(self.config.search.residual_tol)
             .with_max_block_iterations(self.config.search.max_block_iterations)
-            .with_block(self.config.search.block);
+            .with_block(self.config.search.block)
+            .with_negative_tol(self.config.certificate.negative_tol);
         let warm = if warm.ncols() == k { Some(warm) } else { None };
         let mut session = IndexKSession::new(config, start, warm)?;
         session.set_force_gate(self.config.force_gate);

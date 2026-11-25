@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ndarray::{Array1, ArrayView1, array};
 use rgsaddle::{
     Cell, CriticalPoint, ForceGate, IndexKConfig, IndexKSession, LandscapeBoundKind,
-    LandscapeConfig, LandscapeSession, MinModeConfig, MinModeStatus, PathwayMap, PointSurface,
-    RelaxConfig, SaddleError,
+    LandscapeConfig, LandscapeSession, MinModeConfig, MinModeStatus, NEGATIVE_CURVATURE_TOL,
+    PathwayMap, PointSurface, RelaxConfig, SaddleError, SaddleIndexCheck, saddle_index,
 };
 
 const SIDE: f64 = std::f64::consts::FRAC_1_SQRT_2;
@@ -252,7 +252,10 @@ fn check_wells(map: &PathwayMap) {
             assert_eq!(map.nodes[edge.child].evaluations, edge.evaluations);
             seen[edge.child] = true;
         }
-        assert!(map.nodes[edge.child].index < map.nodes[edge.parent].index);
+        assert_eq!(
+            map.nodes[edge.child].index + 1,
+            map.nodes[edge.parent].index
+        );
         assert!(edge.sign == 1 || edge.sign == -1);
     }
 }
@@ -585,6 +588,361 @@ fn a_cell_on_a_coordinate_count_not_divisible_by_three_is_refused() {
     let cell = Cell([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
     let session = LandscapeSession::new(mb_config().with_cell(cell), array![0.0, 0.0], None);
     assert!(matches!(session, Err(SaddleError::Invalid(_))));
+}
+
+/// Diagonal quadratic `V = ½ Σ λ_i x_i²`. The origin is the only critical point.
+struct Diagonal {
+    curvatures: [f64; 3],
+}
+
+impl PointSurface for Diagonal {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let mut energy = 0.0;
+        let mut gradient = Array1::zeros(3);
+        for i in 0..3 {
+            energy += 0.5 * self.curvatures[i] * x[i] * x[i];
+            gradient[i] = self.curvatures[i] * x[i];
+        }
+        Ok((energy, gradient))
+    }
+
+    fn hessian_vector(
+        &self,
+        _x: ArrayView1<f64>,
+        v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        Ok(Some(array![
+            self.curvatures[0] * v[0],
+            self.curvatures[1] * v[1],
+            self.curvatures[2] * v[2],
+        ]))
+    }
+}
+
+fn indexk_status(surface: &Diagonal, k: usize) -> MinModeStatus {
+    let search = MinModeConfig::default()
+        .with_force_tol(1.0e-8)
+        .with_max_move(0.1)
+        .with_saddle_check(None);
+    let config = IndexKConfig::new(k, search)
+        .with_residual_tol(1.0e-10)
+        .with_negative_tol(NEGATIVE_CURVATURE_TOL);
+    let mut session = IndexKSession::new(config, array![0.0, 0.0, 0.0], None).unwrap();
+    session.run(surface, 6).unwrap().status
+}
+
+fn certified_index(surface: &Diagonal) -> usize {
+    let found = saddle_index(
+        &SaddleIndexCheck::default(),
+        surface,
+        array![0.0, 0.0, 0.0].view(),
+        None,
+        None,
+        &[],
+    )
+    .unwrap();
+    assert!(found.converged, "{found:?}");
+    found.index
+}
+
+#[test]
+fn a_curvature_between_the_threshold_and_zero_is_not_a_negative_mode() {
+    assert_eq!(
+        SaddleIndexCheck::default().negative_tol,
+        NEGATIVE_CURVATURE_TOL
+    );
+    // -5e-4 lies strictly between -1e-3 and 0.
+    let soft = -0.5 * NEGATIVE_CURVATURE_TOL;
+    assert!(soft < 0.0 && soft > -NEGATIVE_CURVATURE_TOL);
+    let block = Diagonal {
+        curvatures: [soft, -1.0, 1.0],
+    };
+    assert_ne!(
+        indexk_status(&block, 2),
+        MinModeStatus::Converged,
+        "index-2 converged while one curvature is inside (-1e-3, 0)"
+    );
+    assert_eq!(certified_index(&block), 1);
+    let one = Diagonal {
+        curvatures: [soft, 1.0, 1.0],
+    };
+    assert_ne!(indexk_status(&one, 1), MinModeStatus::Converged);
+    assert_eq!(certified_index(&one), 0);
+}
+
+#[test]
+fn a_curvature_below_the_shared_threshold_certifies_as_index_k() {
+    let below = -(NEGATIVE_CURVATURE_TOL + 1.0e-4);
+    let surface = Diagonal {
+        curvatures: [below, -1.0, 1.0],
+    };
+    assert_eq!(indexk_status(&surface, 2), MinModeStatus::Converged);
+    assert_eq!(certified_index(&surface), 2);
+    let edge = Diagonal {
+        curvatures: [-NEGATIVE_CURVATURE_TOL, -1.0, 1.0],
+    };
+    assert_ne!(
+        indexk_status(&edge, 2),
+        MinModeStatus::Converged,
+        "a curvature equal to -NEGATIVE_CURVATURE_TOL counts as negative"
+    );
+    assert_eq!(certified_index(&edge), 1);
+}
+
+fn axial_epsilon(soft: f64) -> f64 {
+    2.0 * (1.0 + soft)
+}
+
+/// `V = Σ (x_i⁴ - ½ x_i²) + ε Σ_{i<j} x_i² x_j²` with `ε = 2(1+soft)`.
+/// The origin has curvature -1 on each axis. Each axial point `(±0.5, 0, 0)`
+/// and its permutations is critical, with one positive curvature and two
+/// curvatures equal to `soft`.
+struct Axial {
+    soft: f64,
+}
+
+impl Axial {
+    fn epsilon(&self) -> f64 {
+        axial_epsilon(self.soft)
+    }
+}
+
+fn quartic_well(t: f64) -> (f64, f64, f64) {
+    // f = t^4 - 0.5 t^2, so f(0.5) is a minimum: f'(t) = 4 t^3 - t, f'(0.5) = 0.5 - 0.5 = 0.
+    // f''(t) = 12 t^2 - 1, f''(0) = -1, f''(0.5) = 2.
+    (
+        t.powi(4) - 0.5 * t * t,
+        4.0 * t.powi(3) - t,
+        12.0 * t * t - 1.0,
+    )
+}
+
+impl PointSurface for Axial {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let e = self.epsilon();
+        let (mut energy, mut gradient) = (0.0, Array1::zeros(3));
+        for i in 0..3 {
+            let (value, first, _) = quartic_well(x[i]);
+            energy += value;
+            gradient[i] = first;
+        }
+        for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+            energy += e * x[i] * x[i] * x[j] * x[j];
+            gradient[i] += 2.0 * e * x[i] * x[j] * x[j];
+            gradient[j] += 2.0 * e * x[j] * x[i] * x[i];
+        }
+        Ok((energy, gradient))
+    }
+
+    fn hessian_vector(
+        &self,
+        x: ArrayView1<f64>,
+        v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        let e = self.epsilon();
+        let mut h = [[0.0; 3]; 3];
+        for i in 0..3 {
+            let (_, _, second) = quartic_well(x[i]);
+            h[i][i] = second;
+        }
+        for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+            h[i][i] += 2.0 * e * x[j] * x[j];
+            h[j][j] += 2.0 * e * x[i] * x[i];
+            h[i][j] += 4.0 * e * x[i] * x[j];
+            h[j][i] += 4.0 * e * x[i] * x[j];
+        }
+        let mut out = Array1::zeros(3);
+        for i in 0..3 {
+            for j in 0..3 {
+                out[i] += h[i][j] * v[j];
+            }
+        }
+        Ok(Some(out))
+    }
+}
+
+fn axial_session(soft: f64, negative_tol: f64, max_steps: usize) -> LandscapeSession {
+    let search = MinModeConfig::default()
+        .with_force_tol(1.0e-8)
+        .with_max_move(0.05)
+        .with_saddle_check(None);
+    let certificate = SaddleIndexCheck::default()
+        .with_negative_tol(negative_tol)
+        .with_residual_tol(1.0e-8);
+    let config = LandscapeConfig::default()
+        .with_push(0.5)
+        .with_duplicate_distance(1.0e-2)
+        .with_max_steps(max_steps)
+        .with_search(IndexKConfig::new(1, search).with_residual_tol(1.0e-8))
+        .with_certificate(certificate)
+        .with_relax(
+            RelaxConfig::default()
+                .with_force_tol(1.0e-8)
+                .with_max_atom_move(0.05)
+                .with_initial_step(0.02),
+        );
+    let modes = ndarray::Array2::eye(3);
+    LandscapeSession::new(config, array![0.0, 0.0, 0.0], Some(modes))
+        .unwrap_or_else(|err| panic!("axial {soft} session: {err}"))
+}
+
+fn assert_index_gap_refused(outcome: Result<PathwayMap, SaddleError>) {
+    match outcome {
+        Err(SaddleError::Solver(message)) => assert!(
+            message.contains("index"),
+            "solver error should name the index: {message}"
+        ),
+        Ok(map) => {
+            let edges: Vec<_> = map
+                .edges
+                .iter()
+                .map(|edge| (map.nodes[edge.parent].index, map.nodes[edge.child].index))
+                .collect();
+            panic!("stored an index gap: {edges:?}");
+        }
+        Err(err) => panic!("{err}"),
+    }
+}
+
+#[test]
+fn a_curvature_between_the_threshold_and_zero_cannot_skip_an_index() {
+    let soft = -0.5 * NEGATIVE_CURVATURE_TOL;
+    assert!(soft < 0.0 && soft > -NEGATIVE_CURVATURE_TOL);
+    let outcome = axial_session(soft, NEGATIVE_CURVATURE_TOL, 30).run(&Axial { soft });
+    assert_index_gap_refused(outcome);
+}
+
+#[test]
+fn a_downward_leg_requires_the_child_index_to_be_one_less() {
+    // A push smaller than the force tolerance from the index-2 origin of
+    // Wells leaves the index-1 leg converged at the origin itself, whose
+    // certified index is 2 instead of 1. The parent is index 2, so the edge
+    // has to be refused.
+    let search = MinModeConfig::default()
+        .with_force_tol(1.0e-6)
+        .with_max_move(0.1)
+        .with_saddle_check(None);
+    let config = LandscapeConfig::default()
+        .with_push(1.0e-9)
+        .with_duplicate_distance(1.0e-2)
+        .with_max_steps(100)
+        .with_search(IndexKConfig::new(1, search).with_residual_tol(1.0e-8))
+        .with_relax(
+            RelaxConfig::default()
+                .with_force_tol(1.0e-8)
+                .with_max_atom_move(0.1)
+                .with_initial_step(0.05),
+        );
+    let outcome = LandscapeSession::new(config, array![0.0, 0.0, 0.0], None)
+        .unwrap()
+        .run(&Wells);
+    match outcome {
+        Err(SaddleError::Solver(message)) => {
+            assert!(
+                message.contains("child index is"),
+                "expected the child index to be refused, got {message}"
+            );
+        }
+        other => panic!("expected a refused child index, got {other:?}"),
+    }
+}
+
+struct SoftWells {
+    soft: f64,
+}
+
+impl PointSurface for SoftWells {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (a, b, c) = (x[0], x[1], x[2]);
+        let energy = (a.powi(4) - 2.0 * a * a) / 4.0
+            + self.soft * (b.powi(4) - 2.0 * b * b) / 4.0
+            + c * c / 2.0;
+        Ok((
+            energy,
+            array![a.powi(3) - a, self.soft * (b.powi(3) - b), c],
+        ))
+    }
+
+    fn hessian_vector(
+        &self,
+        x: ArrayView1<f64>,
+        v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        Ok(Some(array![
+            (3.0 * x[0] * x[0] - 1.0) * v[0],
+            self.soft * (3.0 * x[1] * x[1] - 1.0) * v[1],
+            v[2],
+        ]))
+    }
+}
+
+#[test]
+fn non_default_negative_tol_converges_and_certifies_together() {
+    // SoftWells with soft = 5e-4 has an index-2 saddle at the origin with
+    // curvatures (-1.0, -5e-4, 1.0) and index-1 saddles at (±1, 0, 0) with
+    // curvatures (2.0, -5e-4, 1.0). Threading a non-default negative_tol of
+    // 1e-4 through certificate alone makes IndexKSession converge at (±1, 0, 0)
+    // and saddle_index certify every node without mismatch.
+    let search = MinModeConfig::default()
+        .with_force_tol(1.0e-6)
+        .with_max_move(0.1)
+        .with_saddle_check(None);
+    let config = LandscapeConfig::default()
+        .with_push(0.5)
+        .with_duplicate_distance(1.0e-2)
+        .with_max_steps(1200)
+        .with_search(IndexKConfig::new(1, search).with_residual_tol(1.0e-8))
+        .with_certificate(
+            SaddleIndexCheck::default()
+                .with_negative_tol(1.0e-4)
+                .with_residual_tol(1.0e-8),
+        )
+        .with_relax(
+            RelaxConfig::default()
+                .with_force_tol(1.0e-6)
+                .with_max_atom_move(0.1)
+                .with_initial_step(0.05),
+        );
+    let map = LandscapeSession::new(config, array![0.0, 0.0, 0.0], None)
+        .unwrap()
+        .run(&SoftWells { soft: 5.0e-4 })
+        .unwrap_or_else(|err| panic!("non-default negative_tol 1e-4 failed: {err}"));
+    assert_eq!(map.nodes.len(), 9, "{map:?}");
+    assert_eq!(map.edges.len(), 12, "{:?}", map.edges);
+    assert_eq!(map.nodes[0].index, 2);
+    for edge in &map.edges {
+        assert_eq!(
+            map.nodes[edge.parent].index,
+            map.nodes[edge.child].index + 1
+        );
+    }
+
+    // Larger-than-default negative_tol (2e-2) on Wells also converges and
+    // certifies every child node cleanly.
+    let large_tol_map = LandscapeSession::new(
+        wells_config().with_negative_tol(2.0e-2),
+        array![0.0, 0.0, 0.0],
+        None,
+    )
+    .unwrap()
+    .run(&Wells)
+    .unwrap_or_else(|err| panic!("non-default negative_tol 2e-2 failed: {err}"));
+    check_wells(&large_tol_map);
+
+    // With negative_tol = 1e-2 on Axial { soft: -5e-3 }, IndexKSession
+    // receives the same 1e-2 threshold rather than converging at 1e-3 and
+    // then failing certification with "child index is 0".
+    let mismatched_soft = -5.0e-3;
+    let agreed = axial_session(mismatched_soft, 1.0e-2, 30).run(&Axial {
+        soft: mismatched_soft,
+    });
+    if let Err(SaddleError::Solver(message)) = &agreed {
+        assert!(
+            !message.contains("child index is"),
+            "index-k converged at a point certification rejects: {message}"
+        );
+    }
+    assert_index_gap_refused(agreed);
 }
 
 #[test]
