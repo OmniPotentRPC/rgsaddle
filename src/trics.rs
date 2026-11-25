@@ -384,13 +384,21 @@ impl TricSystem {
         for (slot, coordinate) in primitive.iter_mut().zip(&self.primitives) {
             *slot = coordinate.difference(left, right)?;
         }
-        Ok(self.basis.t().dot(&primitive))
+        let difference = self.basis.t().dot(&primitive);
+        if difference.iter().any(|value| !value.is_finite()) {
+            return Err(SaddleError::NonFinite("TRIC delocalized difference"));
+        }
+        Ok(difference)
     }
 
     /// Wilson B matrix of the nonredundant coordinates.
     pub fn wilson_b(&self, positions: ArrayView1<'_, f64>) -> Result<Array2<f64>, SaddleError> {
         let primitive = primitive_wilson_b(&self.primitives, positions)?;
-        Ok(self.basis.t().dot(&primitive))
+        let matrix = self.basis.t().dot(&primitive);
+        if matrix.iter().any(|value| !value.is_finite()) {
+            return Err(SaddleError::NonFinite("TRIC Wilson matrix"));
+        }
+        Ok(matrix)
     }
 
     /// Highest primitive stability diagnostic at `positions`.
@@ -421,7 +429,8 @@ impl TricSystem {
         }
         let mut positions = start.to_owned();
         let mut remaining = displacement.to_owned();
-        let initial_error = remaining.dot(&remaining).sqrt();
+        let initial_error =
+            finite_scalar(remaining.dot(&remaining).sqrt(), "TRIC inversion residual")?;
         if initial_error <= config.tolerance {
             return Ok(positions);
         }
@@ -451,7 +460,10 @@ impl TricSystem {
                 .difference(trial.view(), positions.view())
                 .and_then(|actual| {
                     let next_remaining = &remaining - &actual;
-                    let error = next_remaining.dot(&next_remaining).sqrt();
+                    let error = finite_scalar(
+                        next_remaining.dot(&next_remaining).sqrt(),
+                        "TRIC inversion residual",
+                    )?;
                     if error > best_error {
                         return Ok(None);
                     }
@@ -1666,20 +1678,26 @@ fn linear_bend(
 ) -> Result<f64, SaddleError> {
     let u = sub(atom(positions, left)?, atom(positions, center)?);
     let v = sub(atom(positions, right)?, atom(positions, center)?);
-    let (nu, nv) = (norm(u), norm(v));
+    let (nu, nv) = (
+        finite_scalar(norm(u), "TRIC linear bend left length")?,
+        finite_scalar(norm(v), "TRIC linear bend right length")?,
+    );
     if nu <= VECTOR_TOLERANCE || nv <= VECTOR_TOLERANCE {
         return Err(SaddleError::Invalid(
             "TRIC linear bend has a zero length leg".into(),
         ));
     }
-    Ok(dot(
-        [
-            u[0] / nu + v[0] / nv,
-            u[1] / nu + v[1] / nv,
-            u[2] / nu + v[2] / nv,
-        ],
-        direction,
-    ))
+    finite_scalar(
+        dot(
+            [
+                u[0] / nu + v[0] / nv,
+                u[1] / nu + v[1] / nv,
+                u[2] / nu + v[2] / nv,
+            ],
+            direction,
+        ),
+        "TRIC linear bend dot product",
+    )
 }
 
 fn linear_angular_diagnostic(
@@ -1728,21 +1746,27 @@ fn dihedral(
     let b0 = sub(atom(positions, a)?, atom(positions, b)?);
     let b1 = sub(atom(positions, c)?, atom(positions, b)?);
     let b2 = sub(atom(positions, d)?, atom(positions, c)?);
-    let b1_norm = norm(b1);
+    let b1_norm = finite_scalar(norm(b1), "TRIC dihedral central bond length")?;
     if b1_norm <= VECTOR_TOLERANCE {
         return Err(SaddleError::Invalid(
             "TRIC dihedral has a zero central bond".into(),
         ));
     }
     let axis = scale(b1, 1.0 / b1_norm);
-    let v = sub(b0, scale(axis, dot(b0, axis)));
-    let w = sub(b2, scale(axis, dot(b2, axis)));
-    if norm(v) <= VECTOR_TOLERANCE || norm(w) <= VECTOR_TOLERANCE {
+    let b0_axis = finite_scalar(dot(b0, axis), "TRIC dihedral left projection")?;
+    let b2_axis = finite_scalar(dot(b2, axis), "TRIC dihedral right projection")?;
+    let v = sub(b0, scale(axis, b0_axis));
+    let w = sub(b2, scale(axis, b2_axis));
+    let v_norm = finite_scalar(norm(v), "TRIC dihedral left normal length")?;
+    let w_norm = finite_scalar(norm(w), "TRIC dihedral right normal length")?;
+    if v_norm <= VECTOR_TOLERANCE || w_norm <= VECTOR_TOLERANCE {
         return Err(SaddleError::Invalid(
             "TRIC dihedral is undefined at a linear angle".into(),
         ));
     }
-    Ok(dot(cross(axis, v), w).atan2(dot(v, w)))
+    let sine = finite_scalar(dot(cross(axis, v), w), "TRIC dihedral sine product")?;
+    let cosine = finite_scalar(dot(v, w), "TRIC dihedral cosine product")?;
+    finite_scalar(sine.atan2(cosine), "TRIC dihedral angle")
 }
 
 fn out_of_plane(
@@ -1757,17 +1781,26 @@ fn out_of_plane(
     let last = sub(atom(positions, d)?, atom(positions, c)?);
     let normal_last = cross(middle, last);
     let normal_first = cross(first, middle);
-    if norm(middle) <= VECTOR_TOLERANCE
-        || norm(normal_last) <= VECTOR_TOLERANCE
-        || norm(normal_first) <= VECTOR_TOLERANCE
+    let middle_norm = finite_scalar(norm(middle), "TRIC out of plane central length")?;
+    let last_norm = finite_scalar(norm(normal_last), "TRIC out of plane last normal length")?;
+    let first_norm = finite_scalar(norm(normal_first), "TRIC out of plane first normal length")?;
+    if middle_norm <= VECTOR_TOLERANCE
+        || last_norm <= VECTOR_TOLERANCE
+        || first_norm <= VECTOR_TOLERANCE
     {
         return Err(SaddleError::Invalid(
             "TRIC out of plane coordinate is singular".into(),
         ));
     }
-    let numerator = dot(first, normal_last) * norm(middle);
-    let denominator = dot(normal_last, normal_first);
-    Ok(numerator.atan2(denominator))
+    let numerator = finite_scalar(
+        finite_scalar(dot(first, normal_last), "TRIC out of plane triple product")? * middle_norm,
+        "TRIC out of plane numerator",
+    )?;
+    let denominator = finite_scalar(
+        dot(normal_last, normal_first),
+        "TRIC out of plane denominator",
+    )?;
+    finite_scalar(numerator.atan2(denominator), "TRIC out of plane angle")
 }
 
 fn out_of_plane_diagnostic(
@@ -1811,7 +1844,7 @@ fn angle_normal(
         sub(atom(positions, a)?, atom(positions, b)?),
         sub(atom(positions, c)?, atom(positions, b)?),
     );
-    let length = norm(normal);
+    let length = finite_scalar(norm(normal), "TRIC angle normal length")?;
     if length <= VECTOR_TOLERANCE {
         return Err(SaddleError::Invalid("TRIC angle normal is singular".into()));
     }
@@ -3262,6 +3295,34 @@ mod tests {
         ));
         assert!(matches!(
             TricPrimitive::Angle(0, 1, 2).derivative(huge_angle.view()),
+            Err(SaddleError::NonFinite(_))
+        ));
+        assert!(matches!(
+            TricPrimitive::LinearBend(0, 1, 2, [1.0, 0.0, 0.0]).value(huge_angle.view()),
+            Err(SaddleError::NonFinite(_))
+        ));
+
+        let huge_dihedral = array![
+            0.0, 1.0, 0.0, 1.0e308, 0.0, 0.0, -1.0e308, 0.0, 0.0, 0.0, -1.0, 0.0
+        ];
+        assert!(matches!(
+            TricPrimitive::Dihedral(0, 1, 2, 3).value(huge_dihedral.view()),
+            Err(SaddleError::NonFinite(_))
+        ));
+        assert!(matches!(
+            TricPrimitive::OutOfPlane(0, 1, 2, 3).value(huge_dihedral.view()),
+            Err(SaddleError::NonFinite(_))
+        ));
+
+        let start = array![0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let system = TricSystem::new(start.view(), &TricConfig::default()).unwrap();
+        let displacement = Array1::from_elem(system.dimension(), 1.0e308);
+        assert!(matches!(
+            system.back_transform(
+                start.view(),
+                displacement.view(),
+                &TricInversionConfig::default()
+            ),
             Err(SaddleError::NonFinite(_))
         ));
     }
