@@ -18,6 +18,21 @@ Band and minimum-mode force norms are selected by ~rgsaddle_band_set_force_gate~
 
 ~rgsaddle_idpp_path~ (ABI minor 19) writes an initial path. ~n_images~ counts the endpoints and must be at least 3. ~reactant~ and ~product~ each hold ~3 * n_atoms~ doubles. ~out~ holds ~n_images * 3 * n_atoms~ doubles, image-major. ~cell~ is a row-major 3x3 lattice, or NULL in free space. A singular cell returns ~RGSADDLE_INVALID_PARAMETER~. Interior images are relaxed toward interpolated minimum-image pair distances. ~max_iterations~, ~grad_tol~, and ~max_move~ are the per-image L-BFGS stop. The call does not evaluate a surface.
 
+~rgsaddle_trics_path~ (ABI minor 63) refines an initial free-space path.
+~initial~ and ~out~ each hold ~n_images * 3 * n_atoms~ doubles.
+The inversion, diagnostic, and splice arguments correspond to
+=TricsConfig=, and every length among them is in angstrom.
+~length_per_angstrom~ is the length of one angstrom in the caller's
+coordinates, 1.0 for angstrom and 0.1 for nanometres; a path in other units
+is converted before the work and back before it is written.  A non-positive
+or non-finite value returns ~RGSADDLE_INVALID_PARAMETER~.  The call does not
+evaluate a surface.  A diagnostic maze
+with no stable route, a coordinate singularity that damped inversion cannot
+pass, or an inversion or splice that does not converge returns
+~RGSADDLE_SOLVER~.  See
+=howto/path-initialization= for the Rust selector and the published splice
+tolerance.
+
 ~rgsaddle_connect~ (ABI minor 18) is the run-to-completion double-ended search. Stamp ~rgsaddle_connect_config_t~ with the ABI version. ~max_calls~ is a positive iteration cap and ~force_tol~ is the Euclidean stop. A nonzero ~quench_nodes~ minimizes a node created by a split before the next segment. ~left~ and ~right~ each hold ~3 * n_atoms~ positions, and ~position~ receives the returned geometry. The surface is called with one image and writes the energy and the Cartesian gradient. ~rgsaddle_connect_report_t~ carries the energy, the Euclidean gradient norm, the kind (~s~, ~u~, or ~f~), the Hessian index, and the evaluation count. The count includes finite differences that decide a step or an index. The Lanczos acceptance estimates the next curvature with two actions and does not build a dense Hessian. The COMPASS fallback does, and that Hessian is counted.
 
 From ABI minor 21 a climbing band refines its climbing image by the lowest mode (see the band how-to). While that runs, each surface request carries the climbing image alone: a per-image host gets ~RGSADDLE_REQ_ONE_IMAGE~ with that image's band index, and a batched host gets one geometry with ~n_images = 1~ and ~image = -1~. From a band config at minor 22 those requests also set ~RGSADDLE_REQ_CLIMBING_IMAGE~ (request flags bit 1), and a batched one then carries the climbing image's band index in ~image~, so a host that keeps per-image state, or that gives the one image every MPI rank, knows which image it is. A config below minor 22 gets the minor 21 request. The step report carries the curvature along the mode in ~curvature~ and 0 on a band step. Set ~RGSADDLE_BAND_NO_MIN_MODE~ (band config flag bit 3) for the plain CI-NEB of minor 20.

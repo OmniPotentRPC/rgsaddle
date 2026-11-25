@@ -2340,6 +2340,111 @@ pub unsafe extern "C" fn rgsaddle_idpp_path(
 
 mod geodesic;
 pub use geodesic::*;
+
+/// Refine an initial free-space path in translation rotation internal
+/// coordinates with endpoint splicing.
+///
+/// Every length control is in angstrom and `length_per_angstrom` is the
+/// length of one angstrom in the caller's coordinates; `out` is returned in
+/// the caller's coordinates.
+///
+/// # Safety
+/// `initial` and `out` must be non-null, aligned pointers to buffers of
+/// `n_images * 3 * n_atoms` doubles owned by the caller. `initial` and `out`
+/// may be identical for in-place refinement or completely disjoint; partial
+/// buffer overlap is rejected.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_trics_path(
+    n_images: i64,
+    n_atoms: i64,
+    initial: *const f64,
+    max_inversion_iterations: i64,
+    inversion_tolerance: f64,
+    max_move: f64,
+    diagnostic_threshold: i32,
+    splice_tolerance: f64,
+    max_splice_iterations: i64,
+    length_per_angstrom: f64,
+    out: *mut f64,
+) -> i32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if initial.is_null() || out.is_null() {
+            return RGSADDLE_INVALID_PARAMETER;
+        }
+        if n_images < 2 || n_atoms < 1 {
+            return RGSADDLE_SHAPE;
+        }
+        if max_inversion_iterations < 1
+            || max_splice_iterations < 1
+            || !(0..=6).contains(&diagnostic_threshold)
+        {
+            return RGSADDLE_INVALID_PARAMETER;
+        }
+        let Ok(images) = usize::try_from(n_images) else {
+            return RGSADDLE_SHAPE;
+        };
+        let Some(dof) = usize::try_from(n_atoms)
+            .ok()
+            .and_then(|atoms| atoms.checked_mul(3))
+        else {
+            return RGSADDLE_SHAPE;
+        };
+        let Some(total) = dof.checked_mul(images) else {
+            return RGSADDLE_SHAPE;
+        };
+        let Some(bytes) = total.checked_mul(std::mem::size_of::<f64>()) else {
+            return RGSADDLE_SHAPE;
+        };
+        if bytes > isize::MAX as usize {
+            return RGSADDLE_SHAPE;
+        }
+        let Ok(max_inversion_iterations) = usize::try_from(max_inversion_iterations) else {
+            return RGSADDLE_INVALID_PARAMETER;
+        };
+        let Ok(max_splice_iterations) = usize::try_from(max_splice_iterations) else {
+            return RGSADDLE_INVALID_PARAMETER;
+        };
+        let initial_addr = initial as usize;
+        let out_addr = out as usize;
+        let Some(initial_end) = initial_addr.checked_add(bytes) else {
+            return RGSADDLE_INVALID_PARAMETER;
+        };
+        let Some(out_end) = out_addr.checked_add(bytes) else {
+            return RGSADDLE_INVALID_PARAMETER;
+        };
+        if initial_addr != out_addr && initial_addr < out_end && out_addr < initial_end {
+            return RGSADDLE_INVALID_PARAMETER;
+        }
+        let initial_vec = unsafe { slice::from_raw_parts(initial, total).to_vec() };
+        let initial = match Array2::from_shape_vec((images, dof), initial_vec) {
+            Ok(path) => path,
+            Err(_) => return RGSADDLE_SHAPE,
+        };
+        let config = crate::TricsConfig::default()
+            .with_inversion(
+                crate::TricInversionConfig::default()
+                    .with_max_iterations(max_inversion_iterations)
+                    .with_tolerance(inversion_tolerance)
+                    .with_max_atom_move(max_move),
+            )
+            .with_diagnostic_threshold(diagnostic_threshold as u8)
+            .with_splice_tolerance(splice_tolerance)
+            .with_max_splice_iterations(max_splice_iterations)
+            .with_length_per_angstrom(length_per_angstrom);
+        match crate::trics_path(initial.view(), &config) {
+            Ok(report) => {
+                let out = unsafe { slice::from_raw_parts_mut(out, total) };
+                for (slot, value) in out.iter_mut().zip(&report.path) {
+                    *slot = *value;
+                }
+                RGSADDLE_OK
+            }
+            Err(err) => status_of(&err),
+        }
+    }))
+    .unwrap_or(RGSADDLE_SOLVER)
+}
+
 mod indexk;
 pub use indexk::*;
 mod lineb;

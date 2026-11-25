@@ -991,6 +991,40 @@ static int test_band_minmode_index1_and_sessions_cdylib(void) {
   return 0;
 }
 
+static int test_trics_path_runtime(void) {
+  double initial[5 * 3];
+  double out[5 * 3] = {0};
+  for (int64_t image = 0; image < 5; ++image) {
+    initial[3 * image] = 0.25 * (double)image;
+    initial[3 * image + 1] = 0.1 * (double)image;
+    initial[3 * image + 2] = 0.0;
+  }
+  CHECK(rgsaddle_trics_path(5, 1, initial, 50, 1e-8, 0.1, 1, 0.0018,
+                            1000, 1.0, out) == RGSADDLE_OK,
+        "TRICS path runtime");
+  CHECK(memcmp(initial, out, sizeof initial) == 0,
+        "TRICS translation path remains linear");
+  CHECK(rgsaddle_trics_path(5, 1, NULL, 50, 1e-8, 0.1, 1, 0.0018,
+                            1000, 1.0, out) == RGSADDLE_INVALID_PARAMETER,
+        "TRICS null input");
+  CHECK(rgsaddle_trics_path(5, 1, initial, 50, 1e-8, 0.1, 1, 0.0018,
+                            1000, 1.0, NULL) == RGSADDLE_INVALID_PARAMETER,
+        "TRICS null output");
+  CHECK(rgsaddle_trics_path(5, 1, initial, 0, 1e-8, 0.1, 1, 0.0018,
+                            1000, 1.0, out) == RGSADDLE_INVALID_PARAMETER,
+        "TRICS invalid inversion config");
+  CHECK(rgsaddle_trics_path(5, 1, initial, 50, 1e-8, 0.1, 7, 0.0018,
+                            1000, 1.0, out) == RGSADDLE_INVALID_PARAMETER,
+        "TRICS invalid diagnostic config");
+  CHECK(rgsaddle_trics_path(5, 1, initial, 50, 1e-8, 0.1, 1, 0.0018,
+                            1000, 0.0, out) == RGSADDLE_INVALID_PARAMETER,
+        "TRICS zero length unit");
+  CHECK(rgsaddle_trics_path(5, 1, initial, 50, 1e-8, 0.1, 1, 0.0018,
+                            1000, -1.0, out) == RGSADDLE_INVALID_PARAMETER,
+        "TRICS negative length unit");
+  return 0;
+}
+
 int main(void) {
   if (test_status_and_gates() != 0) {
     return 1;
@@ -1014,6 +1048,9 @@ int main(void) {
     return 1;
   }
   if (test_minmode_rotation_angle_defaults_and_torque_window() != 0) {
+    return 1;
+  }
+  if (test_trics_path_runtime() != 0) {
     return 1;
   }
   printf("RGSADDLE_CAPI_CONTRACTS_OK\n");
