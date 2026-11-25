@@ -557,3 +557,102 @@ def test_autoneb_writes_the_band_from_rank_zero_alone(tmp_path, rank: int) -> No
     if rank != 0:
         assert os.path.getmtime(f"{prefix}001.traj") == before
 
+
+class Triangle(Calculator):
+    """Harmonic springs between every pair of three atoms, so rigid motion costs nothing."""
+
+    implemented_properties = ["energy", "forces"]
+    rest = {(0, 1): 1.0, (0, 2): 1.0, (1, 2): 1.2}
+
+    def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
+        Calculator.calculate(self, atoms, properties, system_changes)
+        positions = atoms.positions
+        energy = 0.0
+        forces = np.zeros_like(positions)
+        for (i, j), rest in self.rest.items():
+            bond = positions[j] - positions[i]
+            length = float(np.linalg.norm(bond))
+            stretch = length - rest
+            energy += 0.5 * stretch * stretch
+            pull = stretch * bond / length
+            forces[i] += pull
+            forces[j] -= pull
+        self.results = {"energy": energy, "forces": forces}
+
+
+def _rotation(axis, angle):  # type: ignore[no-untyped-def]
+    axis = np.asarray(axis, dtype=np.float64) / np.linalg.norm(axis)
+    k = np.array([[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]])
+    return np.eye(3) + np.sin(angle) * k + (1.0 - np.cos(angle)) * (k @ k)
+
+
+def _turned_triangle_band(tmp_path, name, remove):  # type: ignore[no-untyped-def]
+    reactant = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.4, 0.9, 0.0]])
+    bent = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.6, 0.7, 0.3]])
+    turn = _rotation([0.3, 0.2, 1.0], np.radians(50.0))
+    product = bent @ turn.T + np.array([2.0, -1.0, 0.5])
+    images = [Atoms("H3", positions=reactant), Atoms("H3", positions=product)]
+    from ase.io import write
+
+    prefix = str(tmp_path / name)
+    for index, atoms in enumerate(images):
+        write(f"{prefix}{index:03d}.traj", atoms)
+
+    def attach(images):  # type: ignore[no-untyped-def]
+        for image in images:
+            image.calc = Triangle()
+
+    return AutoNEB(
+        attach,
+        prefix,
+        n_simul=1,
+        n_max=4,
+        fmax=0.05,
+        maxsteps=50,
+        k=1.0,
+        climb=False,
+        method="improvedtangent",
+        optimizer=FIRE,
+        parallel=False,
+        remove_rotation_and_translation=remove,
+        interpolate_method="linear",
+    )
+
+
+def _ase_fit_moves(target, atoms) -> float:  # type: ignore[no-untyped-def]
+    from ase.build import minimize_rotation_and_translation
+
+    moved = atoms.copy()
+    minimize_rotation_and_translation(target, moved)
+    return float(np.abs(moved.positions - atoms.positions).max())
+
+
+def test_kabsch_matches_the_ase_rigid_fit() -> None:
+    from ase.build import minimize_rotation_and_translation
+
+    from rgsaddle.ase import _kabsch
+
+    rng = np.random.default_rng(11)
+    target = rng.normal(size=(6, 3))
+    turn = _rotation([1.0, -2.0, 0.5], 2.0)
+    moving = (target + 0.05 * rng.normal(size=(6, 3))) @ turn.T + np.array([3.0, 1.0, -2.0])
+    fitted = _kabsch(target, moving)
+    reference = Atoms("H6", positions=moving)
+    minimize_rotation_and_translation(Atoms("H6", positions=target), reference)
+    assert np.allclose(fitted, reference.positions, atol=1e-8)
+
+
+def test_autoneb_removes_rotation_as_well_as_translation(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    report = _turned_triangle_band(tmp_path, "aligned", remove=True).run()
+    images = report.images
+    assert len(images) == 4
+    for index in range(1, len(images)):
+        assert _ase_fit_moves(images[index - 1], images[index]) < 1e-8, index
+    # Each fit puts an image's centroid on its predecessor's, so the band
+    # shares the reactant's centroid and the product's offset is gone.
+    centre = images[0].positions.mean(axis=0)
+    for image in images:
+        assert np.allclose(image.positions.mean(axis=0), centre, atol=1e-8)
+
+    kept = _turned_triangle_band(tmp_path, "kept", remove=False).run()
+    assert _ase_fit_moves(kept.images[-2], kept.images[-1]) > 0.1

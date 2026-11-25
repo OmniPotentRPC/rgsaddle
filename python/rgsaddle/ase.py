@@ -1045,6 +1045,33 @@ class SingleCalculatorNEB(NEB):
         super().__init__(images, *args, **kwargs)
 
 
+def _kabsch(target: Float64, moving: Float64) -> Float64:
+    """``moving`` rotated and translated onto ``target`` at the least RMSD.
+
+    Kabsch's fit, the optimum ``ase.build.minimize_rotation_and_translation``
+    reaches for a non-periodic image. Rows are atoms. A reflection is not
+    a rotation, so the last singular direction flips when the fit would
+    otherwise mirror the image.
+    """
+    centre = moving.mean(axis=0)
+    target_centre = target.mean(axis=0)
+    p = moving - centre
+    q = target - target_centre
+    u, _s, vt = np.linalg.svd(p.T @ q)
+    flip = np.eye(3)
+    if np.linalg.det(u @ vt) < 0.0:
+        flip[2, 2] = -1.0
+    return np.asarray(p @ (u @ flip @ vt) + target_centre, dtype=np.float64)
+
+
+def _align_rows(rows: Float64, natoms: int) -> Float64:
+    """Each image of ``rows`` (images, 3N) fitted onto the one before it."""
+    aligned = np.array(rows, dtype=np.float64, copy=True).reshape(len(rows), natoms, 3)
+    for index in range(1, len(aligned)):
+        aligned[index] = _kabsch(aligned[index - 1], aligned[index])
+    return np.ascontiguousarray(aligned.reshape(len(rows), natoms * 3))
+
+
 def _pair_of(value: Any, name: str) -> tuple[float, float] | None:
     """Two-stage ``(build, climb)`` number, or None when ``value`` is scalar."""
     if isinstance(value, (list, tuple, np.ndarray)):
@@ -1095,11 +1122,15 @@ class AutoNEB:
     match ``ase.mep.AutoNEB``. ``world=None`` is ``ase.parallel.world``.
     Image-parallel MPI (``parallel=True`` on more than one rank) is
     refused. With ``parallel=False`` every rank runs the same search and
-    rank 0 alone writes the trajectories. The stored
-    images must agree on the atom count, the atomic numbers, ``pbc``,
-    and the periodic cell vectors, as ASE's ``NEB`` requires. The
-    endpoints keep their own ``Atoms`` records and a new interior image
-    copies the start. The optimizer must be FIRE or a subclass of it: the steps are the
+    rank 0 alone writes the trajectories. The stored images must agree
+    on the atom count, the atomic numbers, ``pbc``, and the periodic
+    cell vectors, as ASE's ``NEB`` requires. The endpoints keep their
+    own ``Atoms`` records and a new interior image copies the start.
+    ``remove_rotation_and_translation=True`` removes the mean force in
+    the core and, for a free, non-periodic band, fits every image onto
+    the one before it (Kabsch) before and after the search, as
+    ``minimize_rotation_and_translation`` does. The
+    optimizer must be FIRE or a subclass of it: the steps are the
     band's FIRE solver, and ``maxstep`` on that class is the per-atom
     cap. A numeric signature default is that number. A default of
     None uses the optimizer's documented ``defaults['maxstep']``,
@@ -1224,7 +1255,11 @@ class AutoNEB:
                 ).reshape(-1)
             return energies, gradients
 
+        natoms = len(template)
         positions = _image_positions(self.all_images)
+        rotate = self._can_align()
+        if rotate:
+            positions = _align_rows(positions, natoms)
         local_fmax, force_tol = _staged(self.fmax)
         local_steps, climb_steps = _staged_int(self.maxsteps)
         report = autoneb_run(
@@ -1247,9 +1282,10 @@ class AutoNEB:
             cell=_periodic_cell(self.all_images),
             fixed=_fixed_atoms(self.all_images),
         )
-        finished = np.asarray(report.positions, dtype=np.float64)
         count = int(report.n_images)
-        natoms = len(template)
+        finished = np.asarray(report.positions, dtype=np.float64)[:count]
+        if rotate:
+            finished = _align_rows(finished, natoms)
         coords = finished.reshape(count, natoms, 3)
         # Each endpoint keeps its own Atoms record. A new interior image
         # copies the start, as ASE copies the image left of the cut.
@@ -1297,6 +1333,19 @@ class AutoNEB:
                 raise OSError("AutoNEB files must be ordered sequentially without gaps")
         self.all_images = [read(f"{self.prefix}{i:03d}.traj") for i in index_exists]
         self.iteration = 0
+
+    def _can_align(self) -> bool:
+        """The rigid fit applies to a free, non-periodic band.
+
+        A periodic band keeps the mean force removal alone, as ASE drops
+        the rotation there. A fixed atom must not move, so a band with
+        ``FixAtoms`` is not rotated either.
+        """
+        if not self.remove_rotation_and_translation:
+            return False
+        if _fixed_atoms(self.all_images) is not None:
+            return False
+        return not bool(np.asarray(self.all_images[0].pbc, dtype=bool).any())
 
     def get_energies(self) -> list[float]:
         """Potential energy of each image. A missing calculator result is NaN."""
