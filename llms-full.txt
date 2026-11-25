@@ -2247,13 +2247,13 @@ During a climb, consecutive lowest modes must retain an absolute overlap of `Art
 Two saddles are one when their energies differ by less than `saddle_energy_tol` and their per-atom RMSD is below `saddle_rmsd_tol`. Product minima use `minimum_energy_tol` and `minimum_rmsd_tol` the same way. The RMSD is per atom and Cartesian, under the minimum image when `cell` is set; it does not match permuted identical atoms, so symmetry copies of one saddle on different atoms count as different saddles.
 
 ### Pick policies
-| Policy                | Score of an untried arm                                                                                          |
+| Policy                | Score of an untried arm                                                                                                     |
 | --- | --- |
-| `Gap` (default)       | angle to the nearest tried direction on the same centre, times the distinct states among the three nearest tried |
-| `ExpectedImprovement` | expected improvement on the barrier from a Gaussian process on the centre's sphere, times the gap over π         |
-| `Auto`                | `ExpectedImprovement` once two different barriers are known, `Gap` before                                        |
+| `Gap` (default)       | angle to the nearest tried direction on the same centre, times the distinct states of the start and the three nearest tried |
+| `ExpectedImprovement` | expected improvement on the barrier from a Gaussian process on the centre's sphere, times the gap over π                    |
+| `Auto`                | `ExpectedImprovement` once two different barriers are known, `Gap` before                                                   |
 
-The start counts as one state in the gap score, so a hole bounded by arms that led to different minima is tried before one whose edges all came back. The expected improvement is that of Jones, Schonlau and Welch (J. Global Optim. 13, 455 (1998), doi:10.1023/A:1008306431147) with kernel `exp(-θ²/2ℓ²)` of angular length scale `length_scale` (0.6 rad), the mean and variance of all known barriers, and target `best barrier - ei_margin`. `ExpectedImprovement` alone refuses to score before two different barriers are known. Ties go to the centre with fewer tried arms, then the lower atom, then the lower cover point, so the first pass touches every centre once. `batch` arms (1 by default) are picked greedily, each scored as if the earlier picks of the batch were already tried.
+The states of a gap are the start together with the products of its three nearest tried directions, and the start always counts. A hole whose nearest arms reached products A and B scores three times its angle, one that reached only A scores twice its angle, and one whose edges all came back or failed scores its angle. Failed, non-converged and still pending arms add no state, and a centre with nothing tried scores π. So a hole bounded by arms that led to different minima is tried before one whose edges all came back. The expected improvement is that of Jones, Schonlau and Welch (J. Global Optim. 13, 455 (1998), doi:10.1023/A:1008306431147) with kernel `exp(-θ²/2ℓ²)` of angular length scale `length_scale` (0.6 rad), the mean and variance of all known barriers, and target `best barrier - ei_margin`. `ExpectedImprovement` alone refuses to score before two different barriers are known. Ties go to the centre with fewer tried arms, then the lower atom, then the lower cover point, so the first pass touches every centre once. `batch` arms (1 by default) are picked greedily, each scored as if the earlier picks of the batch were already tried.
 
 ### Coverage readout
 `CoverageReport` has:

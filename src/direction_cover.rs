@@ -57,10 +57,15 @@
 //!
 //! [`ArmPolicy::Gap`] scores an untried arm by its angular gap, the
 //! angle to the nearest tried direction on the same centre, times the
-//! number of distinct product states among the three nearest tried
-//! directions (the start counts as one state). A hole bounded by arms
-//! that led to different minima is where an unseen saddle can sit, so it
-//! is tried before a hole whose edges all led to the same place.
+//! number of distinct states among the start and the products of the
+//! three nearest tried directions. The start always counts, so a hole
+//! bounded by arms reaching products A and B scores three times its
+//! angle, one reaching only A twice, and one whose edges all came back
+//! or failed once. Failed, non-converged and still pending arms add no
+//! state. With nothing tried on a centre the score is \(\pi\). A hole
+//! bounded by arms that led to different minima is where an unseen
+//! saddle can sit, so it is tried before a hole whose edges all led to
+//! the same place.
 //! [`ArmPolicy::ExpectedImprovement`] is the expected improvement of
 //! Jones, Schonlau and Welch (*J. Global Optim.* **1998**, *13*, 455,
 //! <https://doi.org/10.1023/A:1008306431147>) on the barrier, from a
@@ -110,7 +115,8 @@ const BOUNDARY_NEIGHBOURS: usize = 3;
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArmPolicy {
-    /// Angular gap times the distinct product states on its boundary.
+    /// Angular gap times the distinct states on its boundary, the start
+    /// included.
     Gap,
     /// Expected improvement of the barrier times the gap fraction.
     /// [`DirectionCover::suggest`] returns [`SaddleError::Invalid`]
@@ -482,7 +488,8 @@ pub struct ProductState {
 pub struct ArmSuggestion {
     /// Centre and cover point.
     pub arm: ArmId,
-    /// Acquisition score: radians for [`ArmPolicy::Gap`], energy for
+    /// Acquisition score: radians times the boundary state count for
+    /// [`ArmPolicy::Gap`], energy times the gap fraction for
     /// [`ArmPolicy::ExpectedImprovement`].
     pub score: f64,
     /// Policy that produced the score, never [`ArmPolicy::Auto`].
@@ -1098,6 +1105,10 @@ impl DirectionCover {
         Ok(picks)
     }
 
+    /// Angle from `point` to the nearest tried direction times the
+    /// distinct states in the start plus the states of the
+    /// [`BOUNDARY_NEIGHBOURS`] nearest tried directions. Unlabelled
+    /// directions add no state. Pi on a centre with nothing tried.
     fn gap_score(&self, tried: &[(usize, State)], point: usize) -> f64 {
         if tried.is_empty() {
             return PI;
