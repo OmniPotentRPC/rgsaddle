@@ -74,6 +74,7 @@ pub mod capi;
 pub mod capi_hyperplane;
 pub mod connect;
 pub mod defect_pair;
+pub mod direction_cover;
 pub mod error;
 pub mod geodesic;
 pub mod idpp;
@@ -152,6 +153,11 @@ pub use defect_pair::{
     periodic_capture_log_likelihood, periodic_sink_rate, periodic_sink_survival, product_tangent,
     seeded_saddles, segment_band, shell_pair_factor, smoluchowski_rate, sphere_hit_probability,
     spherical_return_probability, volume_from_frequency,
+};
+pub use direction_cover::{
+    ArmFailure, ArmId, ArmOutcome, ArmPolicy, ArmRecord, ArmSuggestion, ArmTrial, AtomCoverage,
+    CoverBudget, CoverageReport, DirectionCover, DirectionCoverConfig, ProductState, SaddleEntry,
+    covering_radius_s2, sphere_cover,
 };
 pub use elastic::{
     ElasticMultipole, LocalField, Octupole, Quadrupole, StrainGradient, quadrupole_energy,
