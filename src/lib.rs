@@ -84,6 +84,7 @@ pub mod indexk;
 pub mod lammps;
 pub mod line_neb;
 pub mod lineb;
+pub mod mass_metric;
 pub mod minmode;
 pub mod nichols;
 pub mod npt;
@@ -200,6 +201,7 @@ pub use lineb::{
     cartesian_image_hessian, hqtst_rate_from_image_hessians, hqtst_rate_interpolated_hessian,
     hqtst_rate_interpolated_hessian_observed, hqtst_rate_interpolated_hessian_with_step,
 };
+pub use mass_metric::{MassMetric, MetricCovector, MetricPoint, MetricTangent};
 pub use minmode::{
     ArtNConfig, FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession,
     MinModeStatus, ModeEstimate, PointSurface, RaisedStep, halve_raised_energy,

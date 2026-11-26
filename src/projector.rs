@@ -12,6 +12,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Zip, s};
 use rgmin::Manifold;
 
 use crate::SaddleError;
+use crate::mass_metric::MassMetric;
 use crate::minmode::{FiniteDifference, MinModeConfig, MinModeSession, ModeEstimate, PointSurface};
 use crate::region::Region;
 
@@ -356,15 +357,17 @@ impl Hyperplane {
                 "Cartesian plane point and normal need one length".into(),
             ));
         }
-        Self::new(&position * &sqrt_mass, &normal / &sqrt_mass)
+        let weights = MassMetric::from_square_roots(sqrt_mass.view())?.sqrt_vector();
+        Self::new(&position * &weights, &normal / &weights)
     }
 
     /// Map this mass-weighted plane back to Cartesian coordinates.
     pub fn to_cartesian(&self, masses: &[f64]) -> Result<(Array1<f64>, Array1<f64>), SaddleError> {
-        let sqrt_mass = sqrt_masses(masses, self.dim())?;
-        let normal = &self.normal * &sqrt_mass;
+        let weights =
+            MassMetric::from_square_roots(sqrt_masses(masses, self.dim())?.view())?.sqrt_vector();
+        let normal = &self.normal * &weights;
         let norm = normal.dot(&normal).sqrt();
-        Ok((&self.point / &sqrt_mass, normal / norm))
+        Ok((&self.point / &weights, normal / norm))
     }
 
     /// A point on the plane.
@@ -769,6 +772,34 @@ mod tests {
         fn eval(&self, q: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
             let gradient = &array![-1.0, 2.0, 5.0] * &q;
             Ok((0.5 * q.dot(&gradient), gradient))
+        }
+    }
+
+    #[test]
+    fn cartesian_plane_matches_direct_square_roots() {
+        let masses = [1.0, 3.0, 8.0];
+        let position = array![0.4, -0.2, 0.125];
+        let normal = array![1.0, -0.5, 0.25];
+        let plane = Hyperplane::from_cartesian(position.view(), normal.view(), &masses).unwrap();
+        let sqrt_mass = array![masses[0].sqrt(), masses[1].sqrt(), masses[2].sqrt()];
+        let expected_point = &position * &sqrt_mass;
+        for (actual, expected) in plane.point().iter().zip(expected_point.iter()) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        let weighted_normal = &normal / &sqrt_mass;
+        let expected_normal = &weighted_normal / weighted_normal.dot(&weighted_normal).sqrt();
+        for (actual, expected) in plane.normal().iter().zip(expected_normal.iter()) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        let (back_point, back_normal) = plane.to_cartesian(&masses).unwrap();
+        let restored_normal = &plane.normal() * &sqrt_mass;
+        let restored_normal = &restored_normal / restored_normal.dot(&restored_normal).sqrt();
+        let restored_point = &plane.point() / &sqrt_mass;
+        for (actual, expected) in back_point.iter().zip(restored_point.iter()) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        for (actual, expected) in back_normal.iter().zip(restored_normal.iter()) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
         }
     }
 

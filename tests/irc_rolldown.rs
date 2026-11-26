@@ -87,6 +87,33 @@ impl PointSurface for CoupledSaddle {
     }
 }
 
+#[test]
+fn mass_metric_path_matches_the_previous_coupled_saddle_path() {
+    let expected = [
+        [0.07515226507563502, -0.00685627930258775],
+        [0.15030341438670294, -0.013713322931339028],
+        [0.2254546267425083, -0.020570323375468415],
+        [0.3006058567284258, -0.02742731174320197],
+        [0.3757571011532456, -0.03428429022045871],
+        [0.45090377024639505, -0.04114440193695381],
+        [0.5260515577931324, -0.04800374787347736],
+        [0.6012000608426238, -0.054862603870565095],
+    ];
+    let mut session = IrcSession::new(
+        IrcConfig::default().with_dx(0.08).with_force_tol(0.001),
+        Array1::zeros(6),
+        Array1::from(vec![1.0, 16.0]),
+        Array1::from(vec![1.0, 0.0, 0.0, 0.3, 0.0, 0.0]),
+        IrcDirection::Forward,
+    )
+    .unwrap();
+
+    for point in expected {
+        session.step(&CoupledSaddle).unwrap();
+        assert_eq!([session.position()[0], session.position()[3]], point);
+    }
+}
+
 /// The IRC leaves the saddle along the lowest eigenvector `u` of
 /// `M^{-1/2} H M^{-1/2}`, so the kick is `dx M^{-1/2} u`. With masses 1
 /// and 16 the lowest Cartesian eigenvector of `H` is a different direction.

@@ -15,7 +15,7 @@ Each call to ~step~ performs one outer IRC move, of one of three kinds.
 
 ~tests/irc_mueller_brown.rs~ fits both orders on the Mueller-Brown surface.
 
-~new~ accepts a molecular Cartesian packing and atom masses. ~new_euclidean~ accepts an arbitrary nonzero dimension with unit coordinate weights. ~from_surface~ estimates the launch mode through Hessian actions as the lowest eigenvector of the mass-weighted Hessian. A host can instead pass a measured mode to ~new~.
+~new~ accepts a molecular Cartesian packing and atom masses. ~new_euclidean~ accepts an arbitrary nonzero dimension with unit coordinate weights. Those weights are a ~MassMetric~. A ~MetricPoint~ and a ~MetricTangent~ are multiplied by the square root of the mass, and a ~MetricCovector~ (a force or a gradient) is divided by it. ~from_surface~ estimates the launch mode through Hessian actions as the lowest eigenvector of the mass-weighted Hessian. A host can instead pass a measured mode to ~new~.
 
 * Runnable example: forward and reverse IRC branches
 

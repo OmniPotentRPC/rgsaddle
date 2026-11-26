@@ -53,6 +53,7 @@ use rgmin::{Control, Method, Oracle, Solver, StopNorm};
 
 use crate::bennett::Transmission;
 use crate::error::SaddleError;
+use crate::mass_metric::MassMetric;
 use crate::mic::Cell;
 use crate::minmode::PointSurface;
 use crate::ohtst::plane::{Hyperplane, orthonormal_rows};
@@ -159,8 +160,15 @@ impl PermutationDistance {
                 "the distance needs one positive mass per atom".into(),
             ));
         }
+        let metric = match &self.masses {
+            Some(masses) if !masses.is_empty() => Some(MassMetric::atoms(
+                ArrayView1::from(masses.as_slice()),
+                3 * atoms,
+            )?),
+            _ => None,
+        };
         let position = |x: ArrayView1<f64>, k: usize| {
-            let scale = self.masses.as_ref().map_or(1.0, |m| m[k].sqrt());
+            let scale = metric.as_ref().map_or(1.0, |metric| metric.sqrt_at(3 * k));
             [x[3 * k] / scale, x[3 * k + 1] / scale, x[3 * k + 2] / scale]
         };
         let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -948,8 +956,10 @@ fn analytic_transmission_coefficient<S: PointSurface>(
         ));
     }
     let root = match &config.masses {
-        Some(masses) => Array1::from_iter(masses.iter().map(|m| m.sqrt())),
-        None => Array1::ones(n),
+        Some(masses) => {
+            MassMetric::coordinates(ArrayView1::from(masses.as_slice()), n)?.sqrt_vector()
+        }
+        None => MassMetric::unit(n)?.sqrt_vector(),
     };
     let normal = plane.normal().to_owned();
     let mut flux_normal = &normal / &root;
@@ -1322,6 +1332,27 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn mass_weighted_permutation_distance_matches_direct_square_roots() {
+        let mass = 3.0;
+        let distance = PermutationDistance::new(vec![0]).with_masses(vec![mass]);
+        let left = array![1.0, -0.5, 0.25];
+        let right = array![-0.25, 0.125, 0.5];
+        let scale = mass.sqrt();
+        let mut squared = 0.0;
+        for coordinate in 0..3 {
+            let delta = left[coordinate] / scale - right[coordinate] / scale;
+            squared += delta * delta;
+        }
+        assert_eq!(
+            distance
+                .distance(left.view(), right.view())
+                .unwrap()
+                .to_bits(),
+            squared.sqrt().to_bits()
+        );
     }
 
     #[test]
