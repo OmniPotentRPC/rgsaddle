@@ -58,6 +58,7 @@ use rgmin::Method;
 
 use crate::error::SaddleError;
 use crate::force::ForceGate;
+use crate::idpp::{PathInitializer, initialize_path};
 use crate::minmode::{
     MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface, translated_gradient,
 };
@@ -113,6 +114,12 @@ pub struct ConnectConfig {
     pub quench_nodes: bool,
     /// Interior images on the IDPP band that seeds the min-mode climb.
     pub band_images: usize,
+    /// Optional initial path builder for the band that seeds the min-mode
+    /// climb. `None` uses `connect`'s built-in steepest-descent IDPP band;
+    /// `Some(initializer)` passes the caller's [`PathInitializer`] (and any
+    /// embedded [`crate::idpp::IdppConfig`] or [`crate::idpp::TricsStartConfig`])
+    /// directly to [`crate::idpp::initialize_path`].
+    pub path_initializer: Option<PathInitializer>,
     /// Relative change of the lowest Lanczos Ritz value that ends an
     /// estimate. 0.05 is the improved Lanczos tolerance (quit early
     /// when the curvature along the incoming mode has settled);
@@ -152,6 +159,7 @@ with_setters!(ConnectConfig {
     with_n_loops => n_loops: val usize,
     with_quench_nodes => quench_nodes: val bool,
     with_band_images => band_images: val usize,
+    with_path_initializer => path_initializer: opt PathInitializer,
     with_lanczos_rel_tol => lanczos_rel_tol: val f64,
     with_lanczos_iterations => lanczos_iterations: val usize,
     with_minmode_max_move => minmode_max_move: val f64,
@@ -193,6 +201,7 @@ impl ConnectConfig {
             n_loops: cap,
             quench_nodes: true,
             band_images: 5,
+            path_initializer: None,
             lanczos_rel_tol: 0.05,
             lanczos_iterations: 8,
             minmode_max_move: 0.1,
@@ -630,15 +639,29 @@ fn climb_idpp_band(
         return Ok(None);
     }
     let interiors = settings.band_images.clamp(1, 32);
-    let mut path = Vec::with_capacity(interiors + 2);
-    path.push(left.to_vec());
-    for image in 1..=interiors {
-        let fraction = image as f64 / (interiors as f64 + 1.0);
-        let linear = linear_mix(left, right, fraction);
-        let target = mix_distances(&upper_distances(left), &upper_distances(right), fraction);
-        path.push(relax_idpp(&linear, &target));
-    }
-    path.push(right.to_vec());
+    let path = match &settings.path_initializer {
+        None => {
+            let mut path = Vec::with_capacity(interiors + 2);
+            path.push(left.to_vec());
+            for image in 1..=interiors {
+                let fraction = image as f64 / (interiors as f64 + 1.0);
+                let linear = linear_mix(left, right, fraction);
+                let target =
+                    mix_distances(&upper_distances(left), &upper_distances(right), fraction);
+                path.push(relax_idpp(&linear, &target));
+            }
+            path.push(right.to_vec());
+            path
+        }
+        Some(initializer) => {
+            let left = ArrayView1::from(left);
+            let right = ArrayView1::from(right);
+            initialize_path(left, right, interiors + 2, None, initializer)?
+                .outer_iter()
+                .map(|row| row.to_vec())
+                .collect()
+        }
+    };
 
     // The endpoints are already known. Only the interior images are
     // candidates, so their energies are the ones that pick the climb.
@@ -2393,5 +2416,122 @@ mod tests {
         assert!((up[0] - 1.0).abs() < 1e-12);
         let down = improved_tangent(&path, &[3.0, 1.0, 0.0], 1);
         assert!((down[0] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn connect_honors_custom_idpp_config() {
+        use crate::idpp::{IdppConfig, PathInitializer, idpp_path};
+        use ndarray::ArrayView1;
+
+        let left = [0.0, 0.0, 0.0, 2.0, 0.02, 0.0];
+        let right = [2.0, 1.0, 0.0, 0.0, 1.02, 0.0];
+        let custom = IdppConfig::default()
+            .with_max_iterations(1)
+            .with_max_move(0.01);
+        let default = IdppConfig::default();
+
+        let capture_interior = |idpp: &IdppConfig| -> Vec<f64> {
+            let mut seen: Option<Vec<f64>> = None;
+            let cfg = super::ConnectConfig::optbench(1)
+                .with_band_images(1)
+                .with_path_initializer(PathInitializer::Idpp(idpp.clone()));
+            let _ = super::connect(
+                |pos| {
+                    seen = Some(pos.to_vec());
+                    Err(super::SaddleError::Surface("stop".into()))
+                },
+                &left,
+                &right,
+                &cfg,
+            );
+            seen.expect("connect must evaluate the interior band image")
+        };
+
+        let custom_img = capture_interior(&custom);
+        let default_img = capture_interior(&default);
+
+        let expected_custom = idpp_path(
+            ArrayView1::from(&left),
+            ArrayView1::from(&right),
+            3,
+            None,
+            &custom,
+        )
+        .unwrap();
+        let expected_default = idpp_path(
+            ArrayView1::from(&left),
+            ArrayView1::from(&right),
+            3,
+            None,
+            &default,
+        )
+        .unwrap();
+
+        for (got, want) in custom_img.iter().zip(expected_custom.row(1).iter()) {
+            assert!(
+                (got - want).abs() < 1e-12,
+                "custom IDPP image differed from idpp_path: got {custom_img:?}, want {:?}",
+                expected_custom.row(1)
+            );
+        }
+        for (got, want) in default_img.iter().zip(expected_default.row(1).iter()) {
+            assert!(
+                (got - want).abs() < 1e-12,
+                "default IDPP image differed from idpp_path: got {default_img:?}, want {:?}",
+                expected_default.row(1)
+            );
+        }
+
+        let pair_dist = |pos: &[f64]| {
+            ((pos[3] - pos[0]).powi(2) + (pos[4] - pos[1]).powi(2) + (pos[5] - pos[2]).powi(2))
+                .sqrt()
+        };
+        assert!(
+            pair_dist(&custom_img) < 0.05,
+            "1-step small-move IdppConfig should stay near the linear midpoint, got pair distance {}",
+            pair_dist(&custom_img)
+        );
+        assert!(
+            pair_dist(&default_img) > 1.9,
+            "default IdppConfig should separate the crossing pair, got pair distance {}",
+            pair_dist(&default_img)
+        );
+    }
+
+    #[test]
+    fn connect_rejects_invalid_idpp_config_before_surface_calls() {
+        use crate::idpp::{IdppConfig, PathInitializer, TricsSeed, TricsStartConfig};
+
+        let left = [0.0, 0.0, 0.0, 2.0, 0.02, 0.0];
+        let right = [2.0, 1.0, 0.0, 0.0, 1.02, 0.0];
+        let invalid = IdppConfig::default().with_max_iterations(0);
+
+        for initializer in [
+            PathInitializer::Idpp(invalid.clone()),
+            PathInitializer::Trics(TricsStartConfig::default().with_seed(TricsSeed::Idpp(invalid))),
+        ] {
+            let mut calls = 0usize;
+            let cfg = super::ConnectConfig::optbench(1)
+                .with_band_images(1)
+                .with_path_initializer(initializer);
+            let err = super::connect(
+                |pos| {
+                    calls += 1;
+                    Ok((0.0, vec![0.0; pos.len()]))
+                },
+                &left,
+                &right,
+                &cfg,
+            )
+            .expect_err("zero max_iterations IdppConfig must be rejected");
+            assert!(
+                matches!(err, super::SaddleError::Invalid(_)),
+                "expected SaddleError::Invalid, got {err:?}"
+            );
+            assert_eq!(
+                calls, 0,
+                "invalid IdppConfig must fail before surface calls"
+            );
+        }
     }
 }

@@ -4,6 +4,11 @@
 * Band and minimum-mode
 The band and the minimum-mode search assemble a force and ask =rgmin::Solver= for one step. Hosts interleave trust regions, drift budgets, acquisition, or a hybrid minimum-mode following (MMF) between steps. =run= is a loop over =step=. The shared reflection, the point presets, and the chain are in @@rst::doc:`one stencil <explanation/one-stencil>`@@.
 
+* Translation rotation internal coordinates with splicing
+@@rst::doc:`TRICS <explanation/trics>`@@ builds a nonredundant coordinate
+system at every initial image, selects overlapping stable charts, interpolates
+inside each chart, and splices their endpoints.
+
 * Crystal symmetry regions
 The operation lifting, the split between path multiplicity and in-plane
 region degeneracy, and the nearest-image convention are described in
