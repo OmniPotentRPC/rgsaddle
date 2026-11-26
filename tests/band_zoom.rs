@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use ndarray::{Array1, Array2, ArrayView2, s};
 use rgsaddle::{
-    BandConfig, BandSession, BandStatus, BandSurface, SaddleError, SpringKind, ZoomConfig,
+    BandConfig, BandSession, BandStatus, BandSurface, CiConfig, SaddleError, SpringKind, ZoomConfig,
 };
 
 type Pot = fn(f64, f64, f64) -> (f64, [f64; 3]);
@@ -208,4 +208,51 @@ fn the_zoom_decides_before_the_min_mode_refinement_starts() {
     };
     assert!(refined_steps > 0, "the refinement runs after the zoom");
     assert_saddle_at(&session, report.ci_index, 0.0);
+}
+
+fn zoom_band() -> BandConfig {
+    BandConfig::default()
+        .with_max_move(0.1)
+        .with_min_mode(None)
+        .with_saddle_check(None)
+        .with_climbing(Some(CiConfig::always()))
+        .with_zoom(Some(
+            ZoomConfig::default().with_stability(5).with_after(1.0e6),
+        ))
+}
+
+#[test]
+fn reset_then_step_matches_a_fresh_session_after_zoom_progress() {
+    let surface = Recorded::new(well);
+    let config = zoom_band();
+    let mut aged = BandSession::new(config.clone(), band()).unwrap();
+    for _ in 0..4 {
+        let report = aged.step(&surface).unwrap();
+        assert_eq!(report.status, BandStatus::Running);
+        assert!(aged.zoom_window().is_none());
+    }
+    aged.reset();
+    let mut fresh = BandSession::new(config.clone(), aged.positions().to_owned()).unwrap();
+    assert_eq!(aged.zoom_window(), fresh.zoom_window());
+    let aged_report = aged.step(&surface).unwrap();
+    let fresh_report = fresh.step(&surface).unwrap();
+    assert_eq!(aged.zoom_window(), fresh.zoom_window());
+    assert_eq!(aged.positions(), fresh.positions());
+    assert_eq!(aged_report.status, fresh_report.status);
+    assert_eq!(aged_report.ci_index, fresh_report.ci_index);
+
+    let mut placed = BandSession::new(config.clone(), band()).unwrap();
+    let mut steps = 0;
+    while placed.zoom_window().is_none() {
+        placed.step(&surface).unwrap();
+        steps += 1;
+        assert!(steps < 30, "the band did not zoom");
+    }
+    placed.reset();
+    let mut fresh_placed = BandSession::new(config, placed.positions().to_owned()).unwrap();
+    assert_eq!(placed.zoom_window(), fresh_placed.zoom_window());
+    placed.step(&surface).unwrap();
+    fresh_placed.step(&surface).unwrap();
+    assert_eq!(placed.zoom_window(), fresh_placed.zoom_window());
+    assert_eq!(placed.positions(), fresh_placed.positions());
 }
