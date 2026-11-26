@@ -1,0 +1,2 @@
+~MinModeSession::set_lbfgs_rotate~ chooses dimer rotation planes with L-BFGS in the tangent space of the axis (Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008), doi:10.1063/1.2815812).
+The modified Newton angle and the extrapolated gradient stay as they are, and the switch is off unless a host sets it.
