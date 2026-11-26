@@ -49,6 +49,7 @@ use super::path::Curve;
 use crate::eigensolve::exact_eigh;
 use crate::error::SaddleError;
 use crate::linalg::numerical_hvp;
+use crate::mass_metric::MassMetric;
 use crate::minmode::PointSurface;
 use crate::sparse_hessian::lanczos_spectrum;
 #[cfg(any(test, feature = "lineb-interpolated-hessian"))]
@@ -154,8 +155,7 @@ fn orbit_residual(
         for k in 0..dof {
             let x = positions[(j, k)];
             let curvature = (x - positions[(prev, k)]) + (x - positions[(next, k)]);
-            let residual =
-                gradients[(j, k)] + path.masses.sqrt_mass[k].powi(2) * spring * curvature;
+            let residual = gradients[(j, k)] + path.masses.sqrt_at(k).powi(2) * spring * curvature;
             if !residual.is_finite() {
                 return Err(SaddleError::NonFinite("replica force residual"));
             }
@@ -532,7 +532,7 @@ fn weighted_block<S: PointSurface>(
     let mut block = Array2::zeros((dof, dof));
     for column in 0..dof {
         let mut direction = Array1::zeros(dof);
-        direction[column] = 1.0 / masses.sqrt_mass[column];
+        direction[column] = masses.inv_sqrt_at(column);
         let product = match surface.hessian_vector(cartesian, direction.view())? {
             Some(product) => product,
             None => numerical_hvp(surface, cartesian, gradient, direction.view(), step, true)?,
@@ -546,7 +546,7 @@ fn weighted_block<S: PointSurface>(
             return Err(SaddleError::NonFinite("Hessian-vector product"));
         }
         for row in 0..dof {
-            block[(row, column)] = product[row] / masses.sqrt_mass[row];
+            block[(row, column)] = product[row] / masses.sqrt_at(row);
         }
     }
     for row in 0..dof {
@@ -599,11 +599,13 @@ fn gauge_modes(beads: &Array2<f64>, masses: &Masses) -> Result<Vec<Array1<f64>>,
         // The whole ring moves rigidly: its replicas are one molecule of
         // `P · atoms` atoms.
         let ring = Array1::from_iter(beads.iter().copied());
-        let sqrt_mass =
-            Array1::from_iter((0..beads.nrows()).flat_map(|_| masses.sqrt_mass.iter().copied()));
+        let sqrt_mass = masses.sqrt_vector();
+        let repeated =
+            Array1::from_iter((0..beads.nrows()).flat_map(|_| sqrt_mass.iter().copied()));
+        let ring_metric = MassMetric::from_square_roots(repeated.view())?;
         modes.extend(rigid_directions(
             ring.view(),
-            sqrt_mass.view(),
+            &ring_metric,
             beads.nrows() * atoms,
         ));
     }
@@ -787,7 +789,7 @@ fn weight_cartesian_hessian(
         for column in 0..dof {
             let symmetric = 0.5 * (hessian[(row, column)] + hessian[(column, row)]);
             weighted_hessian[(row, column)] =
-                symmetric / (masses.sqrt_mass[row] * masses.sqrt_mass[column]);
+                symmetric / (masses.sqrt_at(row) * masses.sqrt_at(column));
         }
     }
     Ok(weighted_hessian)

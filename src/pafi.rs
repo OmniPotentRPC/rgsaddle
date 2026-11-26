@@ -135,6 +135,7 @@ use rgmin::{Control, Error, Method, Oracle, Solver, Status, StopNorm};
 use crate::Region;
 use crate::band::BandSurface;
 use crate::error::SaddleError;
+use crate::mass_metric::MassMetric;
 use crate::minmode::PointSurface;
 use crate::projector::{
     Hyperplane, HyperplaneEnsemble, HyperplaneObservation, HyperplaneSampleBudget,
@@ -593,7 +594,7 @@ pub struct TrajectoryPoint {
 fn mass_weighted_path(
     positions: &Array2<f64>,
     masses: ArrayView1<f64>,
-) -> Result<(Array2<f64>, Vec<f64>), SaddleError> {
+) -> Result<(Array2<f64>, Vec<f64>, MassMetric), SaddleError> {
     let images = positions.nrows();
     let width = positions.ncols();
     if images < 2 || width == 0 {
@@ -617,14 +618,8 @@ fn mass_weighted_path(
             "fixed-energy path masses must be positive".into(),
         ));
     }
-    let sqrt_mass = masses.mapv(f64::sqrt);
-    let mut coordinate = Array2::zeros((images, width));
-    for image in 0..images {
-        for coordinate_index in 0..width {
-            coordinate[(image, coordinate_index)] =
-                positions[(image, coordinate_index)] * sqrt_mass[coordinate_index];
-        }
-    }
+    let metric = MassMetric::coordinates(masses, width)?;
+    let coordinate = metric.weight_point_rows(positions.view());
     if !coordinate.iter().all(|value| value.is_finite()) {
         return Err(SaddleError::NonFinite("fixed-energy path positions"));
     }
@@ -650,7 +645,7 @@ fn mass_weighted_path(
     for value in &mut knots {
         *value /= total;
     }
-    Ok((coordinate, knots))
+    Ok((coordinate, knots, metric))
 }
 
 /// Mass-weighted path and the parallel force along it.
@@ -688,7 +683,7 @@ impl FixedEnergyTrajectory {
         gradients: &Array2<f64>,
         masses: ArrayView1<f64>,
     ) -> Result<Self, SaddleError> {
-        let (coordinate, knots) = mass_weighted_path(positions, masses)?;
+        let (coordinate, knots, metric) = mass_weighted_path(positions, masses)?;
         let images = positions.nrows();
         let width = positions.ncols();
         if gradients.nrows() != images || gradients.ncols() != width {
@@ -699,7 +694,6 @@ impl FixedEnergyTrajectory {
         if !gradients.iter().all(|value| value.is_finite()) {
             return Err(SaddleError::NonFinite("fixed-energy path gradients"));
         }
-        let sqrt_mass = masses.mapv(f64::sqrt);
         let coordinate_spline = Spline::new(&knots, &coordinate, SplineEnds::Natural)?;
         let mut parallel = Array2::zeros((images, 1));
         for image in 0..images {
@@ -709,8 +703,8 @@ impl FixedEnergyTrajectory {
             for coordinate_index in 0..width {
                 let direction = geometry.tangent[coordinate_index];
                 tangent_norm2 += direction * direction;
-                force +=
-                    -gradients[(image, coordinate_index)] * direction / sqrt_mass[coordinate_index];
+                force += -gradients[(image, coordinate_index)] * direction
+                    / metric.sqrt_at(coordinate_index);
             }
             if !tangent_norm2.is_finite() || !force.is_finite() {
                 return Err(SaddleError::NonFinite("fixed-energy path parallel force"));
@@ -2231,6 +2225,55 @@ mod tests {
             path.parallel_force().sample(0.5).unwrap().value,
             by_gradient.parallel_force().sample(0.5).unwrap().value
         );
+    }
+
+    #[test]
+    fn unequal_mass_path_matches_direct_square_root_products() {
+        let positions = array![[0.2, -0.5, 0.1], [0.7, 0.3, -0.4], [1.1, -0.2, 0.8]];
+        let gradients = array![[0.3, -1.5, 0.25], [-0.4, 0.8, 0.1], [1.2, -0.3, -0.6]];
+        let masses = array![1.0, 4.0, 9.0];
+        let path =
+            FixedEnergyTrajectory::from_gradients(&positions, &gradients, masses.view()).unwrap();
+        let sqrt_mass = masses.mapv(f64::sqrt);
+        let width = positions.ncols();
+        for (image, knot) in path.coordinate().knots().iter().copied().enumerate() {
+            let sample = path.coordinate().sample(knot).unwrap();
+            for coordinate in 0..width {
+                let expected = positions[(image, coordinate)] * sqrt_mass[coordinate];
+                assert_eq!(
+                    sample.value[coordinate].to_bits(),
+                    expected.to_bits(),
+                    "coordinate {coordinate} of image {image}"
+                );
+            }
+            let geometry = PathGeometry::on_spline(path.coordinate(), knot).unwrap();
+            let mut tangent_norm2 = 0.0;
+            let mut force = 0.0;
+            for coordinate in 0..width {
+                let direction = geometry.tangent[coordinate];
+                tangent_norm2 += direction * direction;
+                force += -gradients[(image, coordinate)] * direction / sqrt_mass[coordinate];
+            }
+            let expected = force / tangent_norm2.sqrt();
+            assert_eq!(
+                path.parallel_force().sample(knot).unwrap().value[0].to_bits(),
+                expected.to_bits(),
+                "parallel force of image {image}"
+            );
+        }
+
+        let unit = array![1.0, 1.0, 1.0];
+        let unit_path =
+            FixedEnergyTrajectory::from_gradients(&positions, &gradients, unit.view()).unwrap();
+        for (image, knot) in unit_path.coordinate().knots().iter().copied().enumerate() {
+            let sample = unit_path.coordinate().sample(knot).unwrap();
+            for coordinate in 0..width {
+                assert_eq!(
+                    sample.value[coordinate].to_bits(),
+                    positions[(image, coordinate)].to_bits()
+                );
+            }
+        }
     }
 
     #[test]

@@ -290,7 +290,7 @@ The table below lists the main types.
 | `anchored_barriers`            | The same inputs kept on the forward barrier and returned as a `BalancedBarriers`: the reverse barrier the gap below it, the error of the forward barrier, and the `drift` the barrier from the last plane adds. `FreeEnergyProfile::anchored` takes them from a profile |
 | `Hyperplane`                   | OH-TST plane: a point and a unit normal toward the product in mass-weighted coordinates. `from_min_mode` seeds it from a converged dimer or Lanczos session, preferring the vector of a converged saddle-index certificate over the session mode; `packed` and `from_packed` are its `[p; ν]` layout, the one of `PlaneSample::directional`; `from_cartesian` and `to_cartesian` convert; `orthogonal_to_mass_weighted_translations` drops rigid translations from the normal. See [OH-TST types](reference/ohtst.html) for every OH-TST type |
 | `LammpsHyperplaneSampler`      | Opt-in lammpc backend for `HyperplaneSampler`. `LammpsSystem` owns the rgpot configuration and geometry; `LammpsSamplerConfig` owns the time step, friction, thermostat and excluded-mode count; records expose `lammps.thermostat` and `lammps.effective_degrees_of_freedom` |
-| `MassWeighted`                 | `q ` M^{1/2} x= over a Cartesian `PointSurface`; `mass_weighted_rigid_translations` returns the orthonormal rigid-translation rows in these coordinates; `FixedCell` holds the cell of a crystal fixed per temperature. `flux_mass` is `1 / Σ nᵢ²/mᵢ`, not the 2001 Eq. 24 |
+| `MassWeighted`                 | `q ` M^{1/2} x= through `MassMetric` over a Cartesian `PointSurface`; `mass_weighted_rigid_translations` returns the orthonormal rigid-translation rows in these coordinates; `FixedCell` holds the cell of a crystal fixed per temperature. `flux_mass` is `1 / Σ nᵢ²/mᵢ`, not the 2001 Eq. 24 |
 | `sample_plane`                 | Plane-restricted Langevin sampling at `kT` by projected BAOAB or GHMC (`PlaneIntegrator`), reproducible from a seed. `PlaneSample` holds the Euclidean gradient blocks, the centroid torque and the virial, each with a block standard error; `HarmonicReference` adds Stein control variates |
 | `PlaneOptimizer`               | Riemannian trust region (rgmin `minimize_rtr_gauged`) for the plane free energy on the product of the sphere of normals, off the held modes or within a rotation basis, and the offset along the normal; the pivot is a gauge moved to each accepted plane's centroid. `PlaneMetric` weights the sphere or makes the harmonic Hessian its `TangentMetric`. Norm-test sample growth, error-based stop. `PlaneOptimizerConfig` is non-exhaustive |
 | `basin_density`                | `Z_H/Z_R` on a plane through a minimum from the mean force on parallel planes: windows per side that end on a cap, a turn or a width, a not-a-knot spline refined by leave-one-out, Stein control variates from the Hessian at the minimum, and a delta-method error. `reactant_density` keeps the 2001 crossing estimator, whose variance is infinite |
@@ -363,6 +363,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `lineb` | Types: `Continuation`, `HqtstRate`, `LinebCalls`, `LinebConfig`, `LinebPath`, `LinebReport`, `LinebSession`, `LinebStatus`, `Masses`. Functions: `continue_from_mep`, `continue_from_mep_with_observer`, `continue_from_path_with_observer`, `hqtst_rate`, `hqtst_rate_interpolated_hessian` |
 | `linalg` | Types: `NumericalHessian`. Functions: `hessian_vec_sign`, `lift_through`, `modified_gram_schmidt`, `numerical_hvp`, `numerical_hvp_on`, `numerical_hvp_proj`, `project_hvp`, `project_through`, `retract_hvp`, `symmetrize_vt_av`, `transport_hvp` |
 | `line_neb` | Types: `EndpointBelowEnergy`, `FixedEnergySeed`, `LineNebConfig`, `LineNebEndpointViolation`, `LineNebReport`, `LineNebSession`, `LineNebStatus`. Functions: `fixed_energy_action`, `fixed_energy_action_force`, `fixed_energy_mep_seed` |
+| `mass_metric` | Types: `MassMetric`, `MetricCovector`, `MetricPoint`, `MetricTangent` |
 | `mic` | Types: `Cell`. Functions: `wrap_difference` |
 | `minmode` | Types: `ArtNConfig`, `FiniteDifference`, `KrylovBlock`, `MinModeConfig`, `MinModeKind`, `MinModeReport`, `MinModeSession`, `MinModeStatus`, `ModeEstimate`, `PointSurface`, `RaisedStep`. Functions: `halve_raised_energy`, `rotation_force_error`. Constants: `DEFAULT_ROTATION_ANGLE_TOL`, `MODE_RESET_ANGLE` |
 | `nichols` | Types: `HessianUpdate`, `Index1Config`, `Index1Report`, `Index1Session`, `Index1Status`, `NicholsMode`. Functions: `bofill_update`, `cap_max_abs`, `nichols_displacement`, `nichols_step`, `powell_update` |
@@ -1485,7 +1486,7 @@ The search keeps a private per-segment spring list. A fill from two endpoints se
 ## What is optimized
 At a fixed energy `E` below the barrier, the optimal JWKB tunnelling path between two classical turning points minimizes the abbreviated action. Ásgeirsson, Arnaldsson, and Jónsson, J. Chem. Phys. 148, 102334 (2018), doi:10.1063/1.5007180 [asgeirssonEfficientEvaluationAtom2018], find that path with a line-integral extension of the nudged elastic band (LI-NEB). The band itself is the nudged elastic band as practised in Goswami, MethodsX 16, 103899 (2026), doi:10.1016/j.mex.2026.103899 [goswamiReproducibleOrchestration2026], and Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063 [goswamiEnhancedClimbingImage2026].
 
-The module is `line_neb`. Coordinates are mass scaled, and the weight `xi_i` covers every image, both endpoints included, so `fixed_energy_action` is the trapezoid
+The module is `line_neb`. Coordinates are mass scaled by a `MassMetric`: a position is a `MetricPoint`, a displacement is a `MetricTangent`, and a force is a `MetricCovector`. The weight `xi_i` covers every image, both endpoints included, so `fixed_energy_action` is the trapezoid
 
 ```text
 q_i  = sqrt(m) x_i
@@ -1545,7 +1546,7 @@ Set the session policy with `with_endpoint_below_energy`:
 - `EndpointBelowEnergy::Strict` stops immediately and never substitutes a turning point weight. It returns `SaddleError::Invalid`, so the error enum is unchanged. The message names the endpoint (`first` or `last`), the signed difference `V - E`, and the one-based session step. `LineNebEndpointViolation` carries those three fields, and `LineNebSession::endpoint_violation` reads them. The failed step does not advance the session.
 
 ## Dynamics along the path
-`FixedEnergyTrajectory` splines a converged path in mass-weighted coordinates and integrates the motion on the inverted potential along it, the dynamics Ásgeirsson, Arnaldsson, and Jónsson use to find the temperature at which the path is an instanton. `FixedEnergyTrajectory::from_gradients` requires finite positions and gradients and positive finite masses, and returns `SaddleError::NonFinite` or `SaddleError::Invalid` rather than building a path from a bad input. `FixedEnergyTrajectory::from_images` runs the checks that need only positions and masses (shape, finiteness, positive masses, nonzero arc length) before its first surface call, so a surface is never evaluated on input it would refuse. Both splines are a `Spline` with `SplineEnds::Natural`, zero curvature at the end knots; string reparametrization keeps the not-a-knot spline. `Spline::new` with `SplineEnds::NotAKnot` uses the same knot, shape, and finiteness checks as `SplineEnds::Natural` and returns the same typed error. `Spline::sample` returns a `SplineSample` with the value and the first two derivatives. `half` runs from the left turning point until the path ends or the velocity turns back and returns one `TrajectoryPoint` per step, `period` is twice that time, and `arc_at_time` interpolates the arc between stored points. A spent step budget is `SaddleError::Invalid` with a message that starts `work budget exhausted`.
+`FixedEnergyTrajectory` splines a converged path in mass-weighted coordinates from a `MassMetric` and integrates the motion on the inverted potential along it, the dynamics Ásgeirsson, Arnaldsson, and Jónsson use to find the temperature at which the path is an instanton. `FixedEnergyTrajectory::from_gradients` requires finite positions and gradients and positive finite masses, and returns `SaddleError::NonFinite` or `SaddleError::Invalid` rather than building a path from a bad input. `FixedEnergyTrajectory::from_images` runs the checks that need only positions and masses (shape, finiteness, positive masses, nonzero arc length) before its first surface call, so a surface is never evaluated on input it would refuse. Both splines are a `Spline` with `SplineEnds::Natural`, zero curvature at the end knots; string reparametrization keeps the not-a-knot spline. `Spline::new` with `SplineEnds::NotAKnot` uses the same knot, shape, and finiteness checks as `SplineEnds::Natural` and returns the same typed error. `Spline::sample` returns a `SplineSample` with the value and the first two derivatives. `half` runs from the left turning point until the path ends or the velocity turns back and returns one `TrajectoryPoint` per step, `period` is twice that time, and `arc_at_time` interpolates the arc between stored points. A spent step budget is `SaddleError::Invalid` with a message that starts `work budget exhausted`.
 
 ## Units
 None are prescribed. Positions, energies, masses, `hbar`, the spring constant, the restraint, and the time step form one consistent system: `hbar` has units of energy times time, the spring maps a mass-scaled displacement to an action-gradient force, and `endpoint_kappa` times an energy has those same force units.
@@ -2831,7 +2832,7 @@ It prints the pressure of 125 non-interacting atoms against `(N - 1) k T / V`. R
 ## What is computed
 OH-TST takes the dividing surface to be a hyperplane and moves it to the maximum of its free energy. By the variational principle of transition state theory that plane gives the smallest hyperplanar TST rate. Jóhannesson and Jónsson, J. Chem. Phys. 115, 9644 (2001), doi:10.1063/1.1415499, introduced the method; Bligaard and Jónsson, Comput. Phys. Commun. 169, 284 (2005), doi:10.1016/j.cpc.2005.03.064, follow the same optimum on two-dimensional surfaces where the free energy of a line is a single integral.
 
-The module `rgsaddle::ohtst` takes any `PointSurface`. It does not know what a vacancy or a molecule is. Coordinates are mass-weighted, `q ` M^{1/2} x=; `MassWeighted` wraps a Cartesian surface with its masses. A plane is a point `p` and a unit normal `ν` pointing from the reactant to the product, and its free energy is
+The module `rgsaddle::ohtst` takes any `PointSurface`. It does not know what a vacancy or a molecule is. Coordinates are mass-weighted, `q ` M^{1/2} x=; `MassWeighted` wraps a Cartesian surface with a checked `MassMetric`. A plane is a point `p` and a unit normal `ν` pointing from the reactant to the product, and its free energy is
 
     A(p, ν) = -kT ln ∫ δ(ν · (q - p)) exp(-V(q) / kT) dq
 
@@ -3358,7 +3359,7 @@ Each call to `step` performs one outer IRC move, of one of three kinds.
 
 `tests/irc_mueller_brown.rs` fits both orders on the Mueller-Brown surface.
 
-`new` accepts a molecular Cartesian packing and atom masses. `new_euclidean` accepts an arbitrary nonzero dimension with unit coordinate weights. `from_surface` estimates the launch mode through Hessian actions as the lowest eigenvector of the mass-weighted Hessian. A host can instead pass a measured mode to `new`.
+`new` accepts a molecular Cartesian packing and atom masses. `new_euclidean` accepts an arbitrary nonzero dimension with unit coordinate weights. Those weights are a `MassMetric`. A `MetricPoint` and a `MetricTangent` are multiplied by the square root of the mass, and a `MetricCovector` (a force or a gradient) is divided by it. `from_surface` estimates the launch mode through Hessian actions as the lowest eigenvector of the mass-weighted Hessian. A host can instead pass a measured mode to `new`.
 
 ## Runnable example: forward and reverse IRC branches
 
@@ -3468,7 +3469,7 @@ the equal-time orbit separately, including at both turns.
 
 The default endpoint restraint has magnitude `endpoint_scale |V − E| / |∇V|` in mass-weighted coordinates. To use a constant coefficient as in Eqs. (19) and (21), set `with_endpoint_kappa(kappa)` in Rust, pass `endpoint_kappa` to Python, or call `rgsaddle_lineb_solve_with_kappa` from C. Its force magnitude is `kappa |V − E|`. Express the coefficient and the spring constant in the units of the action and coordinates used by the solver.
 
-`Masses::coordinates` takes one mass per coordinate and leaves rigid motions alone. Use it for atoms in an external field, such as adsorbates over a fixed slab. `Masses::molecule` takes one mass per atom for a free molecule. It centers each image and fits it to the first image by a mass-weighted quaternion rotation. `Masses::with_adjacent_alignment(true)` fits each image to the preceding aligned image instead. Each chord then has the minimum length over relative rigid motions, so reversing the band preserves its discrete action.
+`Masses::coordinates` takes one mass per coordinate and leaves rigid motions alone. Use it for atoms in an external field, such as adsorbates over a fixed slab. `Masses::molecule` takes one mass per atom for a free molecule. It centers each image and fits it to the first image by a mass-weighted quaternion rotation. `Masses::with_adjacent_alignment(true)` fits each image to the preceding aligned image instead. Each chord then has the minimum length over relative rigid motions, so reversing the band preserves its discrete action. `Masses` stores a `MassMetric`. Both constructors refuse a mass that is not finite and positive. The metric multiplies a `MetricPoint` and a `MetricTangent` by the square root of the mass and divides a `MetricCovector` by it.
 
 `time_step` is the initial FIRE step. From rest a step moves an image by about `time_step^2 |F|`. The default 0.1 converges the Müller-Brown continuation at every other default; a surface with a stiffer action needs a smaller step. `max_move` caps the step of one atom with molecular masses and the whole band step otherwise. An interior image may not fall below `E + w`, where `w` is `turning_width` times the height of the highest starting image above `E`; a step that would put one there is retried at a shorter length. Any other error from the surface ends the step and is returned.
 
@@ -4364,9 +4365,9 @@ P_x=M^{-1/2}P_qM^{1/2}
 
 Forces are covectors, so their Cartesian map is \(P_x^T\), not \(P_x\).
 The code therefore performs all OH-TST geometry in \(q\).  PAFI without
-explicit masses is the unit-mass case.  `MassWeighted` and
-`Hyperplane::from_cartesian` perform the two coordinate maps rather than
-hiding a metric in a dot product.
+explicit masses is the unit-mass case.  `MassWeighted`,
+`Hyperplane::from_cartesian`, and the fixed-energy path take those maps
+from `MassMetric` rather than hiding a metric in a dot product.
 
 The affine level set is a flat embedded manifold.  Its retraction is exact:
 
@@ -4821,15 +4822,12 @@ a reproducible test.
    Lanczos translation, and band perpendicular splitting through paired
    `project`/`reflect` functions while retaining each call site's current
    arithmetic and golden hashes.
-4. *Mass metric as an explicit type.* Replace repeated square-root mass
-   vectors in PAFI/OH-TST/IRC with a checked metric object that maps points,
-   tangent vectors, and covectors distinctly.
-5. *Additional production engine adapters.* Implement OpenMM and GROMACS
+4. *Additional production engine adapters.* Implement OpenMM and GROMACS
    against `HyperplaneSampler` and the C ABI contract above.
-6. *Production callback bindings.* Complete callback-owned C and Python
+5. *Production callback bindings.* Complete callback-owned C and Python
    engine adapters for optimization, work, TI, and shooting without exposing
    an engine pointer to Rust.
-7. *Paper reproduction suite.* Implement the eight pinned inputs above and
+6. *Paper reproduction suite.* Implement the eight pinned inputs above and
    compare paper observables only after independent quadrature references
    pass.
 
