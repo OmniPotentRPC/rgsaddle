@@ -1473,7 +1473,17 @@ fn dumbbell_searches_start_at_the_sheared_minimum() {
     for pair in barriers.windows(2) {
         assert!(pair[1] < pair[0], "fixed barriers {barriers:?}");
     }
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/solid_dimer_cu.csv");
+    // The tracked benchmark is not a test output. Set
+    // RGSADDLE_WRITE_SOLID_DIMER_CU to a path to keep a copy.
+    let path = std::env::var_os("RGSADDLE_WRITE_SOLID_DIMER_CU").map_or_else(
+        || {
+            std::env::temp_dir().join(format!(
+                "rgsaddle-solid-dimer-cu-{}.csv",
+                std::process::id()
+            ))
+        },
+        PathBuf::from,
+    );
     let mut file = File::create(&path).expect("create copper csv");
     for line in &lines {
         writeln!(file, "{line}").expect("write copper csv");
