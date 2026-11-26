@@ -1,0 +1,3 @@
+Internal ~MassMetric~ maps require equal lengths for a point, a tangent, and a covector.
+Public maps that return a result report ~SaddleError::Shape~ on a mismatch.
+Debug builds assert the same length equality before an unchecked map.
