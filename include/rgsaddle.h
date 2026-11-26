@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 69u
+#define RGSADDLE_ABI_MINOR 70u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -177,7 +177,20 @@ typedef enum {
 
 typedef enum {
   RGSADDLE_TANGENT_SIMPLE = 0,
-  RGSADDLE_TANGENT_IMPROVED = 1
+  RGSADDLE_TANGENT_IMPROVED = 1,
+  /**
+   * Cubic-spline tangent of Makri, Ortner, and Kermode, J. Chem. Phys.
+   * 150, 094109 (2019). The reaction coordinate is the normalized
+   * cumulative chord length. The tangent is dx/ds at unit length and
+   * the parallel spring is the curvature term
+   * 0.5 (k_prev + k_next) / n_images^2 * (d2x/ds2 . t) t.
+   * Read when the config minor is 70 or newer. An older minor treats
+   * this value as the improved tangent. rgsaddle_band_project and
+   * rgsaddle_band_step both assemble this force. Creation refuses it
+   * together with the simplified string, a solid-state cell, free-end
+   * adaptive NEB, or the exponential metric. ABI minor 70.
+   */
+  RGSADDLE_TANGENT_SPLINE = 2
 } rgsaddle_tangent_t;
 
 typedef enum {
@@ -812,6 +825,23 @@ rgsaddle_status_t rgsaddle_trust_update(double radius, double predicted, double 
  */
 rgsaddle_status_t rgsaddle_reparametrize(int64_t n_images, int64_t n_atoms, double *positions,
                                          int64_t anchor, const double *cell, int32_t scheme);
+
+/**
+ * ABI minor 70. Place the interior images on the not-a-knot cubic spline
+ * of the Cartesian rows at equal steps of the normalized cumulative chord
+ * length. This is ASE's string-method redistribution with the identity
+ * preconditioner. positions holds n_images rows of 3 * n_atoms doubles
+ * and is rewritten in place. Rows 0 and n_images - 1 do not move. cell,
+ * when not NULL, is the row-major 3x3 cell and the chords are minimum
+ * images. A null positions, fewer than 3 images, a non-positive atom
+ * count, a non-finite coordinate or cell, a zero-length path, or a
+ * repeated image returns RGSADDLE_INVALID_PARAMETER with positions
+ * unchanged. Finite coordinates whose chord overflows return
+ * RGSADDLE_NON_FINITE with positions unchanged. No surface is
+ * evaluated.
+ */
+rgsaddle_status_t rgsaddle_spline_resample(int64_t n_images, int64_t n_atoms, double *positions,
+                                           const double *cell);
 
 /** Scale `step` so its largest absolute entry equals `trust_radius`. */
 rgsaddle_status_t rgsaddle_cap_max_abs(int64_t n, double *step, double trust_radius);

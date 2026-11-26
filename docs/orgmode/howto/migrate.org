@@ -18,7 +18,7 @@ Python's ~_core.MinMode~ enables the check by default and returns it through ~Se
 
 The spring constant defaults to 0.1, ASE's value. A ~BandSession~ still defaults to 5, eOn's value. Pass the number you mean.
 
-~method='improvedtangent'~ and ~method='aseneb'~ build the same force. The tangent is a unit vector, so ASE's extra division by the tangent norm in the ~aseneb~ climbing step is 1. ~eb~ keeps the full spring. ~dneb~ adds the doubly nudged correction. ~spline~ and ~string~ raise ~NotImplementedError~ naming the method. A ~precon~ does too. The exponential metric stays ~BandConfig.exp_precon~ on the Rust session.
+~method='improvedtangent'~ and ~method='aseneb'~ build the same force. The tangent is a unit vector, so ASE's extra division by the tangent norm in the ~aseneb~ climbing step is 1. ~eb~ keeps the full spring. ~dneb~ adds the doubly nudged correction. ~spline~ takes the unit tangent and the curvature spring from the not-a-knot cubic through the images in normalized chord length (Makri, Ortner, and Kermode, 2019). ~string~ uses that tangent with no spring, and ~set_positions~ places the interior images at equal steps of the same parameter. A ~precon~ raises ~NotImplementedError~. The exponential metric stays ~BandConfig.exp_precon~ on the Rust session.
 
 ~climb=True~ climbs on the call, with no arming delay. It does not climb when a higher endpoint slopes down into the band. ASE climbs the highest image anyway. That image then feels the reflected force and walks up a slope that has no saddle between it and the endpoint. ~tests/python/test_ase_dropin.py~ and ~tests/api_input.rs~ lock the refusal. A ~BandSession~ still waits until the band force drops before it arms the climb; the one-shot projection does not, because the caller already asked for it.
 
@@ -63,10 +63,10 @@ Live Onsager-Machlup displacements are the atomic force over ~2k~. A solid-state
 | skipped | ~test_precon_initialisation~, ~test_single_precon_initialisation~, ~test_list_precon_initialisation~, ~test_precon_assembly~ | asserts ASE Exp preconditioner assembly, not the band force |
 | skipped | ~test_spline_fit~ | asserts ASE's cubic-spline fit object, not the band force |
 | skipped | ~test_integrate_forces~ | integrates forces on ASE's spline fit, not the band force |
-| skipped | ~test_neb_methods~ ~spline~ and ~string~, and any precon | spline, string, and preconditioned NEB have no rgsaddle force |
+| skipped | ~test_neb_methods~ ~spline~ and ~string~, and any precon | those rows drive NEBOptimizer or an Exp preconditioner; the identity spline and string forces are ~tests/python/test_ase_spline_string.py~ |
 | skipped | ~test_neb_tr~ | FIRE step-count ratio follows ASE's partial BFGS IDPP path; the band force matches on one geometry and the barriers agree, but the aligned run is not faster by the factor 0.75 |
 | passing | ~test_dynamic_neb~ | Pt(111)+O, EMT, BFGS; dynamic and scaled DyNEB use fewer force calls than the plain band, and the barriers agree |
-| not supported | ~method~ ~spline~ and ~string~, ~precon~ | no force equivalent; the name is in the ~NotImplementedError~ |
+| not supported | ~precon~ | preconditioned spline and string forces are not implemented; the name is in the ~NotImplementedError~ |
 | not supported | ~parallel~ with ~world.size > 1~ | no MPI image distribution |
 | not supported | ~idpp~ ~mic~ on a partially periodic cell | ~idpp_path~ wraps every axis |
 | not supported | ~idpp_interpolate~ ~optimizer~ other than ~MDMin~ or ~BFGS~, and a custom ~traj~ or ~log~ | the path is ~idpp_path~ and it writes no trajectory |

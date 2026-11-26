@@ -68,8 +68,12 @@ def test_interpolate_places_the_interior_on_the_segment() -> None:
     assert images[1].positions[0, 0] == 0.0
     neb.interpolate(method="idpp")
     assert np.isfinite(images[1].positions).all()
-    with pytest.raises(NotImplementedError, match="spline"):
-        NEB(images, method="spline")
+    spline = NEB(images, method="spline")
+    assert np.all(np.isfinite(spline.get_forces()))
+    string = NEB(images, method="string")
+    assert np.all(np.isfinite(string.get_forces()))
+    with pytest.raises(NotImplementedError, match="no-such-method"):
+        NEB(images, method="no-such-method")
     with pytest.raises(NotImplementedError, match="dynamic_relaxation"):
         NEB(images, dynamic_relaxation=True)
     listed = NEB(images, k=[0.2, 0.4], method="improvedtangent")

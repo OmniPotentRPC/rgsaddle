@@ -43,6 +43,21 @@ def test_spline_unwraps_a_periodic_band() -> None:
     assert np.abs(delta).max() < 1e-12
 
 
+def test_spline_resample_imports_from_the_package() -> None:
+    from rgsaddle import spline_resample
+
+    band = np.ascontiguousarray(
+        [[0.0, 0.0, 0.0], [0.2, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        dtype=np.float64,
+    )
+    moved = np.asarray(spline_resample(band))
+    assert moved.shape == (3, 3)
+    assert np.allclose(moved[0], band[0])
+    assert np.allclose(moved[-1], band[-1])
+    assert abs(float(moved[1, 0]) - 0.5) < 1e-12
+    assert "spline_resample" in rgsaddle.__all__
+
+
 def test_reparametrize_rejects_bad_input() -> None:
     band = _cubic_band(5)
     with pytest.raises(ValueError):

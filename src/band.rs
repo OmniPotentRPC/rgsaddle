@@ -2346,6 +2346,11 @@ fn image_force_into(
     let rule = match config.tangent {
         TangentKind::Simple => crate::stencil::TangentRule::Simple,
         TangentKind::Improved => crate::stencil::TangentRule::Improved,
+        TangentKind::Spline => {
+            return Err(SaddleError::Invalid(
+                "a spline tangent is assembled for the whole band".into(),
+            ));
+        }
     };
     crate::stencil::unit_tangent_into(
         rule,
@@ -2597,6 +2602,45 @@ fn cached_dynamic_inputs(
     ))
 }
 
+/// Makri force on the interior images, from the same spline frame as
+/// [`crate::rtr::spline_interior_forces`].
+#[allow(clippy::too_many_arguments)]
+fn spline_session_force(
+    config: &BandConfig,
+    endpoint_first: ArrayView1<f64>,
+    endpoint_last: ArrayView1<f64>,
+    x: ArrayView1<f64>,
+    energies: &Array1<f64>,
+    gradients: &Array2<f64>,
+    ci: Option<usize>,
+) -> Result<Array1<f64>, SaddleError> {
+    let dof = endpoint_first.len();
+    let n_images = energies.len();
+    if endpoint_last.len() != dof || n_images < 3 || x.len() != (n_images - 2) * dof {
+        return Err(SaddleError::Shape(
+            "spline band force storage does not match the images".into(),
+        ));
+    }
+    let mut positions = Array2::zeros((n_images, dof));
+    positions.row_mut(0).assign(&endpoint_first);
+    positions.row_mut(n_images - 1).assign(&endpoint_last);
+    for i in 1..n_images - 1 {
+        positions
+            .row_mut(i)
+            .assign(&x.slice(s![(i - 1) * dof..i * dof]));
+    }
+    let spring = config.spring.at_band(energies.view(), gradients.view());
+    let (_tangents, force) = crate::rtr::spline_interior_forces(
+        config,
+        positions.view(),
+        energies.view(),
+        gradients.view(),
+        spring.as_ref(),
+        ci,
+    )?;
+    Ok(force)
+}
+
 /// Assemble the projected band force at interior `x`. Returns
 /// (pseudo-energy, projected interior forces, max abs component).
 ///
@@ -2763,99 +2807,116 @@ fn assemble_band_with(
     // so a metric slice carries every image.
     let mut projected = Array1::zeros((n_images - 2) * dof);
     let mut driving = metrics.map(|_| Array1::zeros((n_images - 2) * dof));
-    let assemble_all = || -> Vec<Result<(), SaddleError>> {
-        use rayon::prelude::*;
-        match driving.as_mut() {
-            Some(driving) => images
-                .par_iter_mut()
-                .zip(
-                    projected
-                        .as_slice_mut()
-                        .expect("flat force")
-                        .par_chunks_mut(dof),
-                )
-                .zip(
-                    driving
-                        .as_slice_mut()
-                        .expect("flat driving force")
-                        .par_chunks_mut(dof),
-                )
-                .enumerate()
-                .map(|(index, ((work, projected), driving))| {
-                    let i = index + 1;
-                    assemble_image_force(
-                        config,
-                        state,
-                        &springs,
-                        metric_of(i),
-                        i,
-                        ci_at == Some(i),
-                        endpoint_first,
-                        endpoint_last,
-                        x,
-                        energies,
-                        gradients,
-                        work,
-                        ArrayViewMut1::from(projected),
-                        Some(ArrayViewMut1::from(driving)),
-                    )
-                })
-                .collect(),
-            None => images
-                .par_iter_mut()
-                .zip(
-                    projected
-                        .as_slice_mut()
-                        .expect("flat force")
-                        .par_chunks_mut(dof),
-                )
-                .enumerate()
-                .map(|(index, (work, projected))| {
-                    let i = index + 1;
-                    assemble_image_force(
-                        config,
-                        state,
-                        &springs,
-                        metric_of(i),
-                        i,
-                        ci_at == Some(i),
-                        endpoint_first,
-                        endpoint_last,
-                        x,
-                        energies,
-                        gradients,
-                        work,
-                        ArrayViewMut1::from(projected),
-                        None,
-                    )
-                })
-                .collect(),
+    if config.tangent == TangentKind::Spline {
+        if metrics.is_some() {
+            return Err(SaddleError::Invalid(
+                "the exponential metric does not assemble a spline tangent".into(),
+            ));
         }
-    };
-    if let Some(pool) = &state.pool {
-        for result in pool.install(assemble_all) {
-            result?;
-        }
+        projected = spline_session_force(
+            config,
+            endpoint_first,
+            endpoint_last,
+            x,
+            energies,
+            gradients,
+            ci_at,
+        )?;
     } else {
-        for (index, work) in images.iter_mut().enumerate() {
-            let i = index + 1;
-            let rows = s![index * dof..(index + 1) * dof];
-            assemble_image_force(
-                config,
-                state,
-                &springs,
-                metric_of(i),
-                i,
-                ci_at == Some(i),
-                endpoint_first,
-                endpoint_last,
-                x,
-                energies,
-                gradients,
-                work,
-                projected.slice_mut(rows),
-                driving.as_mut().map(|force| force.slice_mut(rows)),
-            )?;
+        let assemble_all = || -> Vec<Result<(), SaddleError>> {
+            use rayon::prelude::*;
+            match driving.as_mut() {
+                Some(driving) => images
+                    .par_iter_mut()
+                    .zip(
+                        projected
+                            .as_slice_mut()
+                            .expect("flat force")
+                            .par_chunks_mut(dof),
+                    )
+                    .zip(
+                        driving
+                            .as_slice_mut()
+                            .expect("flat driving force")
+                            .par_chunks_mut(dof),
+                    )
+                    .enumerate()
+                    .map(|(index, ((work, projected), driving))| {
+                        let i = index + 1;
+                        assemble_image_force(
+                            config,
+                            state,
+                            &springs,
+                            metric_of(i),
+                            i,
+                            ci_at == Some(i),
+                            endpoint_first,
+                            endpoint_last,
+                            x,
+                            energies,
+                            gradients,
+                            work,
+                            ArrayViewMut1::from(projected),
+                            Some(ArrayViewMut1::from(driving)),
+                        )
+                    })
+                    .collect(),
+                None => images
+                    .par_iter_mut()
+                    .zip(
+                        projected
+                            .as_slice_mut()
+                            .expect("flat force")
+                            .par_chunks_mut(dof),
+                    )
+                    .enumerate()
+                    .map(|(index, (work, projected))| {
+                        let i = index + 1;
+                        assemble_image_force(
+                            config,
+                            state,
+                            &springs,
+                            metric_of(i),
+                            i,
+                            ci_at == Some(i),
+                            endpoint_first,
+                            endpoint_last,
+                            x,
+                            energies,
+                            gradients,
+                            work,
+                            ArrayViewMut1::from(projected),
+                            None,
+                        )
+                    })
+                    .collect(),
+            }
+        };
+        if let Some(pool) = &state.pool {
+            for result in pool.install(assemble_all) {
+                result?;
+            }
+        } else {
+            for (index, work) in images.iter_mut().enumerate() {
+                let i = index + 1;
+                let rows = s![index * dof..(index + 1) * dof];
+                assemble_image_force(
+                    config,
+                    state,
+                    &springs,
+                    metric_of(i),
+                    i,
+                    ci_at == Some(i),
+                    endpoint_first,
+                    endpoint_last,
+                    x,
+                    energies,
+                    gradients,
+                    work,
+                    projected.slice_mut(rows),
+                    driving.as_mut().map(|force| force.slice_mut(rows)),
+                )?;
+            }
         }
     }
     let mut max_component = state.convergence_force(&projected);
@@ -2880,24 +2941,36 @@ fn assemble_band_with(
             .ci_index
             .store(climb_target.map_or(-1, |i| i as i64), Ordering::Relaxed);
         if let Some(ci_i) = climb_target {
-            let index = ci_i - 1;
-            let rows = s![index * dof..(index + 1) * dof];
-            assemble_image_force(
-                config,
-                state,
-                &springs,
-                metric_of(ci_i),
-                ci_i,
-                true,
-                endpoint_first,
-                endpoint_last,
-                x,
-                energies,
-                gradients,
-                &mut images[index],
-                projected.slice_mut(rows),
-                driving.as_mut().map(|force| force.slice_mut(rows)),
-            )?;
+            if config.tangent == TangentKind::Spline {
+                projected = spline_session_force(
+                    config,
+                    endpoint_first,
+                    endpoint_last,
+                    x,
+                    energies,
+                    gradients,
+                    Some(ci_i),
+                )?;
+            } else {
+                let index = ci_i - 1;
+                let rows = s![index * dof..(index + 1) * dof];
+                assemble_image_force(
+                    config,
+                    state,
+                    &springs,
+                    metric_of(ci_i),
+                    ci_i,
+                    true,
+                    endpoint_first,
+                    endpoint_last,
+                    x,
+                    energies,
+                    gradients,
+                    &mut images[index],
+                    projected.slice_mut(rows),
+                    driving.as_mut().map(|force| force.slice_mut(rows)),
+                )?;
+            }
             max_component = state.convergence_force(&projected);
         }
     }
@@ -3327,6 +3400,28 @@ impl BandSession {
         if let Some(fe) = &config.free_end {
             free_end::check_free_end(&config, fe)?;
         }
+        if config.tangent == TangentKind::Spline {
+            if config.string.is_some() {
+                return Err(SaddleError::Invalid(
+                    "the spline tangent is the Makri band force, not the simplified string".into(),
+                ));
+            }
+            if config.solid.is_some() {
+                return Err(SaddleError::Invalid(
+                    "a solid-state band does not assemble a spline tangent".into(),
+                ));
+            }
+            if config.free_end.is_some() {
+                return Err(SaddleError::Invalid(
+                    "free-end adaptive NEB does not assemble a spline tangent".into(),
+                ));
+            }
+            if config.exp_precon.is_some() {
+                return Err(SaddleError::Invalid(
+                    "the exponential metric does not assemble a spline tangent".into(),
+                ));
+            }
+        }
         if !(config.time_step.is_finite() && config.time_step > 0.0) {
             return Err(SaddleError::Invalid(
                 "band time step must be positive and finite".into(),
@@ -3417,6 +3512,11 @@ impl BandSession {
     /// Install the per-image exponential metric on the band solver, or
     /// rebuild it at the current positions. See [`ExpBandPrecon`].
     pub fn set_exp_precon(&mut self, precon: ExpBandPrecon) -> Result<(), SaddleError> {
+        if self.config.tangent == TangentKind::Spline {
+            return Err(SaddleError::Invalid(
+                "the exponential metric does not assemble a spline tangent".into(),
+            ));
+        }
         if self.solid.is_some() {
             return Err(SaddleError::Invalid(
                 "the exponential metric has no pair geometry for a solid-state cell block".into(),
