@@ -50,6 +50,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_halve_raised_energy=. Purpose: Step length after comparing a trial energy with the energy before the step. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_trust_update=. Purpose: Trust radius after a predicted energy change and the change that occurred. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_reparametrize=. Purpose: ABI minor 38. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_spline_resample=. Purpose: ABI minor 70. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_cap_max_abs=. Purpose: Scale `step` so its largest absolute entry equals `trust_radius`. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_index1_create=. Purpose: Index-1 session over one geometry of `3 * n_atoms` coordinates. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_index1_step=. Purpose: One Nichols step, trust cap, and Hessian update. Parameters: the declaration. Units: the caller's.
@@ -360,6 +361,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =RGSADDLE_NOT_CONVERGED=. Purpose: Enumerator of =rgsaddle_status_t=.
 - =RGSADDLE_TANGENT_SIMPLE=. Purpose: Enumerator of =rgsaddle_tangent_t=.
 - =RGSADDLE_TANGENT_IMPROVED=. Purpose: Enumerator of =rgsaddle_tangent_t=.
+- =RGSADDLE_TANGENT_SPLINE=. Purpose: Enumerator of =rgsaddle_tangent_t=.
 - =RGSADDLE_SPRING_UNIFORM=. Purpose: Enumerator of =rgsaddle_spring_t=.
 - =RGSADDLE_SPRING_WEIGHTED=. Purpose: Enumerator of =rgsaddle_spring_t=.
 - =RGSADDLE_SPRING_ONSAGER_MACHLUP=. Purpose: Enumerator of =rgsaddle_spring_t=.

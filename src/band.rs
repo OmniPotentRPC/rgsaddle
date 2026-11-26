@@ -2346,6 +2346,11 @@ fn image_force_into(
     let rule = match config.tangent {
         TangentKind::Simple => crate::stencil::TangentRule::Simple,
         TangentKind::Improved => crate::stencil::TangentRule::Improved,
+        TangentKind::Spline => {
+            return Err(SaddleError::Invalid(
+                "a spline tangent belongs to the whole band; project_band assembles it".into(),
+            ));
+        }
     };
     crate::stencil::unit_tangent_into(
         rule,

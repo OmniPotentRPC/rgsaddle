@@ -320,7 +320,7 @@ def saddle_index(surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64
 
 def project_band(positions: numpy.typing.NDArray[numpy.float64], energies: numpy.typing.NDArray[numpy.float64], gradients: numpy.typing.NDArray[numpy.float64], k: float = 0.1, climb: bool = False, projection: str = 'neb', tangent: str = 'improved', remove_translation: bool = False, force_tol: float = 0.001, fixed: numpy.typing.NDArray[numpy.uint8] | None = None, spring_ks: numpy.typing.NDArray[numpy.float64] | None = None, cell: numpy.typing.NDArray[numpy.float64] | None = None) -> tuple[numpy.typing.NDArray[numpy.float64], int]:
     """
-    Project an evaluated band. Returns (forces, ci_index). forces is flat, one row per image including zero endpoints, in the ASE force convention. climb selects the interior image by the endpoint-slope rule on this call; a higher endpoint that slopes into the band does not climb. Units are the caller's. k is energy per length squared. spring_ks, when given, is one constant per spring (length images - 1) and replaces k. cell is the 3x3 row-major lattice; a zero row is not wrapped. fixed is one uint8 per atom, 1 for a fixed atom (ABI minor 39): its force rows are zero, tangents and springs use the free atoms, and the mean force stays. The endpoints must agree on every fixed atom.
+    Project an evaluated band. Returns (forces, ci_index). forces is flat, one row per image including zero endpoints, in the ASE force convention. climb selects the interior image by the endpoint-slope rule on this call; a higher endpoint that slopes into the band does not climb. Units are the caller's. k is energy per length squared. spring_ks, when given, is one constant per spring (length images - 1) and replaces k. cell is the 3x3 row-major lattice; a zero row is not wrapped. fixed is one uint8 per atom, 1 for a fixed atom (ABI minor 39): its force rows are zero, tangents and springs use the free atoms, and the mean force stays. The endpoints must agree on every fixed atom. tangent 'spline' (ABI minor 70) uses the not-a-knot cubic through the images: the unit dx/ds and the curvature spring 0.5 (k_prev + k_next) / n_images^2 * (d2x/ds2 . t) t. The chord projection is not applied.
     """
 
 def dyneb_mask(positions: numpy.typing.NDArray[numpy.float64], energies: numpy.typing.NDArray[numpy.float64], forces: numpy.typing.NDArray[numpy.float64], fmax: float, scale_fmax: float) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.uint8]]:
@@ -336,6 +336,11 @@ def idpp_path(reactant: numpy.typing.NDArray[numpy.float64], product: numpy.typi
 def reparametrize(positions: numpy.typing.NDArray[numpy.float64], scheme: str = 'linear', anchor: int | None = None, cell: numpy.typing.NDArray[numpy.float64] | None = None) -> numpy.typing.NDArray[numpy.float64]:
     """
     Place the interior images of a band at equal arc length and return the new band. scheme 'linear' places them on the polyline; 'not-a-knot' (or 'spline') on the not-a-knot cubic spline through the images in their arc length (E, Ren and Vanden-Eijnden 2007). The first and last rows, and an interior anchor, do not move. cell is the 3x3 row-major cell; the chords are then minimum images. No surface is evaluated.
+    """
+
+def spline_resample(positions: numpy.typing.NDArray[numpy.float64], cell: numpy.typing.NDArray[numpy.float64] | None = None) -> numpy.typing.NDArray[numpy.float64]:
+    """
+    Place interior images at equal steps of the normalized cumulative chord length and return the new band (ABI minor 70). The curve is the not-a-knot cubic through the Cartesian images, the redistribution of ASE NEB method 'string' with the identity preconditioner. The first and last rows do not move. cell is the 3x3 row-major cell; the chords are then minimum images. No surface is evaluated.
     """
 
 def halve_raised_energy(previous: float, trial: float, step: float) -> tuple[bool, float]:

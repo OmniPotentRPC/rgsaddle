@@ -36,7 +36,7 @@ use crate::tangent::TangentKind;
 /// The RGSADDLE ABI MAJOR.
 pub const RGSADDLE_ABI_MAJOR: u32 = 1;
 /// The RGSADDLE ABI MINOR.
-pub const RGSADDLE_ABI_MINOR: u32 = 66;
+pub const RGSADDLE_ABI_MINOR: u32 = 70;
 
 /// A band, min-mode or OCI-NEB config of this minor or newer certifies
 /// the saddle index at convergence by default.
@@ -74,6 +74,8 @@ pub(crate) const BAND_STRING_MINOR: u32 = 44;
 /// explicitly by the caller and must be read even when it is zero.
 pub const RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL: u64 = 1;
 pub(crate) const MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR: u32 = 63;
+/// `RGSADDLE_TANGENT_SPLINE` is read from a band config of this minor or newer.
+pub(crate) const SPLINE_TANGENT_MINOR: u32 = 70;
 
 /// The trust-region reparametrization a band config asks for.
 pub(crate) fn rtr_reparametrization(cfg: &RgsaddleBandConfig) -> crate::Reparametrization {
@@ -785,10 +787,10 @@ pub(super) unsafe fn parse_band_config(
     };
     Some(ParsedBand {
         config: BandConfig::default()
-            .with_tangent(if cfg.tangent == 0 {
-                TangentKind::Simple
-            } else {
-                TangentKind::Improved
+            .with_tangent(match cfg.tangent {
+                0 => TangentKind::Simple,
+                2 if cfg.version.minor >= SPLINE_TANGENT_MINOR => TangentKind::Spline,
+                _ => TangentKind::Improved,
             })
             .with_spring(spring)
             .with_projection(match cfg.projection {
@@ -1941,6 +1943,57 @@ pub unsafe extern "C" fn rgsaddle_reparametrize(
         *slot = *value;
     }
     RGSADDLE_OK
+}
+
+/// # Safety
+/// `positions` holds `n_images * 3 * n_atoms` doubles and is rewritten
+/// in place. `cell`, when not null, holds nine doubles. The call does
+/// not evaluate a surface.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_spline_resample(
+    n_images: i64,
+    n_atoms: i64,
+    positions: *mut f64,
+    cell: *const f64,
+) -> i32 {
+    if positions.is_null() || n_images < 3 || n_atoms < 1 {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let (Ok(rows), Ok(atoms)) = (usize::try_from(n_images), usize::try_from(n_atoms)) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let Some(total) = atoms.checked_mul(3).and_then(|dof| dof.checked_mul(rows)) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let flat = unsafe { slice::from_raw_parts_mut(positions, total) };
+    if !flat.iter().all(|value| value.is_finite()) {
+        return RGSADDLE_INVALID_PARAMETER;
+    }
+    let cell = if cell.is_null() {
+        None
+    } else {
+        let c = unsafe { slice::from_raw_parts(cell, 9) };
+        if !c.iter().all(|value| value.is_finite()) {
+            return RGSADDLE_INVALID_PARAMETER;
+        }
+        Some(Cell([
+            [c[0], c[1], c[2]],
+            [c[3], c[4], c[5]],
+            [c[6], c[7], c[8]],
+        ]))
+    };
+    let Ok(band) = Array2::from_shape_vec((rows, 3 * atoms), flat.to_vec()) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    match crate::tangent::spline_resample(band.view(), cell.as_ref()) {
+        Ok(moved) => {
+            for (slot, value) in flat.iter_mut().zip(moved.iter()) {
+                *slot = *value;
+            }
+            RGSADDLE_OK
+        }
+        Err(err) => status_of(&err),
+    }
 }
 
 /// # Safety

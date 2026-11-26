@@ -593,10 +593,16 @@ class NEB:
     The constructor follows ``ase.mep.NEB``: ``k`` is one spring or one
     per segment, ``climb`` turns the climbing image on for every force
     call, and ``method`` is ``improvedtangent`` (default), ``aseneb``,
-    ``eb``, or ``dneb``. ``spline`` and ``string`` raise
-    ``NotImplementedError``. So does ``precon``, and any of
-    ``dynamic_relaxation``, ``fmax``, or ``scale_fmax``. Those three
-    belong to :class:`DyNEB`.
+    ``eb``, ``dneb``, ``spline``, or ``string``. ``precon`` raises
+    ``NotImplementedError``, and so does any of ``dynamic_relaxation``,
+    ``fmax``, or ``scale_fmax``. Those three belong to :class:`DyNEB`.
+
+    ``spline`` is ASE's cubic-spline NEB. The tangent is the unit
+    ``dx/ds`` of the not-a-knot cubic through the images, and the spring
+    is the curvature term, with ``s`` the normalized cumulative chord
+    length. ``string`` uses that tangent and no spring.
+    ``set_positions`` then places the interior images at equal steps of
+    the same parameter.
 
     ``get_positions`` and ``get_forces`` are the interior images only,
     shape ``((n_images - 2) * n_atoms, 3)``. ``get_potential_energy`` is
@@ -666,18 +672,13 @@ class NEB:
                 stacklevel=2,
             )
             method = "improvedtangent"
-        if method == "spline":
-            raise NotImplementedError("method 'spline': rgsaddle has no spline force projection")
-        if method == "string":
-            raise NotImplementedError(
-                "method 'string': NEB has no string-method force; "
-                "use SimplifiedString for the simplified string method"
-            )
         forces = {
             "improvedtangent": ("neb", "improved"),
             "aseneb": ("neb", "improved"),
             "eb": ("eb", "improved"),
             "dneb": ("dneb", "improved"),
+            "spline": ("neb", "spline"),
+            "string": ("neb", "spline"),
         }
         if method not in forces:
             raise NotImplementedError(method)
@@ -800,15 +801,37 @@ class NEB:
         return np.concatenate(blocks, axis=0)
 
     def set_positions(self, positions: Any, adjust_positions: bool = True) -> None:
-        del adjust_positions
         natoms = len(self.images[0])
         array = np.asarray(positions, dtype=np.float64).reshape((-1, 3))
         expect = (len(self.images) - 2) * natoms
         count = len(array)
         if count != expect:
             raise ValueError(f"positions: expected {expect} atoms, got {count}")
+        if adjust_positions and self.method == "string" and expect > 0:
+            array = self._redistribute_string(array)
+        snap = self.method == "string"
         for index, image in enumerate(self.images[1:-1]):
-            image.set_positions(array[index * natoms : (index + 1) * natoms], apply_constraint=False)
+            image.set_positions(
+                array[index * natoms : (index + 1) * natoms],
+                apply_constraint=snap,
+            )
+
+    def _redistribute_string(self, interior: Float64) -> Float64:
+        """ASE string step: equal chord-length parameter on the cubic spline."""
+        from rgsaddle._core import spline_resample
+
+        natoms = len(self.images[0])
+        proposed = np.array(_image_positions(self.images), dtype=np.float64, copy=True)
+        interior_rows = np.asarray(interior, dtype=np.float64).reshape(
+            (len(self.images) - 2, natoms * 3)
+        )
+        proposed[1:-1] = interior_rows
+        updated = spline_resample(
+            np.ascontiguousarray(proposed, dtype=np.float64),
+            cell=_band_cell(self.images),
+        )
+        rows = np.asarray(updated, dtype=np.float64)
+        return np.ascontiguousarray(rows[1:-1].reshape(-1, 3), dtype=np.float64)
 
     def set_calculators(self, calculators: Any) -> None:
         """Attach one calculator, or one per image, or one per interior image."""
@@ -851,7 +874,10 @@ class NEB:
             "fixed": _fixed_atoms(self.images),
             "cell": _band_cell(self.images),
         }
-        if scalar is None:
+        # The string method keeps the caller's k on the object and applies none of it.
+        if self.method == "string":
+            call["k"] = 0.0
+        elif scalar is None:
             call["k"] = springs[0] if springs else 0.1
             call["spring_ks"] = np.ascontiguousarray(springs, dtype=np.float64)
         else:
