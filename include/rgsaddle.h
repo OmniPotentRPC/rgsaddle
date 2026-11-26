@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 66u
+#define RGSADDLE_ABI_MINOR 70u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -2390,7 +2390,7 @@ rgsaddle_status_t rgsaddle_geodesic_morse(
     double *lower, double *upper);
 
 /**
- * Mass-weighted finite-difference Vineyard prefactor controls. ABI minor 66.
+ * Mass-weighted finite-difference Vineyard prefactor controls. ABI minor 70.
  * `flags` and `reserved` must be 0. `difference` is `rgsaddle_difference_t`.
  */
 typedef struct {
@@ -2404,7 +2404,7 @@ typedef struct {
 } rgsaddle_vineyard_config_t;
 
 /**
- * Mass-weighted Vineyard prefactor summary report. ABI minor 66.
+ * Mass-weighted Vineyard prefactor summary report. ABI minor 70.
  */
 typedef struct {
   rgsaddle_version_t version;
@@ -2419,20 +2419,20 @@ typedef struct {
 
 /**
  * Look up standard atomic mass in amu by atomic number `z` in [1, 118].
- * ABI minor 66.
+ * ABI minor 70.
  */
 rgsaddle_status_t rgsaddle_atomic_mass(int32_t z, double *out);
 
 /**
  * Look up standard atomic mass in amu by IUPAC element symbol.
- * ABI minor 66.
+ * ABI minor 70.
  */
 rgsaddle_status_t rgsaddle_atomic_mass_by_symbol(const char *symbol,
                                                  double *out);
 
 /**
  * Fill `out` with default Vineyard finite-difference controls (step 1e-2,
- * central differences, positive_tol 1e-8, negative_tol 1e-4). ABI minor 66.
+ * central differences, positive_tol 1e-8, negative_tol 1e-4). ABI minor 70.
  */
 rgsaddle_status_t rgsaddle_vineyard_config_default(
     rgsaddle_vineyard_config_t *out);
@@ -2441,7 +2441,7 @@ rgsaddle_status_t rgsaddle_vineyard_config_default(
  * Evaluate the harmonic Vineyard prefactor from dense finite-difference
  * Hessians on `surface` at `x_min` and `x_saddle`. `x_min` and `x_saddle`
  * hold `3 * n_atoms` doubles; `atom_masses` holds `n_atoms` positive masses
- * in amu. ABI minor 66.
+ * in amu. ABI minor 70.
  */
 rgsaddle_status_t rgsaddle_vineyard_fd(
     const rgsaddle_vineyard_config_t *config, int64_t n_atoms,

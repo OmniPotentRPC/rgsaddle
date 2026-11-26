@@ -1018,7 +1018,7 @@ static int test_band_minmode_index1_and_sessions_cdylib(void) {
   return 0;
 }
 
-static int test_abi66_vineyard_contracts(void) {
+static int test_abi70_vineyard_contracts(void) {
   double mass = 0.0;
   CHECK(rgsaddle_atomic_mass(29, &mass) == RGSADDLE_OK,
         "atomic mass by number");
@@ -1160,7 +1160,7 @@ int main(void) {
   if (test_minmode_rotation_angle_defaults_and_torque_window() != 0) {
     return 1;
   }
-  if (test_abi66_vineyard_contracts() != 0) {
+  if (test_abi70_vineyard_contracts() != 0) {
     return 1;
   }
   printf("RGSADDLE_CAPI_CONTRACTS_OK\n");
