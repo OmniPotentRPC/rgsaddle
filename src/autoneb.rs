@@ -36,10 +36,9 @@
 //! keeps a private per-segment list: the fill from two endpoints sets
 //! every segment to `k * (n_simul + 1)`, and each later insertion
 //! replaces the cut segment with two segments of twice that constant.
-//! A weighted or Onsager-Machlup spring supplied by the host is
-//! refused. The refusal is temporary: zoom-NEB will recompute those
-//! springs when an image is inserted. The solid-state block is not
-//! part of this loop.
+//! A weighted, energy-weighted, or Onsager-Machlup spring supplied by
+//! the host is refused with [`SaddleError::Invalid`]. The solid-state
+//! block is not part of this loop.
 //!
 //! `surface_rows` counts force evaluations: one row of
 //! [`BandSurface::eval`] is one force call. A surface error discards
@@ -63,7 +62,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::band::{BandConfig, BandSession, BandStatus, BandSurface, Cell, CiConfig};
 use crate::error::SaddleError;
-use crate::idpp::IdppConfig;
+use crate::idpp::{IdppConfig, PathInitializer, TricsStartConfig, initialize_path};
 use crate::spring::SpringKind;
 
 /// Where one new image is placed.
@@ -162,6 +161,58 @@ impl ImageInterpolation for IdppInterpolation {
             self.cell.as_ref(),
             &self.config,
         )
+    }
+}
+
+/// TRICS midpoint constructed from a seven-image segment.
+struct TricsInterpolation {
+    config: TricsStartConfig,
+}
+
+const TRICS_INSERTION_IMAGES: usize = 7;
+
+impl TricsInterpolation {
+    fn new(cell: Option<Cell>, config: TricsStartConfig) -> Result<Self, SaddleError> {
+        if cell.is_some() {
+            return Err(SaddleError::Invalid(
+                "AutoNEB TRICS interpolation needs unwrapped free space coordinates".into(),
+            ));
+        }
+        if let crate::idpp::TricsSeed::Idpp(idpp) = &config.seed {
+            crate::idpp::check_config(idpp)?;
+        }
+        crate::trics::check_trics_config(&config.trics)?;
+        Ok(Self { config })
+    }
+}
+
+impl ImageInterpolation for TricsInterpolation {
+    fn insert(
+        &self,
+        chain: ArrayView2<f64>,
+        energies: &[Option<f64>],
+        after: usize,
+    ) -> Result<Array1<f64>, SaddleError> {
+        let _ = energies;
+        if after + 1 >= chain.nrows() {
+            return Err(SaddleError::Shape(format!(
+                "TRICS interpolation needs a segment after row {after}"
+            )));
+        }
+        let path = initialize_path(
+            chain.row(after),
+            chain.row(after + 1),
+            TRICS_INSERTION_IMAGES,
+            None,
+            &PathInitializer::Trics(self.config.clone()),
+        )?;
+        let middle = path.row(TRICS_INSERTION_IMAGES / 2);
+        if middle == chain.row(after) || middle == chain.row(after + 1) {
+            return Err(SaddleError::Solver(
+                "TRICS interpolation produced a degenerate midpoint".into(),
+            ));
+        }
+        Ok(middle.to_owned())
     }
 }
 
@@ -589,6 +640,15 @@ pub struct AutoNebTuning {
     /// Placement of each new image. Default
     /// [`AutoNebInterpolant::Linear`].
     pub interpolant: AutoNebInterpolant,
+    /// TRICS placement of each new image, the initial fill included.
+    ///
+    /// `Some` builds a seven-image TRICS path on the cut segment and
+    /// inserts its middle image. It needs unwrapped free space
+    /// coordinates, so a periodic band refuses it. It is an alternative
+    /// to [`AutoNebTuning::interpolant`], which must then stay at
+    /// [`AutoNebInterpolant::Linear`]; setting both is refused. `None`,
+    /// the default, leaves placement to `interpolant`.
+    pub trics: Option<TricsStartConfig>,
 }
 
 with_setters!(AutoNebTuning {
@@ -603,6 +663,7 @@ with_setters!(AutoNebTuning {
     with_threads => threads: val usize,
     with_record_samples => record_samples: val bool,
     with_interpolant => interpolant: val AutoNebInterpolant,
+    with_trics => trics: opt TricsStartConfig,
 });
 
 impl Default for AutoNebTuning {
@@ -619,6 +680,7 @@ impl Default for AutoNebTuning {
             threads: 1,
             record_samples: false,
             interpolant: AutoNebInterpolant::Linear,
+            trics: None,
         }
     }
 }
@@ -895,17 +957,22 @@ pub struct AutoNebCut {
 
 impl AutoNeb {
     /// Fill `initial` up to the first window with
-    /// [`AutoNebTuning::interpolant`], which also places every later
-    /// image. `initial` has at least the two endpoints.
+    /// [`AutoNebTuning::interpolant`] or [`AutoNebTuning::trics`], which
+    /// also place every later image. `initial` has at least the two endpoints.
     /// [`BandConfig::autoneb`] supplies the tuning; `None` uses
     /// [`AutoNebTuning::default`].
     pub fn new(config: BandConfig, initial: Array2<f64>) -> Result<Self, SaddleError> {
-        let interpolant = config
-            .autoneb
-            .as_ref()
-            .map(|tuning| tuning.interpolant.clone())
-            .unwrap_or_default();
-        match interpolant {
+        let tuning = config.autoneb.clone().unwrap_or_default();
+        if let Some(trics) = tuning.trics {
+            if !matches!(tuning.interpolant, AutoNebInterpolant::Linear) {
+                return Err(SaddleError::Invalid(
+                    "AutoNEB takes either an interpolant or TRICS placement, not both".into(),
+                ));
+            }
+            let interpolation = TricsInterpolation::new(config.cell, trics)?;
+            return Self::with_interpolation(config, initial, interpolation);
+        }
+        match tuning.interpolant {
             AutoNebInterpolant::Linear => {
                 let interpolation = LinearInterpolation::new(config.cell);
                 Self::with_interpolation(config, initial, interpolation)
@@ -2502,5 +2569,69 @@ mod tests {
         );
         assert!(rows[0].1 > 0.0);
         assert!(join_median > Duration::ZERO || join_pool.threads == 1);
+    }
+
+    #[test]
+    fn trics_interpolation_does_not_silently_fall_back_to_linear() {
+        let chain = array![
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -0.3, 0.95, 0.2]
+        ];
+        let impossible_config = crate::TricsStartConfig::default().with_trics(
+            crate::TricsConfig::default().with_inversion(
+                crate::TricInversionConfig::default()
+                    .with_max_iterations(1)
+                    .with_tolerance(1e-14)
+                    .with_max_atom_move(1e-8),
+            ),
+        );
+        let interpolant = TricsInterpolation::new(None, impossible_config).unwrap();
+        assert!(matches!(
+            interpolant.insert(chain.view(), &[None, None], 0),
+            Err(SaddleError::Solver(_))
+        ));
+
+        let same_chain = array![
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        ];
+        let default_interpolant =
+            TricsInterpolation::new(None, crate::TricsStartConfig::default()).unwrap();
+        assert!(matches!(
+            default_interpolant.insert(same_chain.view(), &[None, None], 0),
+            Err(SaddleError::Solver(_))
+        ));
+
+        let bad_seed = crate::TricsStartConfig::default().with_seed(crate::TricsSeed::Idpp(
+            crate::IdppConfig::default().with_max_iterations(0),
+        ));
+        assert!(matches!(
+            TricsInterpolation::new(None, bad_seed),
+            Err(SaddleError::Invalid(_))
+        ));
+
+        let bad_trics = crate::TricsStartConfig::default()
+            .with_trics(crate::TricsConfig::default().with_max_splice_iterations(0));
+        assert!(matches!(
+            TricsInterpolation::new(None, bad_trics),
+            Err(SaddleError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn trics_placement_and_an_interpolant_are_mutually_exclusive() {
+        let tuning = AutoNebTuning::default()
+            .with_trics(crate::TricsStartConfig::default())
+            .with_interpolant(AutoNebInterpolant::Idpp(crate::IdppConfig::default()));
+        let config = BandConfig::default().with_autoneb(Some(tuning));
+        let endpoints = array![
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -0.3, 0.95, 0.2]
+        ];
+        assert!(matches!(
+            AutoNeb::new(config, endpoints),
+            Err(SaddleError::Invalid(_))
+        ));
+        assert!(AutoNebTuning::default().trics.is_none());
     }
 }

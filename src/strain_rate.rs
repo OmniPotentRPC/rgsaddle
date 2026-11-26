@@ -12,7 +12,12 @@
 //!
 //! then symmetrized, because the defect has no net torque (their Eq. (1)).
 //! The same tensor is the first moment of the Kanzaki forces when those
-//! forces are known.
+//! forces are known.  The residual-stress, homogeneous-strain, and force
+//! routes are reviewed by Clouet, Varvenne, and Jourdan, Comput. Mater.
+//! Sci. 147, 49 (2018), doi:10.1016/j.commatsci.2018.01.053.  The
+//! finite-cell interpretation and image correction follow Varvenne,
+//! Bruneval, Marinica, and Clouet, Phys. Rev. B 88, 134102 (2013),
+//! doi:10.1103/PhysRevB.88.134102.
 //!
 //! A hop's barrier at an imposed strain follows by subtracting the two
 //! interaction energies:
@@ -74,7 +79,7 @@ pub struct Strain {
 }
 
 impl Strain {
-    /// The zero strain.
+    /// Zero tensor: no deformation from the reference cell.
     pub fn zero() -> Self {
         Self {
             tensor: [[0.0; 3]; 3],
@@ -118,7 +123,11 @@ impl Strain {
         }
     }
 
-    /// The symmetric tensor.
+    /// Stored 3×3 strain tensor `ε` in `h = h0 (I + ε)`.
+    ///
+    /// Symmetric for [`Self::from_tensor`], [`Self::uniaxial_x`],
+    /// [`Self::hydrostatic`], and [`Self::transform`]; [`Self::shear_yx`]
+    /// and [`Self::shear_xz`] store only the single off-diagonal right-strain entry.
     pub fn tensor(self) -> M3 {
         self.tensor
     }
@@ -142,12 +151,13 @@ impl Strain {
     }
 }
 
-/// Symmetric elastic dipole, in eV.
+/// Symmetric elastic dipole, in the caller's energy unit.
 ///
 /// The sign is Varvenne and Clouet's: the interaction energy in an applied
 /// strain is `-P : ε`. Build one with [`Self::from_stress`] or
 /// [`Self::from_forces`]. [`Self::from_tensor`] accepts a tensor that
-/// already uses that sign.
+/// already uses that sign. The energy unit must match associated barrier
+/// values.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ElasticDipole {
     tensor: M3,
@@ -158,11 +168,36 @@ impl ElasticDipole {
     ///
     /// `volume` is the cell volume. `defect` and `bulk` are Cauchy stresses
     /// of the defective cell and the perfect cell at the same homogeneous
-    /// strain. The bulk subtraction is the homogeneous-stress correction
-    /// after Eq. (8) of Varvenne and Clouet.
+    /// strain. The result uses the energy unit implied by volume times stress.
+    /// The bulk subtraction is the homogeneous-stress correction after Eq.
+    /// (8) of Varvenne and Clouet.
     pub fn from_stress(volume: f64, defect: M3, bulk: M3) -> Result<Self, SaddleError> {
         Ok(Self {
             tensor: elastic_dipole(volume, defect, bulk)?,
+        })
+    }
+
+    /// Homogeneous-strain route, `P = -(∂E_defect/∂ε - ∂E_bulk/∂ε)`.
+    ///
+    /// Both arguments are energy derivatives with respect to the full
+    /// symmetric strain tensor.  A stress-based evaluator has
+    /// `∂E/∂ε = V σ`, so this route is algebraically identical to
+    /// [`Self::from_stress`] without requiring the caller to divide by
+    /// the volume first.
+    pub fn from_energy_strain_gradient(defect: M3, bulk: M3) -> Result<Self, SaddleError> {
+        if !finite_m3(defect) || !finite_m3(bulk) {
+            return Err(SaddleError::NonFinite(
+                "homogeneous-strain energy derivative",
+            ));
+        }
+        let mut tensor = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                tensor[i][j] = -(defect[i][j] - bulk[i][j]);
+            }
+        }
+        Ok(Self {
+            tensor: symmetrize(tensor),
         })
     }
 
@@ -170,7 +205,8 @@ impl ElasticDipole {
     ///
     /// `P_ij = Σ_a (X_i^a F_j^a + X_j^a F_i^a) / 2`. The resultant and the
     /// torque must already vanish, as they do for Kanzaki forces of a
-    /// relaxed defect. Positions and forces are Cartesian.
+    /// relaxed defect. Positions and forces are Cartesian. The result uses
+    /// the energy unit implied by position times force.
     pub fn from_forces(positions: &[[f64; 3]], forces: &[[f64; 3]]) -> Result<Self, SaddleError> {
         if positions.len() != forces.len() {
             return Err(SaddleError::Shape(
@@ -219,7 +255,7 @@ impl ElasticDipole {
         Ok(Self { tensor })
     }
 
-    /// The symmetric tensor.
+    /// Symmetric 3×3 elastic-dipole tensor in the caller's energy unit.
     pub fn tensor(self) -> M3 {
         self.tensor
     }
@@ -1212,7 +1248,8 @@ pub fn angular_scale_rad_s() -> f64 {
 /// in eV/Å². Translations are already removed, and the saddle's negative
 /// eigenvalue is not included. Every atom has the same mass `mass_amu`.
 /// `ν_i = ω_i / 2π` with `ω_i = sqrt(λ_i / m)`, and the prefactor is
-/// `(∏ ν_min) / (∏ ν_sad)`.
+/// `(∏ ν_min) / (∏ ν_sad)`. The minimum product must contain exactly one
+/// more mode than the saddle product, so the result has units of frequency.
 pub fn vineyard_prefactor(
     min_lambda: &[f64],
     sad_lambda: &[f64],
@@ -1228,9 +1265,9 @@ pub fn vineyard_prefactor(
             "Vineyard needs at least one positive minimum eigenvalue".into(),
         ));
     }
-    if min_lambda.len() < sad_lambda.len() {
+    if min_lambda.len() != sad_lambda.len() + 1 {
         return Err(SaddleError::Invalid(
-            "the saddle product is longer than the minimum product".into(),
+            "Vineyard products need exactly one missing saddle mode".into(),
         ));
     }
     let mut log_ratio = 0.0;

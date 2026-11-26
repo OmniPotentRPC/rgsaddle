@@ -1,0 +1,1 @@
+A joint =SolidNeb= band now clears its optimizer history when the climbing image moves to another image, so steps for the new climber are not shaped by curvature pairs from the old one.

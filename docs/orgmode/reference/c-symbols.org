@@ -9,9 +9,9 @@ The narrative for a session is the C and C++ how-to, not this list.
 
 * Functions
 
-- =rgsaddle_hyperplane_sampler_create=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_hyperplane_sampler_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_hyperplane_thermodynamic_integration=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_hyperplane_sampler_create=. Purpose: Create a callback sampler. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_hyperplane_sampler_free=. Purpose: Free a callback sampler. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_hyperplane_thermodynamic_integration=. Purpose: Integrate V_full - V_harmonic over lambda on a fixed hyperplane. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_thermodynamic_derivative_observable=. Purpose: Stable observable name `potential.full_minus_harmonic` for TI records. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_abi_version=. Purpose: (major << 16) | minor. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_abi_stamp=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
@@ -132,6 +132,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_samd_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_idpp_path=. Purpose: Image dependent pair potential initial path. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_autoneb_run=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_trics_path=. Purpose: Translation rotation internal coordinates with splicing, ABI minor 66. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_create=. Purpose: Climbing-image band that hands the climbing image to a min-mode climb. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_step=. Purpose: One band step, one alignment, or one P-RFO climb step. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_ocineb_positions=. Purpose: Copy the current band out (n_images * 3 * n_atoms doubles). Parameters: the declaration. Units: the caller's.
@@ -169,7 +170,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_indexk_set_position=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_indexk_free=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_reflect_force=. Purpose: Householder reflection of force through an orthonormal n-by-k block. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_connect=. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_connect=. Purpose: Run the connect search. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_saddle_check_default=. Purpose: Fill out with the default saddle check, ABI minor 40. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_set_saddle_check=. Purpose: Replace the band's saddle check between steps, ABI minor 40; NULL turns it off. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_band_saddle_index=. Purpose: The certificate of the climbing image at its current position, ABI minor 40. Parameters: the declaration. Units: the caller's.

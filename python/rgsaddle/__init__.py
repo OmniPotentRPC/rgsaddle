@@ -62,7 +62,7 @@ class IrcKind(IntEnum):
 
 
 class MinModeKind(IntEnum):
-    """Lowest-mode estimator."""
+    """Python lowest-mode estimators; index-k LOBPCG is C++/C/Rust-only."""
 
     DIMER = 0
     LANCZOS = 1

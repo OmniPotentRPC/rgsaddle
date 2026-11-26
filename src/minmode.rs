@@ -255,7 +255,7 @@ fn validate_artn(kind: MinModeKind, artn: &ArtNConfig) -> Result<(), SaddleError
 }
 
 #[derive(Clone, Debug)]
-/// The MinModeConfig.
+/// Rotation, Lanczos, and translation controls for [`MinModeSession`].
 ///
 /// Non-exhaustive: start from [`MinModeConfig::default`] and chain the
 /// `with_*` setters.
@@ -468,16 +468,16 @@ impl Default for MinModeConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// The MinModeStatus.
+/// Outcome of one [`MinModeSession`] step.
 pub enum MinModeStatus {
-    /// The Running.
+    /// Either the convergence force exceeds `force_tol` or the lowest curvature is non-negative.
     Running,
-    /// The Converged.
+    /// The convergence force is at or below `force_tol` and the lowest curvature is negative.
     Converged,
 }
 
 #[derive(Clone, Debug)]
-/// The MinModeReport.
+/// Diagnostics returned by [`MinModeSession::step`] and [`MinModeSession::run`].
 pub struct MinModeReport {
     /// Whether this step is still running or has converged.
     pub status: MinModeStatus,
@@ -1972,7 +1972,7 @@ pub(crate) fn build_solver(
 }
 
 impl MinModeSession {
-    /// New.
+    /// Build a minimum-mode session at `x` with `mode` normalized as the initial direction.
     pub fn new(
         config: MinModeConfig,
         x: Array1<f64>,

@@ -71,6 +71,7 @@ while report.status != BandStatus::Converged {
    howto/band
    howto/autoneb
    howto/line-neb
+   howto/path-initialization
    howto/minmode
    howto/art
    howto/indexk
@@ -100,10 +101,12 @@ while report.status != BandStatus::Converged {
    howto/formal
    explanation/mep
    explanation/ohtst-pafi-exact
+   explanation/trics
    explanation/one-stencil
    explanation/hyperplane-methods
    explanation/symmetry-regions
    explanation/pafi-ohtst
+   explanation/elastic-dipole
    reference/architecture
    reference/lammps-hyperplane
    reference/bibliography

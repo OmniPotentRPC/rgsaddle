@@ -12,6 +12,7 @@ use rgmin::{RigidMode, RigidRequest, RigidWorkspace};
 
 use crate::error::SaddleError;
 use crate::internal::{jacobi4, kabsch_f};
+use crate::mass_metric::MassMetric;
 
 /// Rigid placement that takes one image onto the reference orientation.
 #[derive(Clone, Copy, Debug)]
@@ -27,7 +28,7 @@ pub(crate) struct Placement {
 /// mass-weighted length.
 pub(crate) fn align_images(
     images: ArrayView2<f64>,
-    sqrt_mass: ArrayView1<f64>,
+    metric: &MassMetric,
     atoms: usize,
     adjacent: bool,
 ) -> Result<(Array2<f64>, Vec<Placement>), SaddleError> {
@@ -37,12 +38,12 @@ pub(crate) fn align_images(
         ));
     }
     let dof = 3 * atoms;
-    if images.ncols() != dof || sqrt_mass.len() != dof {
+    if images.ncols() != dof || metric.len() != dof {
         return Err(SaddleError::Shape(
             "alignment expects 3 coordinates and one mass weight per atom".into(),
         ));
     }
-    check_atom_masses(sqrt_mass, atoms)?;
+    check_atom_masses(metric, atoms)?;
     let n = images.nrows();
     if n == 0 {
         return Err(SaddleError::Shape(
@@ -57,7 +58,7 @@ pub(crate) fn align_images(
         } else {
             images.row(0)
         };
-        let (row, placement) = align_to_reference(images.row(i), reference, sqrt_mass, atoms)?;
+        let (row, placement) = align_to_reference(images.row(i), reference, metric, atoms)?;
         aligned.row_mut(i).assign(&row);
         placements.push(placement);
     }
@@ -71,11 +72,14 @@ pub(crate) fn restore_force(
     force: &mut Array1<f64>,
     placement: &Placement,
     aligned: ArrayView1<f64>,
-    sqrt_mass: ArrayView1<f64>,
+    metric: &MassMetric,
     atoms: usize,
 ) {
     let masses: Vec<f64> = (0..atoms)
-        .map(|atom| sqrt_mass[3 * atom] * sqrt_mass[3 * atom])
+        .map(|atom| {
+            let root = metric.sqrt_at(3 * atom);
+            root * root
+        })
         .collect();
     if let (Some(positions), Some(values)) = (aligned.as_slice(), force.as_slice_mut()) {
         let mut request = RigidRequest::cartesian(positions, RigidMode::TranslationRotation);
@@ -100,13 +104,13 @@ pub(crate) fn restore_force(
 fn align_to_reference(
     image: ArrayView1<f64>,
     reference: ArrayView1<f64>,
-    sqrt_mass: ArrayView1<f64>,
+    metric: &MassMetric,
     atoms: usize,
 ) -> Result<(Array1<f64>, Placement), SaddleError> {
-    let com = centre_of_mass(image, sqrt_mass, atoms)?;
-    let com_ref = centre_of_mass(reference, sqrt_mass, atoms)?;
-    let centered = center(image, sqrt_mass, com);
-    let centered_ref = center(reference, sqrt_mass, com_ref);
+    let com = centre_of_mass(image, metric, atoms)?;
+    let com_ref = centre_of_mass(reference, metric, atoms)?;
+    let centered = center(image, metric, com);
+    let centered_ref = center(reference, metric, com_ref);
     let rotation = kabsch(&centered, &centered_ref, atoms)?;
     let mut out = Array1::zeros(image.len());
     for atom in 0..atoms {
@@ -126,16 +130,16 @@ fn align_to_reference(
     Ok((out, Placement { rotation }))
 }
 
-fn check_atom_masses(sqrt_mass: ArrayView1<f64>, atoms: usize) -> Result<(), SaddleError> {
+fn check_atom_masses(metric: &MassMetric, atoms: usize) -> Result<(), SaddleError> {
     for atom in 0..atoms {
-        let m = sqrt_mass[3 * atom];
+        let m = metric.sqrt_at(3 * atom);
         if !(m.is_finite() && m > 0.0) {
             return Err(SaddleError::Invalid(
                 "atomic masses must be finite and positive".into(),
             ));
         }
         for axis in 1..3 {
-            let other = sqrt_mass[3 * atom + axis];
+            let other = metric.sqrt_at(3 * atom + axis);
             if (other - m).abs() > 0.0 {
                 return Err(SaddleError::Invalid(
                     "the three coordinate masses of an atom are one atomic mass".into(),
@@ -148,13 +152,13 @@ fn check_atom_masses(sqrt_mass: ArrayView1<f64>, atoms: usize) -> Result<(), Sad
 
 fn centre_of_mass(
     q: ArrayView1<f64>,
-    sqrt_mass: ArrayView1<f64>,
+    metric: &MassMetric,
     atoms: usize,
 ) -> Result<[f64; 3], SaddleError> {
     let mut mass = 0.0;
     let mut moment = [0.0; 3];
     for atom in 0..atoms {
-        let root = sqrt_mass[3 * atom];
+        let root = metric.sqrt_at(3 * atom);
         let m = root * root;
         mass += m;
         for axis in 0..3 {
@@ -170,10 +174,10 @@ fn centre_of_mass(
 }
 
 /// `sqrt(m) (x - com)`, which is `q - sqrt(m) com`.
-fn center(q: ArrayView1<f64>, sqrt_mass: ArrayView1<f64>, com: [f64; 3]) -> Array1<f64> {
+fn center(q: ArrayView1<f64>, metric: &MassMetric, com: [f64; 3]) -> Array1<f64> {
     let mut out = q.to_owned();
     for i in 0..q.len() {
-        out[i] -= sqrt_mass[i] * com[i % 3];
+        out[i] -= metric.sqrt_at(i) * com[i % 3];
     }
     out
 }
@@ -232,14 +236,14 @@ fn kabsch(
 /// molecule about its axis) is absent.
 pub(crate) fn rigid_directions(
     positions: ArrayView1<f64>,
-    sqrt_mass: ArrayView1<f64>,
+    metric: &MassMetric,
     atoms: usize,
 ) -> Vec<Array1<f64>> {
     let mut modes = Vec::with_capacity(6);
     for axis in 0..3 {
         let mut mode = Array1::zeros(positions.len());
         for atom in 0..atoms {
-            mode[3 * atom + axis] = sqrt_mass[3 * atom];
+            mode[3 * atom + axis] = metric.sqrt_at(3 * atom);
         }
         push_mode(&mut modes, mode);
     }
@@ -289,12 +293,16 @@ mod tests {
 
     #[test]
     fn a_right_angle_returns_to_the_reference() {
-        let sqrt_mass = array![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let metric = MassMetric::coordinates(
+            array![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0].view(),
+            9,
+        )
+        .unwrap();
         let reference = array![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
         // 90 degrees about z, then a translation of (4, -2, 7).
         let moved = array![4.0, -1.0, 7.0, 3.0, -2.0, 7.0, 4.0, -2.0, 8.0];
         let images = ndarray::stack(ndarray::Axis(0), &[reference.view(), moved.view()]).unwrap();
-        let (aligned, _) = align_images(images.view(), sqrt_mass.view(), 3, false).unwrap();
+        let (aligned, _) = align_images(images.view(), &metric, 3, false).unwrap();
         let gap = &aligned.row(1) - &aligned.row(0);
         let scale = aligned.row(0).dot(&aligned.row(0)).sqrt();
         assert!(
@@ -308,16 +316,21 @@ mod tests {
     /// mass-weighted geometry it was computed on.
     #[test]
     fn restored_force_has_no_rigid_component() {
-        let masses = [1.0_f64, 16.0, 2.0, 12.0];
-        let sqrt_mass = Array1::from_iter((0..12).map(|i| masses[i / 3].sqrt()));
-        let aligned = Array1::from_iter((0..12).map(|i| ((i as f64) * 0.7).sin() * sqrt_mass[i]));
+        let atom_masses = array![1.0, 16.0, 2.0, 12.0];
+        let metric = MassMetric::coordinates(
+            Array1::from_iter((0..12).map(|i| atom_masses[i / 3])).view(),
+            12,
+        )
+        .unwrap();
+        let aligned =
+            Array1::from_iter((0..12).map(|i| ((i as f64) * 0.7).sin() * metric.sqrt_at(i)));
         let mut force = Array1::from_iter((0..12).map(|i| ((i as f64) * 1.3).cos()));
         let identity = Placement {
             rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         };
         let scale = force.dot(&force).sqrt();
-        restore_force(&mut force, &identity, aligned.view(), sqrt_mass.view(), 4);
-        for mode in rigid_directions(aligned.view(), sqrt_mass.view(), 4) {
+        restore_force(&mut force, &identity, aligned.view(), &metric, 4);
+        for mode in rigid_directions(aligned.view(), &metric, 4) {
             assert!(
                 mode.dot(&force).abs() <= scale * f64::EPSILON * 64.0,
                 "{}",

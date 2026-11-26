@@ -3,6 +3,16 @@
 
 The Rust sessions are the source of the mechanics. The Python classes in ~rgsaddle.ase~ follow the call shape of ASE's nudged elastic band, minimum-mode atoms, and Sella's ~run(fmax, steps)~. Where the numbers differ, the difference is the one the tests lock in.
 
+* From 0.5.x to 0.6.0
+A converged band, minimum-mode, or OCI-NEB session now certifies the saddle index by default.
+Those finite-difference evaluations count in the step report, so force-call totals can increase even when the search takes the same path.
+Use ~with_saddle_check(None)~ on ~BandConfig~ or ~MinModeConfig~ when reproducing 0.5.x counts.
+
+~BandReport~, ~MinModeReport~, and ~OcinebReport~ add ~saddle_index~.
+Code that constructs or exhaustively matches one of those reports must accept the new field.
+The C ABI introduced the saddle-check structs and functions at minor 40; a config stamped with an older minor keeps the check off.
+Python's ~_core.MinMode~ enables the check by default and returns it through ~SessionReport.saddle_index~ and ~MinMode.saddle_index()~.
+
 * From ASE's NEB
 ~rgsaddle.ase.NEB(images, k=0.1, climb=False)~ takes the same list of ~Atoms~ with calculators. ~k~ is one spring or one constant per segment. ~interpolate()~ places the interior images on the straight line between the ends, and ~interpolate(method='idpp')~ then runs ~idpp_path~. ~mic~ uses the minimum image for the straight line. ~get_positions~ and ~get_forces~ are the interior images only, and ~ase.optimize~ (~BFGS~, ~FIRE~, ~MDMin~) drives them through ~__ase_optimizable__~. ~get_potential_energy~ is the highest interior energy.
 
@@ -23,7 +33,7 @@ The spring constant defaults to 0.1, ASE's value. A ~BandSession~ still defaults
 * From ASE's dimer and from Sella
 ~rgsaddle.ase.MinModeAtoms(atoms, mode=...)~ estimates a dimer or Lanczos mode and returns the effective force. Above the well the perpendicular force is dropped. Below it the force along the mode is reflected. An ASE optimizer can drive that object.
 
-~MinModeAtoms(atoms, control)~ with a ~DimerControl~ is ASE's dimer call. ~displace(method='vector')~ applies a Cartesian displacement, ~get_eigenmode~, ~get_curvature~, and ~get_barrier_energy~ read the estimate, and ~MinModeTranslate~ takes the trial step and the conjugate-gradient direction from ASE while the mode comes from this dimer. ~order~ other than 1, an ~eigenmode_method~ other than ~dimer~, a gauss displacement, and a communicator with ~size > 1~ raise ~NotImplementedError~ naming the option. The mode's sign follows the guess. Convergence wants the force below ~fmax~ and a negative curvature.
+~MinModeAtoms(atoms, control)~ with a ~DimerControl~ is ASE's dimer call. ~displace()~ with the default ~displacement_method='gauss'~ draws the same ~RandomState~ normals as ASE 3.29 when ~random_seed~ is set, one coordinate at a time. A mask, or a ~displacement_center~ with ~radius~ or ~number_of_atoms~, limits that draw, and ~mic~ is the minimum image when the center is an atom index. ~method='vector'~ still applies a Cartesian displacement. ~initial_eigenmode_method='gauss'~ (the default) builds the mode from one further draw and restores the positions. ~'displacement'~ uses the move away from the original positions. ~get_potential_energy~ stores that guess without rotating it. ~get_eigenmode~, ~get_curvature~, and ~get_barrier_energy~ read the estimate, and ~MinModeTranslate~ takes the trial step and the conjugate-gradient direction from ASE while the rotated mode comes from this dimer. ~order~ other than 1, an ~eigenmode_method~ other than ~dimer~, and a communicator with ~size > 1~ raise ~NotImplementedError~ naming the option. The mode's sign follows the guess. Convergence wants the force below ~fmax~ and a negative curvature.
 
 ~rgsaddle.ase.Sella(atoms, order=1)~ is the saddle optimizer. ~run(fmax, steps)~ is ASE's loop. One step is the partitioned rational-function trust step, not a dimer translation. Masses come from ~atoms.get_masses~.
 

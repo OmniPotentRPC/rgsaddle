@@ -1,0 +1,2 @@
+PAFI keeps every configuration ~PafiConfig::retain~ asks for when that count does not divide ~samples~. The previous gap, the sample count divided by ~retain~ and rounded up, stored only every multiple of that gap, so 64 out of 200 kept 50.
+The kept indices are now ~ordinal * (samples - 1) / (retain - 1)~. They run from the first recorded sample through the last, and both ends are kept when more than one configuration is retained. A ~retain~ larger than ~samples~ is ~SaddleError::Invalid~.

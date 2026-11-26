@@ -1,8 +1,9 @@
 //! Discrete abbreviated action and the nudged force at fixed energy.
 //!
 //! Ásgeirsson, Arnaldsson and Jónsson, J. Chem. Phys. 148, 102334 (2018),
-//! and the discretization written out by Zhang, Litman, Hele and
-//! coworkers (the LI-NEB appendix of doi:10.1021/acs.jctc.5c00673).
+//! and the discretization written out by Zhang, Nimmrich, Johnson,
+//! Schenter, Khalil, and Govind, J. Chem. Theory Comput. 21, 7517
+//! (2025), doi:10.1021/acs.jctc.5c00673 (the LI-NEB appendix).
 //! In mass-weighted coordinates the one-way action is
 //!
 //! `W = Σ_j (σ_{j−1} + σ_j) / 2 · |q_j − q_{j−1}|`,
@@ -103,7 +104,7 @@ pub(crate) fn assemble<S: PointSurface>(
     let (aligned, placements) = match masses.atoms {
         Some(atoms) => {
             let (aligned, placements) =
-                align::align_images(weighted, masses.sqrt_mass.view(), atoms, masses.adjacent)?;
+                align::align_images(weighted, masses.metric(), atoms, masses.adjacent)?;
             (aligned, Some(placements))
         }
         None => (weighted.to_owned(), None),
@@ -235,13 +236,7 @@ pub(crate) fn assemble<S: PointSurface>(
     if let (Some(atoms), Some(placements)) = (masses.atoms, &placements) {
         for (i, placement) in placements.iter().enumerate() {
             let mut row = drive.row(i).to_owned();
-            align::restore_force(
-                &mut row,
-                placement,
-                aligned.row(i),
-                masses.sqrt_mass.view(),
-                atoms,
-            );
+            align::restore_force(&mut row, placement, aligned.row(i), masses.metric(), atoms);
             drive.row_mut(i).assign(&row);
         }
     }

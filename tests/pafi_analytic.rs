@@ -863,3 +863,26 @@ fn a_quench_that_spends_its_step_cap_is_counted() {
     let average = average_hyperplane(&Widening, &geometry, &capped).expect("a capped quench ends");
     assert!(average.unconverged_quenches > 0);
 }
+
+#[test]
+fn retained_starts_fill_a_nondivisible_request() {
+    let frames = line(3);
+    let path = ArcPath::from_positions(&frames).expect("path");
+    let geometry = path.geometry(1.0).expect("plane");
+    let config = PafiConfig::default()
+        .with_thermal(0.02)
+        .with_mobility(1.0)
+        .with_time_step(0.01)
+        .with_thermalize(0)
+        .with_stride(1)
+        .with_samples(200)
+        .with_blocks(5)
+        .with_seed(3)
+        .with_fix_com(false)
+        .with_retain(64)
+        .with_target_error(None)
+        .with_max_rounds(1);
+    let plane = average_hyperplane(&AlongX, &geometry, &config).expect("plane");
+    assert_eq!(plane.samples, 200);
+    assert_eq!(plane.retained.len(), 64);
+}

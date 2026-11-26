@@ -6,7 +6,7 @@ Full API documentation for every item below is on [[https://docs.rs/rgsaddle][do
 * Coordinates and the plane
 | Type | Role |
 |------+------|
-| =MassWeighted= | Wraps a Cartesian =PointSurface= in mass-weighted coordinates, =q = M^(1/2) x= |
+| =MassWeighted= | Wraps a Cartesian =PointSurface= in mass-weighted coordinates, =q = M^(1/2) x=, through =MassMetric= |
 | =FixedCell= | Holds a crystal's cell fixed, for one temperature at a time |
 | =Hyperplane= | A point and a unit normal, in mass-weighted coordinates, pointing from reactant to product. =from_min_mode= seeds one from a converged =MinModeSession= or Lanczos search, normal to the lowest Ritz vector of a converged saddle-index certificate at that point and otherwise to the session mode; =oriented_toward= fixes the sign toward a given configuration; =packed= / =from_packed= give the =[p; normal]= layout =PlaneSample::directional= also uses; =from_cartesian= / =to_cartesian= convert |
 

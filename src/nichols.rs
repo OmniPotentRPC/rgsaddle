@@ -8,8 +8,11 @@
 //! Copyright (C) 2013, Joshua More and Michele Ceriotti
 //! Algorithms implemented by Michele Ceriotti and Benjamin Helfrecht, 2015
 //!
-//! The level shift is Simons and Nichols, *Int. J. Quantum Chem.* 38
-//! (1990) 263-276, <https://doi.org/10.1002/qua.560382435>.
+//! The level shift is Nichols, Taylor, Schmidt, and Simons, *J. Chem.
+//! Phys.* 92 (1990) 340-346, <https://doi.org/10.1063/1.458435>, with
+//! the local quadratic strategies of Simons and Nichols, *Int. J.
+//! Quantum Chem.* 38 (S24) (1990) 263-276,
+//! <https://doi.org/10.1002/qua.560382427>.
 //! Powell's symmetric update is Fletcher, *Practical Methods of
 //! Optimization*, 2nd ed. (1987).
 //! Bofill's mix of that update with the symmetric rank-one term is
@@ -57,9 +60,9 @@ pub enum HessianUpdate {
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct Index1Config {
-    /// The update.
+    /// Quasi-Newton formula used to update the Cartesian Hessian after each step.
     pub update: HessianUpdate,
-    /// Estimated lowest-curvature direction. A stored mode is normalized.
+    /// Stationary-point target (`Index1` saddle or `Minimize`).
     pub mode: NicholsMode,
     /// Euclidean bound on the Cartesian step.
     pub trust_radius: f64,
@@ -132,16 +135,16 @@ impl Default for Index1Config {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// The Index1Status.
+/// Outcome of one [`Index1Session`] step.
 pub enum Index1Status {
-    /// The Running.
+    /// Largest absolute gradient component still exceeds `force_tol`.
     Running,
-    /// The Converged.
+    /// Every absolute gradient component is at or below `force_tol`.
     Converged,
 }
 
 #[derive(Clone, Debug)]
-/// The Index1Report.
+/// Diagnostics returned by [`Index1Session::step`] and [`Index1Session::run`].
 pub struct Index1Report {
     /// Whether this step is still running or has converged.
     pub status: Index1Status,
@@ -777,7 +780,7 @@ impl Index1Session {
         self.x.view()
     }
 
-    /// Hessian.
+    /// Current Cartesian energy Hessian, or `None` before one is supplied or seeded.
     pub fn hessian(&self) -> Option<ArrayView2<'_, f64>> {
         if self.have_hessian {
             Some(self.hessian.view())
@@ -786,7 +789,7 @@ impl Index1Session {
         }
     }
 
-    /// Set hessian.
+    /// Install a square, finite Cartesian energy Hessian matching the position dimension.
     pub fn set_hessian(&mut self, hessian: Array2<f64>) -> Result<(), SaddleError> {
         if hessian.nrows() != self.x.len() || hessian.ncols() != self.x.len() {
             return Err(SaddleError::Shape("Hessian must match the position".into()));
@@ -799,7 +802,7 @@ impl Index1Session {
         Ok(())
     }
 
-    /// Set position.
+    /// Move the session to `x` and invalidate the cached gradient while keeping the Hessian.
     pub fn set_position(&mut self, x: Array1<f64>) -> Result<(), SaddleError> {
         if x.len() != self.x.len() {
             return Err(SaddleError::Shape("position length must stay fixed".into()));

@@ -1,6 +1,5 @@
 //! Image dependent pair potential initial path.
 //!
-//! Goswami, MethodsX (2026), doi:10.1016/j.mex.2026.103899.
 //! Smidstrup, Pedersen, Stokbro, and Jonsson, J. Chem. Phys. 140,
 //! 214106 (2014), doi:10.1063/1.4878664.
 //!
@@ -19,6 +18,75 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
 use crate::error::SaddleError;
 use crate::mic::{self, Cell};
+use crate::trics::{TricsConfig, trics_path};
+
+/// Initial Cartesian path supplied to a band or Gaussian process band.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub enum PathInitializer {
+    /// Straight minimum image interpolation.
+    #[default]
+    Linear,
+    /// Image dependent pair potential interpolation.
+    Idpp(IdppConfig),
+    /// TRICS refinement of a configured seed path.
+    Trics(TricsStartConfig),
+}
+
+/// Seed path refined by [`PathInitializer::Trics`].
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub enum TricsSeed {
+    /// Straight Cartesian seed.
+    #[default]
+    Linear,
+    /// IDPP seed.
+    Idpp(IdppConfig),
+}
+
+/// Controls for a TRICS path initializer.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct TricsStartConfig {
+    /// Path used before TRICS segmentation.
+    pub seed: TricsSeed,
+    /// TRICS coordinate, diagnostic, inversion, and splice controls.
+    pub trics: TricsConfig,
+}
+
+with_setters!(TricsStartConfig {
+    with_seed => seed: val TricsSeed,
+    with_trics => trics: val TricsConfig,
+});
+
+/// Build a path with a generic initializer.
+///
+/// This is the common start option for NEB and Gaussian process NEB
+/// drivers. TRICS currently requires unwrapped free space coordinates.
+pub fn initialize_path(
+    reactant: ArrayView1<f64>,
+    product: ArrayView1<f64>,
+    n_images: usize,
+    cell: Option<&Cell>,
+    initializer: &PathInitializer,
+) -> Result<Array2<f64>, SaddleError> {
+    match initializer {
+        PathInitializer::Linear => linear_path(reactant, product, n_images, cell),
+        PathInitializer::Idpp(config) => idpp_path(reactant, product, n_images, cell, config),
+        PathInitializer::Trics(config) => {
+            if cell.is_some() {
+                return Err(SaddleError::Invalid(
+                    "TRICS path initialization needs unwrapped free space coordinates".into(),
+                ));
+            }
+            let initial = match &config.seed {
+                TricsSeed::Linear => linear_path(reactant, product, n_images, None)?,
+                TricsSeed::Idpp(idpp) => idpp_path(reactant, product, n_images, None, idpp)?,
+            };
+            Ok(trics_path(initial.view(), &config.trics)?.path)
+        }
+    }
+}
 
 /// Per-image stop for [`idpp_path`].
 ///

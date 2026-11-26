@@ -34,8 +34,9 @@
 //! NEBTangent / NEBSpringForce / NEBForceProjection with identical
 //! branch structure.
 //!
-//! Positions are unwrapped Cartesian; a periodic host applies its
-//! minimum-image convention before handing differences in.
+//! Positions are unwrapped Cartesian. [`BandConfig::cell`] makes the
+//! band mechanics take minimum-image differences; the host surface still
+//! receives the unwrapped positions and owns its potential's periodicity.
 //!
 //! [`sparse_hessian::sparse_hessian`] recovers a cutoff Hessian by a
 //! direct Curtis-Powell-Reid partition: a smallest-last distance-2
@@ -74,6 +75,7 @@ pub mod capi;
 pub mod capi_hyperplane;
 pub mod connect;
 pub mod defect_pair;
+pub mod elastic_dipole;
 pub mod error;
 pub mod geodesic;
 pub mod idpp;
@@ -82,6 +84,7 @@ pub mod indexk;
 pub mod lammps;
 pub mod line_neb;
 pub mod lineb;
+pub mod mass_metric;
 pub mod minmode;
 pub mod nichols;
 pub mod npt;
@@ -98,12 +101,14 @@ pub mod region;
 pub mod relax;
 pub mod saddle_index;
 pub mod solid_dimer;
+pub mod solid_prefactor;
 pub mod solid_state;
 pub mod spring;
 pub mod ssneb;
 pub mod stencil;
 pub mod strain_rate;
 pub mod tangent;
+pub mod trics;
 
 // `translated_gradient` is crate-private, so the golden-bit test lives in
 // this module under `cfg(test)`. The Kani harnesses are the same module
@@ -156,13 +161,21 @@ pub use defect_pair::{
 pub use elastic::{
     ElasticMultipole, LocalField, Octupole, Quadrupole, StrainGradient, quadrupole_energy,
 };
+pub use elastic_dipole::{
+    AnisotropicGreen, AnisotropicGreenConfig, CorrectedEnergy, CorrectedRate, DefectDipole,
+    ElasticConstants, ElasticCorrection, ElasticPairState, ElasticRate, GreenSecondDerivative,
+    InteractionEstimate, PeriodicElastic, PeriodicElasticConfig, Tensor4,
+};
 pub use error::SaddleError;
 pub use field::{DefectSource, DirectSolver, FieldSolver, FmmSolver, Kelvin};
 pub use geodesic::{
     GeodesicChart, GeodesicConfig, GeodesicLengths, GeodesicReport, MORSE_ALPHA, MORSE_BETA,
     MorsePairChart, geodesic_interpolate, geodesic_lengths, geodesic_path,
 };
-pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
+pub use idpp::{
+    IdppConfig, PathInitializer, SidppConfig, TricsSeed, TricsStartConfig, idpp_path,
+    initialize_path, linear_path, sidpp_path,
+};
 pub use indexk::{
     BlockEigenKind, HessianProduct, IndexKConfig, IndexKReport, IndexKSession, WithHessian,
     indexk_step, reflect_force, translated_force,
@@ -188,6 +201,7 @@ pub use lineb::{
     cartesian_image_hessian, hqtst_rate_from_image_hessians, hqtst_rate_interpolated_hessian,
     hqtst_rate_interpolated_hessian_observed, hqtst_rate_interpolated_hessian_with_step,
 };
+pub use mass_metric::{MassMetric, MetricCovector, MetricPoint, MetricTangent};
 pub use minmode::{
     ArtNConfig, FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession,
     MinModeStatus, ModeEstimate, PointSurface, RaisedStep, halve_raised_energy,
@@ -258,6 +272,10 @@ pub use solid_dimer::{
     SolidDimerReport, StressCheck, VineyardIndexError, VineyardIndexReport, certify_vineyard_pair,
     check_cauchy_stress, finite_difference_cauchy_stress, index_at, virial,
 };
+pub use solid_prefactor::{
+    JointHessian, JointHessianConfig, JointVineyard, JointVineyardConfig, joint_hessian,
+    joint_vineyard_prefactor,
+};
 pub use spring::SpringKind;
 pub use ssneb::{SolidImage, SolidNeb, joint_coordinate};
 pub use stats::EquilibrationReport;
@@ -273,6 +291,11 @@ pub use strain_rate::{
     split_translational_modes, symmetrize, transform_tensor, vineyard_prefactor,
 };
 pub use tangent::TangentKind;
+pub use trics::{
+    TRICS_SPLICE_TOLERANCE_ANGSTROM, TricConfig, TricInversionConfig, TricPrimitive, TricSystem,
+    TricsConfig, TricsReport, TricsSegment, diagnostic_matrix as tric_diagnostic_matrix,
+    interpolate_tric_segment, tric_segments, tric_systems, trics_path,
+};
 
 pub mod cell_log;
 pub mod constraints;
