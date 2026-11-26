@@ -1,1 +1,1 @@
-AutoNEB reads FIRE's documented ``defaults['maxstep']`` when the signature default is None, which is the value ASE 3.29 applies.
+AutoNEB reads FIRE's documented ~defaults['maxstep']~ when the signature default is None, which is the value ASE 3.29 applies.

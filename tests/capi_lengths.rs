@@ -216,3 +216,403 @@ fn prfo_step_refuses_a_hessian_past_a_slice() {
     };
     assert_eq!(rc, RGSADDLE_INVALID_PARAMETER);
 }
+
+fn irc_config() -> RgsaddleIrcConfig {
+    RgsaddleIrcConfig {
+        version: version(),
+        flags: 0,
+        dx: 0.1,
+        force_tol: 1e-3,
+        force_gate: 0,
+        max_move: 0.1,
+        max_inner: 1,
+        kind: 0,
+        direction: 0,
+    }
+}
+
+fn sella_min_config() -> RgsaddleSellaMinConfig {
+    RgsaddleSellaMinConfig {
+        version: version(),
+        flags: 0,
+        delta: 0.1,
+        force_tol: 1e-3,
+        force_gate: 0,
+    }
+}
+
+fn sella_saddle_config() -> RgsaddleSellaSaddleConfig {
+    RgsaddleSellaSaddleConfig {
+        version: version(),
+        flags: 0,
+        delta: 0.1,
+        force_tol: 1e-3,
+        force_gate: 0,
+        order: 1,
+    }
+}
+
+fn constraints_config() -> RgsaddleConstraintsConfig {
+    RgsaddleConstraintsConfig {
+        version: version(),
+        flags: 0,
+    }
+}
+
+fn samd_config() -> RgsaddleSamdConfig {
+    RgsaddleSamdConfig {
+        version: version(),
+        flags: 0,
+        dt: 1e-3,
+        tau: 1.0,
+        t0: 1.0,
+        tf: 2.0,
+        ngen: 1,
+        exponential: 0,
+    }
+}
+
+fn indexk_config() -> RgsaddleIndexKConfig {
+    RgsaddleIndexKConfig {
+        version: version(),
+        flags: 0,
+        index: 1,
+        method: 0,
+        dr: 1e-3,
+        rotation_tol: 1e-4,
+        max_rotations: 1,
+        force_tol: 1e-3,
+        max_move: 0.1,
+        residual_tol: 1e-4,
+        max_block_iterations: 1,
+    }
+}
+
+/// Wire layout of `rgsaddle_ocineb_config_t`. The Rust type stays in a
+/// private module, so the length tests call the C symbol directly.
+#[repr(C)]
+struct OcinebConfigWire {
+    version: RgsaddleVersion,
+    flags: u64,
+    trigger_factor: f64,
+    trigger_force: f64,
+    angle_tol: f64,
+    stability_count: i64,
+    max_mmf_steps: i64,
+    restore_unhelpful: i32,
+    reserved: i32,
+}
+
+unsafe extern "C" {
+    fn rgsaddle_ocineb_create(
+        band: *const RgsaddleBandConfig,
+        minmode: *const RgsaddleMinModeConfig,
+        config: *const OcinebConfigWire,
+        n_images: i64,
+        n_atoms: i64,
+        positions: *const f64,
+    ) -> *mut c_void;
+}
+
+fn ocineb_config() -> OcinebConfigWire {
+    OcinebConfigWire {
+        version: version(),
+        flags: 0,
+        trigger_factor: 0.5,
+        trigger_force: 0.0,
+        angle_tol: 0.1,
+        stability_count: 1,
+        max_mmf_steps: 1,
+        restore_unhelpful: 0,
+        reserved: 0,
+    }
+}
+
+fn irc_at(n_atoms: i64) -> *mut RgsaddleIrc {
+    let config = irc_config();
+    let buf = [0.0; 3];
+    unsafe { rgsaddle_irc_create(&config, n_atoms, buf.as_ptr(), buf.as_ptr(), buf.as_ptr()) }
+}
+
+fn sella_min_at(n_atoms: i64) -> *mut RgsaddleSellaMin {
+    let config = sella_min_config();
+    let buf = [0.0; 3];
+    unsafe { rgsaddle_sella_min_create(&config, n_atoms, buf.as_ptr(), buf.as_ptr()) }
+}
+
+fn sella_saddle_at(n_atoms: i64) -> *mut RgsaddleSellaSaddle {
+    let config = sella_saddle_config();
+    let buf = [0.0; 3];
+    unsafe { rgsaddle_sella_saddle_create(&config, n_atoms, buf.as_ptr(), buf.as_ptr()) }
+}
+
+fn constraints_at(n_atoms: i64) -> *mut RgsaddleConstraints {
+    let config = constraints_config();
+    unsafe { rgsaddle_constraints_create(&config, n_atoms) }
+}
+
+fn samd_at(n_atoms: i64) -> *mut RgsaddleSamd {
+    let config = samd_config();
+    let buf = [0.0; 3];
+    unsafe {
+        rgsaddle_samd_create(
+            &config,
+            n_atoms,
+            buf.as_ptr(),
+            buf.as_ptr(),
+            Some(never_called),
+            ptr::null_mut(),
+        )
+    }
+}
+
+fn pes_at(n_atoms: i64) -> *mut RgsaddlePes {
+    let buf = [0.0; 3];
+    unsafe { rgsaddle_pes_create(n_atoms, buf.as_ptr(), buf.as_ptr(), 0, 0) }
+}
+
+fn internal_pes_at(
+    n_atoms: i64,
+    n_bonds: i64,
+    n_angles: i64,
+    n_dihedrals: i64,
+) -> *mut RgsaddleInternalPes {
+    let buf = [0.0; 3];
+    let idx = [0_i64; 4];
+    unsafe {
+        rgsaddle_internal_pes_create_from_find(
+            n_atoms,
+            buf.as_ptr(),
+            buf.as_ptr(),
+            n_bonds,
+            idx.as_ptr(),
+            n_angles,
+            idx.as_ptr(),
+            n_dihedrals,
+            idx.as_ptr(),
+        )
+    }
+}
+
+fn indexk_at(n_atoms: i64) -> *mut RgsaddleIndexK {
+    let config = indexk_config();
+    let buf = [0.0; 3];
+    unsafe { rgsaddle_indexk_create(&config, n_atoms, buf.as_ptr(), ptr::null()) }
+}
+
+fn ocineb_at(n_images: i64, n_atoms: i64) -> *mut c_void {
+    let band = band_config();
+    let minmode = minmode_config(1);
+    let config = ocineb_config();
+    let buf = [0.0; 3];
+    unsafe { rgsaddle_ocineb_create(&band, &minmode, &config, n_images, n_atoms, buf.as_ptr()) }
+}
+
+fn saddle_index_at(n_atoms: i64) -> i32 {
+    let buf = [0.0; 3];
+    let mut out = std::mem::MaybeUninit::<RgsaddleSaddleIndex>::uninit();
+    unsafe {
+        rgsaddle_saddle_index(
+            ptr::null(),
+            n_atoms,
+            buf.as_ptr(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            Some(never_called),
+            ptr::null_mut(),
+            out.as_mut_ptr(),
+            ptr::null_mut(),
+            0,
+        )
+    }
+}
+
+#[test]
+fn irc_refuses_a_negative_count() {
+    assert!(irc_at(-1).is_null());
+}
+
+#[test]
+fn irc_refuses_an_overflowing_product() {
+    assert!(irc_at(i64::MAX).is_null());
+}
+
+#[test]
+fn irc_refuses_a_span_past_a_slice() {
+    assert!(irc_at(HUGE_ATOMS).is_null());
+}
+
+#[test]
+fn sella_min_refuses_a_negative_count() {
+    assert!(sella_min_at(-1).is_null());
+}
+
+#[test]
+fn sella_min_refuses_an_overflowing_product() {
+    assert!(sella_min_at(i64::MAX).is_null());
+}
+
+#[test]
+fn sella_min_refuses_a_span_past_a_slice() {
+    assert!(sella_min_at(HUGE_ATOMS).is_null());
+}
+
+#[test]
+fn sella_saddle_refuses_a_negative_count() {
+    assert!(sella_saddle_at(-1).is_null());
+}
+
+#[test]
+fn sella_saddle_refuses_an_overflowing_product() {
+    assert!(sella_saddle_at(i64::MAX).is_null());
+}
+
+#[test]
+fn sella_saddle_refuses_a_span_past_a_slice() {
+    assert!(sella_saddle_at(HUGE_ATOMS).is_null());
+}
+
+#[test]
+fn constraints_refuses_a_negative_count() {
+    assert!(constraints_at(-1).is_null());
+}
+
+#[test]
+fn constraints_refuses_an_overflowing_product() {
+    assert!(constraints_at(i64::MAX).is_null());
+}
+
+#[test]
+fn constraints_refuses_a_span_past_a_slice() {
+    assert!(constraints_at(HUGE_ATOMS).is_null());
+}
+
+#[test]
+fn samd_refuses_a_negative_count() {
+    assert!(samd_at(-1).is_null());
+}
+
+#[test]
+fn samd_refuses_an_overflowing_product() {
+    assert!(samd_at(i64::MAX).is_null());
+}
+
+#[test]
+fn samd_refuses_a_span_past_a_slice() {
+    assert!(samd_at(HUGE_ATOMS).is_null());
+}
+
+#[test]
+fn pes_refuses_a_negative_count() {
+    assert!(pes_at(-1).is_null());
+}
+
+#[test]
+fn pes_refuses_an_overflowing_product() {
+    assert!(pes_at(i64::MAX).is_null());
+}
+
+#[test]
+fn pes_refuses_a_span_past_a_slice() {
+    assert!(pes_at(HUGE_ATOMS).is_null());
+}
+
+#[test]
+fn internal_pes_refuses_a_negative_count() {
+    assert!(internal_pes_at(-1, 0, 0, 0).is_null());
+    assert!(internal_pes_at(1, -1, 0, 0).is_null());
+    assert!(internal_pes_at(1, 0, -1, 0).is_null());
+    assert!(internal_pes_at(1, 0, 0, -1).is_null());
+}
+
+#[test]
+fn internal_pes_refuses_an_overflowing_product() {
+    assert!(internal_pes_at(i64::MAX, 0, 0, 0).is_null());
+}
+
+#[test]
+fn internal_pes_bonds_refuse_an_overflowing_product() {
+    assert!(internal_pes_at(1, i64::MAX, 0, 0).is_null());
+}
+
+#[test]
+fn internal_pes_angles_refuse_an_overflowing_product() {
+    assert!(internal_pes_at(1, 0, i64::MAX, 0).is_null());
+}
+
+#[test]
+fn internal_pes_dihedrals_refuse_an_overflowing_product() {
+    assert!(internal_pes_at(1, 0, 0, i64::MAX).is_null());
+}
+
+#[test]
+fn internal_pes_refuses_a_span_past_a_slice() {
+    assert!(internal_pes_at(HUGE_ATOMS, 0, 0, 0).is_null());
+}
+
+#[test]
+fn internal_pes_bonds_refuse_a_span_past_a_slice() {
+    assert!(internal_pes_at(1, HUGE_ATOMS, 0, 0).is_null());
+}
+
+#[test]
+fn internal_pes_angles_refuse_a_span_past_a_slice() {
+    assert!(internal_pes_at(1, 0, HUGE_ATOMS, 0).is_null());
+}
+
+#[test]
+fn internal_pes_dihedrals_refuse_a_span_past_a_slice() {
+    assert!(internal_pes_at(1, 0, 0, HUGE_ATOMS).is_null());
+}
+
+#[test]
+fn indexk_refuses_a_negative_count() {
+    assert!(indexk_at(-1).is_null());
+}
+
+#[test]
+fn indexk_refuses_an_overflowing_product() {
+    assert!(indexk_at(i64::MAX).is_null());
+}
+
+#[test]
+fn indexk_refuses_a_span_past_a_slice() {
+    assert!(indexk_at(HUGE_ATOMS).is_null());
+}
+
+#[test]
+fn ocineb_refuses_a_negative_count() {
+    assert!(ocineb_at(3, -1).is_null());
+    assert!(ocineb_at(-1, 1).is_null());
+}
+
+#[test]
+fn ocineb_refuses_an_overflowing_product() {
+    assert!(ocineb_at(3, i64::MAX).is_null());
+}
+
+#[test]
+fn ocineb_images_refuse_an_overflowing_product() {
+    assert!(ocineb_at(i64::MAX, 1).is_null());
+}
+
+#[test]
+fn ocineb_refuses_a_span_past_a_slice() {
+    assert!(ocineb_at(3, HUGE_ATOMS).is_null());
+}
+
+#[test]
+fn saddle_index_refuses_a_negative_count() {
+    assert_eq!(saddle_index_at(-1), RGSADDLE_SHAPE);
+}
+
+#[test]
+fn saddle_index_refuses_an_overflowing_product() {
+    assert_eq!(saddle_index_at(i64::MAX), RGSADDLE_SHAPE);
+}
+
+#[test]
+fn saddle_index_refuses_a_span_past_a_slice() {
+    assert_eq!(saddle_index_at(HUGE_ATOMS), RGSADDLE_SHAPE);
+}
