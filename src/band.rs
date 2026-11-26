@@ -4120,15 +4120,16 @@ impl BandSession {
 
     /// The model-update boundary: drop quasi-Newton history, the
     /// climbing baseline, the armed climbing image, the ODE12r
-    /// rejection count, the Zoom-NEB stability record, and every
-    /// cached surface value (endpoint energies, the last evaluation,
-    /// and the dynamic NEB image answers, step and origin). The next
-    /// evaluation carries the whole band. Use it when the surface
-    /// itself changed (a surrogate refit, a new calculator setting).
+    /// rejection count, the Zoom-NEB stability record, the free-end
+    /// cut memory and initial fixed energy, and every cached surface
+    /// value (endpoint energies, the last evaluation, and the dynamic
+    /// NEB image answers, step and origin). The next evaluation
+    /// carries the whole band. Use it when the surface itself changed
+    /// (a surrogate refit, a new calculator setting).
     pub fn reset(&mut self) {
         self.restart();
         self.state.set_endpoints(None);
-        self.free_end_state.forget_fixed_endpoint();
+        self.free_end_state = free_end::FreeEndState::default();
         self.zoom = zoom::ZoomState::default();
         self.state.drop_last();
         self.state.dynamic_run().clear_answers();

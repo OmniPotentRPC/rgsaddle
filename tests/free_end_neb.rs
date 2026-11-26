@@ -967,3 +967,56 @@ fn free_end_refuses_dynamic_neb() {
         .set_dynamic(None)
         .expect("clearing is allowed");
 }
+
+#[test]
+fn reset_then_step_matches_a_fresh_session_after_free_end_progress() {
+    let n_images = 5;
+    let positions =
+        Array2::from_shape_fn(
+            (n_images, 3),
+            |(image, axis)| {
+                if axis == 0 { image as f64 } else { 0.0 }
+            },
+        );
+    let config = BandConfig::default()
+        .with_free_end(
+            FreeEndConfig::default()
+                .with_side(FreeEndSide::Last)
+                .with_max_cuts(2)
+                .with_cut_force(100.0)
+                .with_stability(5)
+                .with_window_offset(1)
+                .with_cubic(false),
+        )
+        .with_climbing(None)
+        .with_min_mode(None)
+        .with_saddle_check(None)
+        .with_remove_translation(false);
+    let surface = DownhillParabola { center: 2.0 };
+    let mut aged = BandSession::new(config.clone(), positions).expect("session");
+    for _ in 0..4 {
+        let report = aged.step_free_end(&surface).expect("age the free end");
+        assert!(!report.cut_this_step);
+        assert_eq!(report.cuts, 0);
+    }
+    assert!(aged.initial_fixed_endpoint_energy().is_some());
+    aged.reset();
+    let mut fresh = BandSession::new(config, aged.positions().to_owned()).expect("fresh");
+    assert_eq!(
+        aged.initial_fixed_endpoint_energy(),
+        fresh.initial_fixed_endpoint_energy()
+    );
+    assert_eq!(aged.free_end_cuts(), fresh.free_end_cuts());
+    assert_eq!(aged.free_end_windows(), fresh.free_end_windows());
+    let aged_report = aged.step_free_end(&surface).expect("step after reset");
+    let fresh_report = fresh.step_free_end(&surface).expect("fresh step");
+    assert_eq!(aged.positions(), fresh.positions());
+    assert_eq!(aged_report.cuts, fresh_report.cuts);
+    assert_eq!(aged_report.cut_this_step, fresh_report.cut_this_step);
+    assert_eq!(aged_report.status, fresh_report.status);
+    assert_eq!(
+        aged.initial_fixed_endpoint_energy(),
+        fresh.initial_fixed_endpoint_energy()
+    );
+    assert!(aged.initial_fixed_endpoint_energy().is_some());
+}
