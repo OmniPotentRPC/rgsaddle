@@ -100,8 +100,8 @@ pub fn compute_tangent(
 /// `parameter` is the normalized cumulative chord length, 0 at the first
 /// image and 1 at the last. `tangents` are `dx/ds` at unit Euclidean
 /// length. `curvature` is `d²x/ds²`. Both arrays have one row per image,
-/// endpoints included, in the caller's length units (the tangent is
-/// unitless and the curvature is one over length).
+/// endpoints included. The tangent is unitless. Normalized `s` is
+/// dimensionless, so the curvature has the caller's length units.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SplineTangents {
     /// Normalized cumulative chord length, one entry per image.
