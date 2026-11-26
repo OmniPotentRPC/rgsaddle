@@ -24,7 +24,7 @@
 //! assert!((result.model_decrease - 1.0).abs() < 1e-12);
 //! ```
 
-use ndarray::{Array1, Array2, ArrayView2, s};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
 use crate::band::{BandConfig, BandSurface, zero_fixed};
 use crate::error::SaddleError;
@@ -97,11 +97,6 @@ fn band_forces_with_gate<S: BandSurface + ?Sized>(
     let is_string = config.string.is_some();
     let springs = config.spring.at_band(energies.view(), gradients.view());
     if config.tangent == TangentKind::Spline {
-        if is_string {
-            return Err(SaddleError::Invalid(
-                "the spline tangent is the Makri band force, not the simplified string".into(),
-            ));
-        }
         return spline_makri_forces(
             config,
             positions,
@@ -209,7 +204,8 @@ fn band_forces_with_gate<S: BandSurface + ?Sized>(
 /// Makri, Ortner, and Kermode spline force: perpendicular true force plus
 /// `0.5 (k_prev + k_next) / n_images^2 * (X'' · t) t`, with `t` the unit
 /// spline tangent. A climbing image reflects the true force and drops the
-/// spring, as ASE does.
+/// spring, as ASE does. [`crate::BandSession`] calls
+/// [`spline_interior_forces`] for the same interior force.
 fn spline_makri_forces(
     config: &BandConfig,
     positions: ArrayView2<f64>,
@@ -219,9 +215,46 @@ fn spline_makri_forces(
     ci: Option<usize>,
     force_gate: ForceGate,
 ) -> Result<BandForces, SaddleError> {
+    let (tangents, force) = spline_interior_forces(
+        config,
+        positions,
+        energies.view(),
+        gradients.view(),
+        spring,
+        ci,
+    )?;
+    let max_force = force_gate.value(force.view());
+    Ok(BandForces {
+        energies,
+        tangents,
+        force,
+        max_force,
+    })
+}
+
+/// Interior rows of [`spline_makri_forces`]: unit tangents, then the
+/// Makri force, both for images `1..n-1`.
+pub(crate) fn spline_interior_forces(
+    config: &BandConfig,
+    positions: ArrayView2<f64>,
+    energies: ArrayView1<f64>,
+    gradients: ArrayView2<f64>,
+    spring: &SpringKind,
+    ci: Option<usize>,
+) -> Result<(Array2<f64>, Array1<f64>), SaddleError> {
+    if config.string.is_some() {
+        return Err(SaddleError::Invalid(
+            "the spline tangent is the Makri band force, not the simplified string".into(),
+        ));
+    }
     let frame = crate::tangent::spline_tangents(positions, config.cell.as_ref())?;
     let n_images = positions.nrows();
     let dof = positions.ncols();
+    if energies.len() != n_images || gradients.dim() != (n_images, dof) {
+        return Err(SaddleError::Shape(
+            "spline force energies and gradients must match the band".into(),
+        ));
+    }
     let count = n_images as f64;
     let mut tangents = Array2::zeros((n_images - 2, dof));
     let mut force = Array1::zeros((n_images - 2) * dof);
@@ -248,13 +281,7 @@ fn spline_makri_forces(
             .assign(&image_force);
         tangents.row_mut(i - 1).assign(&tangent);
     }
-    let max_force = force_gate.value(force.view());
-    Ok(BandForces {
-        energies,
-        tangents,
-        force,
-        max_force,
-    })
+    Ok((tangents, force))
 }
 
 /// Spring constants on the two segments that meet at interior image `image`.

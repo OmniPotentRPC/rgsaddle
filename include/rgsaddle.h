@@ -185,7 +185,10 @@ typedef enum {
    * the parallel spring is the curvature term
    * 0.5 (k_prev + k_next) / n_images^2 * (d2x/ds2 . t) t.
    * Read when the config minor is 70 or newer. An older minor treats
-   * this value as the improved tangent. ABI minor 70.
+   * this value as the improved tangent. rgsaddle_band_project and
+   * rgsaddle_band_step both assemble this force. Creation refuses it
+   * together with the simplified string, a solid-state cell, free-end
+   * adaptive NEB, or the exponential metric. ABI minor 70.
    */
   RGSADDLE_TANGENT_SPLINE = 2
 } rgsaddle_tangent_t;

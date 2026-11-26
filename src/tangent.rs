@@ -32,7 +32,9 @@ pub enum TangentKind {
     /// doi:10.1063/1.5064465: `dx/ds` of the not-a-knot cubic through the
     /// images, normalized, with `s` the normalized cumulative chord length.
     /// [`compute_tangent`] refuses it. [`spline_tangents`] builds it for
-    /// the whole band. ASE's `NEB(method='spline')` uses this tangent and
+    /// the whole band, and [`crate::BandSession::step`] assembles the
+    /// Makri force from that frame, the same force as [`crate::band_forces`].
+    /// ASE's `NEB(method='spline')` uses this tangent and
     /// the spline curvature for the spring.
     Spline,
 }
