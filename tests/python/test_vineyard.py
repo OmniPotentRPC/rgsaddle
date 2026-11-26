@@ -8,8 +8,6 @@ import rgsaddle
 def _coupled_barrier_surface(x: np.ndarray):
     pos = np.asarray(x, dtype=np.float64).reshape(-1)
     q, y, z = pos[0], pos[1], pos[2]
-    k0 = 1.8
-    k1 = 0.9
     k_trans = 1.4
     k_sad = 2.6
     # V(q, y, z) = (q^2 - 1)^2 + 0.5*(k_trans + alpha*q^2)*y^2 + 0.5*k_sad*z^2
@@ -17,8 +15,6 @@ def _coupled_barrier_surface(x: np.ndarray):
     # Saddle at (0, 0, 0): V_qq = -4.0, V_yy = k_trans, V_zz = k_sad
     alpha = 0.4
     e = (q * q - 1.0) ** 2 + 0.5 * (k_trans + alpha * q * q) * y * y + 0.5 * k_sad * z * z
-    # Wait: let's keep quadratic well + double well exact
-    _ = (k0, k1)
     gq = 4.0 * q * (q * q - 1.0) + alpha * q * y * y
     gy = (k_trans + alpha * q * q) * y
     gz = k_sad * z
