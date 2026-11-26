@@ -138,9 +138,12 @@ pub enum MinModeKind {
     /// subspace per compute, one gradient per action. The estimate
     /// stops when the lowest Ritz pair's residual divided by the
     /// absolute Ritz value meets `rotation_tol`, together with the
-    /// relative change of that value. A Ritz value near zero compares
-    /// the residual with `rotation_tol` directly. The torque window
-    /// stops once two vectors leave that same ratio under 1.
+    /// relative change of that value. A Ritz value whose magnitude is
+    /// at most 1e-14 of the curvature scale, the largest Hessian
+    /// action norm the estimate has formed, divides the residual by
+    /// that scale. The torque window stops once two vectors leave
+    /// that same ratio under 1, dividing by the same scale when the
+    /// Ritz value is that small.
     Lanczos,
 }
 
@@ -287,10 +290,13 @@ pub struct MinModeConfig {
     /// estimate stops when the lowest Ritz residual divided by the
     /// absolute Ritz value is at most this, and, with no host relative
     /// tolerance, when the relative change of that Ritz value is too.
-    /// A Ritz value whose magnitude is at most 1e-14 has no scale, so
-    /// the residual is compared with this number directly and the
-    /// quotient is never formed. Once two vectors are in hand, the
-    /// torque window stops when that same ratio is under 1.
+    /// A Ritz value whose magnitude is at most 1e-14 of the estimate's
+    /// curvature scale, the largest Hessian action norm it has formed,
+    /// has no magnitude of its own, so the residual and the change are
+    /// divided by that scale instead and the quotient is never formed.
+    /// Rescaling the energy or length units leaves every one of these
+    /// decisions unchanged. Once two vectors are in hand, the torque
+    /// window stops when that same ratio is under 1.
     pub rotation_tol: f64,
     /// Dimer rotation also stops when the optimal rotation angle of an
     /// iteration falls under this many radians. The default is eOn's
@@ -487,7 +493,7 @@ pub struct MinModeReport {
     pub curvature: f64,
     /// Rotation iterations (dimer) or Hessian actions (Lanczos).
     pub rotations: usize,
-    /// Number of steps taken.
+    /// Number of steps taken, including steps that leave the atoms in place.
     pub iteration: usize,
     /// Surface evaluations during this call, centre included.
     pub evaluations: usize,
@@ -547,8 +553,9 @@ const STOCK_ROTATION_TOL: f64 = 1e-4;
 /// this is finished (classic dimer, `torque_min` .. `torque_max`,
 /// `rotations_min` = 1). Lanczos reads it as the bound on the
 /// dimensionless residual once it holds two vectors: the Ritz residual
-/// divided by the absolute Ritz value, or the residual itself when that
-/// value is near zero.
+/// divided by the absolute Ritz value, or by the curvature scale, the
+/// largest Hessian action norm the estimate has formed, when the Ritz
+/// value is at most 1e-14 of that scale.
 const TORQUE_MAX: f64 = 1.0;
 
 /// Scale of the step that replaces a capped FIRE move which left the
@@ -1317,55 +1324,73 @@ const FIRE_STALL_STEPS: u32 = 2000;
 /// Slow progress (a fraction of a percent per step) must not latch.
 const FIRE_STALL_DROP: f64 = 1e-4;
 
+/// Fraction of the Lanczos curvature scale at or below which a Ritz
+/// value has no magnitude of its own.
+const LANCZOS_NEAR_ZERO: f64 = 1e-14;
+
+/// The magnitude that divides a Lanczos residual or Ritz change.
+///
+/// `scale` is the curvature scale of the estimate: the largest Hessian
+/// action norm `|H q_j|` over its Krylov vectors. It is a scale for the
+/// relative residual, and it moves with the Hessian under a change of
+/// energy or length units. A curvature whose magnitude is at most
+/// [`LANCZOS_NEAR_ZERO`] times `scale` is replaced by `scale`. `None`
+/// when an input is not finite or `scale` is negative.
+fn lanczos_divisor(curvature: f64, scale: f64) -> Option<f64> {
+    if !(curvature.is_finite() && scale.is_finite() && scale >= 0.0) {
+        return None;
+    }
+    let magnitude = curvature.abs();
+    Some(if magnitude <= LANCZOS_NEAR_ZERO * scale {
+        scale
+    } else {
+        magnitude
+    })
+}
+
 /// Whether `|residual| / |curvature|` is at most `tol`.
 ///
-/// `curvature` is the Ritz value. Dividing the residual by its absolute
-/// value cancels the energy and length units, so one `tol` means the
-/// same stop after a change of units. A curvature whose magnitude is at
-/// most 1e-14, the same guard as [`ritz_value_agreed`], has no usable
-/// scale: the residual is then compared with `tol` itself. The quotient
-/// is never formed. A non-finite residual, curvature, or tolerance does
-/// not agree.
-fn lanczos_residual_agreed(residual: f64, curvature: f64, tol: f64) -> bool {
-    if !(residual.is_finite() && curvature.is_finite() && tol.is_finite() && tol >= 0.0) {
+/// `curvature` is the Ritz value and `scale` the curvature scale of
+/// [`lanczos_divisor`]. Dividing the residual by the absolute Ritz value
+/// cancels the energy and length units, so one `tol` means the same stop
+/// after a change of units. A Ritz value at most 1e-14 of `scale` has no
+/// usable magnitude: the residual is then divided by `scale`, which
+/// carries the same units. The quotient is never formed. A non-finite
+/// residual, curvature, scale, or tolerance does not agree.
+fn lanczos_residual_agreed(residual: f64, curvature: f64, scale: f64, tol: f64) -> bool {
+    if !(residual.is_finite() && tol.is_finite() && tol >= 0.0) {
         return false;
     }
-    let scale = curvature.abs();
-    if scale <= 1e-14 {
-        return residual <= tol;
-    }
-    residual <= tol * scale
+    lanczos_divisor(curvature, scale).is_some_and(|divisor| residual <= tol * divisor)
 }
 
 /// Torque-window form of [`lanczos_residual_agreed`].
 ///
-/// The ratio is strictly under `bound`. A curvature near zero uses the
-/// same 1e-14 guard: the residual is compared with `bound` itself, and
+/// The ratio is strictly under `bound`. A Ritz value near zero against
+/// `scale` uses the same guard: the residual is divided by `scale`, and
 /// the quotient is never formed.
-fn lanczos_residual_below(residual: f64, curvature: f64, bound: f64) -> bool {
-    if !(residual.is_finite() && curvature.is_finite() && bound.is_finite() && bound >= 0.0) {
+fn lanczos_residual_below(residual: f64, curvature: f64, scale: f64, bound: f64) -> bool {
+    if !(residual.is_finite() && bound.is_finite() && bound >= 0.0) {
         return false;
     }
-    let scale = curvature.abs();
-    if scale <= 1e-14 {
-        return residual < bound;
-    }
-    residual < bound * scale
+    lanczos_divisor(curvature, scale).is_some_and(|divisor| residual < bound * divisor)
 }
 
-/// Relative change of a Ritz value. A vanishing previous value only
-/// counts as agreement when the new value is inside the tolerance too,
-/// matching eOn's guarded division (a zero denominator does not report
-/// agreement).
-fn ritz_value_agreed(new: f64, old: f64, tol: f64) -> bool {
-    if !(new.is_finite() && old.is_finite() && tol.is_finite() && tol >= 0.0) {
+/// Relative change of a Ritz value. A previous value at most 1e-14 of
+/// `scale` only counts as agreement when the new value is inside the
+/// tolerance of `scale` too, matching eOn's guarded division (a zero
+/// denominator does not report agreement) in units that cancel.
+fn ritz_value_agreed(new: f64, old: f64, scale: f64, tol: f64) -> bool {
+    if !(new.is_finite() && tol.is_finite() && tol >= 0.0) {
         return false;
     }
-    let denom = old.abs();
-    if denom <= 1e-14 {
-        return new.abs() <= tol;
+    let Some(divisor) = lanczos_divisor(old, scale) else {
+        return false;
+    };
+    if old.abs() <= LANCZOS_NEAR_ZERO * scale {
+        return new.abs() <= tol * divisor;
     }
-    (new - old).abs() / denom <= tol
+    (new - old).abs() / divisor <= tol
 }
 
 /// Stop controls for one Lanczos estimate.
@@ -1395,10 +1420,13 @@ pub type KrylovBlock = Vec<(Array1<f64>, Array1<f64>)>;
 /// 121, 9776 (2004), doi:10.1063/1.1809574, as eOn implements it: stop
 /// when the relative change in the lowest Ritz value falls under
 /// `rotation_tol`, or when the residual `beta |s|` divided by the
-/// absolute Ritz value does. A seed that is already the mode closes the
+/// absolute Ritz value does. A Ritz value at most 1e-14 of the
+/// curvature scale, the largest Hessian action norm formed so far,
+/// divides by that scale. A seed that is already the mode closes the
 /// Krylov on the first product. Under the torque window the estimate
 /// also stops once it holds two vectors and that ratio is under
-/// [`TORQUE_MAX`]. The dimer window stays an absolute rotational force.
+/// [`TORQUE_MAX`], dividing by the same scale when the Ritz value is
+/// that small. The dimer window stays an absolute rotational force.
 #[allow(clippy::too_many_arguments)]
 fn lanczos_mode<S: PointSurface>(
     surface: &Counted<'_, S>,
@@ -1438,10 +1466,12 @@ fn lanczos_mode<S: PointSurface>(
 
     let mut actions = 0;
     let mut ew_old: Option<f64> = None;
+    let mut scale = 0.0_f64;
     loop {
         let j = alpha.len();
         let hv = surface.action(x, g0, q[j].view(), config)?;
         actions += 1;
+        scale = scale.max(hv.dot(&hv).sqrt());
         let a = crate::stencil::curvature_along(hv.view(), q[j].view());
         alpha.push(a);
         Zip::from(&mut *w)
@@ -1464,7 +1494,7 @@ fn lanczos_mode<S: PointSurface>(
         // A host relative tolerance (the connect climb) uses that
         // tolerance. The stock estimate uses `rotation_tol`, and only
         // after a solve that met its test (`early`).
-        if j == 0 && lanczos_quit_early(&stop, a, config.rotation_tol) {
+        if j == 0 && lanczos_quit_early(&stop, a, scale, config.rotation_tol) {
             return Ok((q[0].clone(), a, actions, true));
         }
         if j > 0 {
@@ -1491,13 +1521,14 @@ fn lanczos_mode<S: PointSurface>(
         // residual. A one-digit residual in `|theta|` accepts a high
         // mode on the first product, so it is not a stop here. A set
         // `rel_tol` replaces `rotation_tol` for that relative test.
-        let agreed = lanczos_ritz_agreed(stop.rel_tol, config.rotation_tol, theta, ew_old);
+        let agreed = lanczos_ritz_agreed(stop.rel_tol, config.rotation_tol, theta, ew_old, scale);
         // The Ritz residual `H y - theta y` is the rotational force of
         // the Ritz vector `y`, and `theta` its curvature. Dividing by
-        // `|theta|` makes the stop dimensionless, so a change of energy
-        // or length units does not move it. The curvature-aware length
-        // stop still reads the pair in curvature units.
-        let residual_ok = lanczos_residual_agreed(residual, theta, config.rotation_tol)
+        // `|theta|`, or by `scale` when `theta` is near zero, makes the
+        // stop dimensionless, so a change of energy or length units
+        // does not move it. The curvature-aware length stop still reads
+        // the pair in curvature units.
+        let residual_ok = lanczos_residual_agreed(residual, theta, scale, config.rotation_tol)
             || rotation_force_converged(residual, theta, stop.length, config.force_tol);
         // The first two vectors span the dimer's rotation plane {v, H v},
         // and their Ritz vector is the dimer rotated to the lowest
@@ -1506,14 +1537,18 @@ fn lanczos_mode<S: PointSurface>(
         // the same ratio as the residual stop, strictly under 1. It is
         // not a converged solve: the next estimate still spends its
         // second product.
-        let windowed = stop.window && j >= 1 && lanczos_residual_below(residual, theta, TORQUE_MAX);
+        let windowed =
+            stop.window && j >= 1 && lanczos_residual_below(residual, theta, scale, TORQUE_MAX);
         let capped = alpha.len() == m;
-        if residual_ok || agreed || windowed || capped || b <= 1e-12 {
+        // An invariant Krylov subspace: the new direction is rounding
+        // against the curvature scale.
+        let breakdown = b <= 1e-12 * scale;
+        if residual_ok || agreed || windowed || capped || breakdown {
             let mut mode = Array1::zeros(n);
             for (qi, &si) in q[..=j].iter().zip(s.iter()) {
                 Zip::from(&mut mode).and(qi).for_each(|m, &q| *m += q * si);
             }
-            let converged = residual_ok || agreed || b <= 1e-12;
+            let converged = residual_ok || agreed || breakdown;
             normalize_in_place(&mut mode);
             return Ok((mode, theta, actions, converged));
         }
@@ -1584,41 +1619,32 @@ impl RitzWork {
     }
 }
 
-/// First-product return. `rel_tol` is the connect climb's fraction of
-/// `|λ|` (denominator 1 when `λ` is 0). Without it, the stock estimate
-/// returns only when the previous solve converged and the Rayleigh
-/// quotient still agrees with `rotation_tol`.
-fn lanczos_quit_early(stop: &LanczosStop, rayleigh: f64, rotation_tol: f64) -> bool {
+/// First-product return. `rel_tol` is the connect climb's relative Ritz
+/// tolerance. Without it, the stock estimate returns only when the
+/// previous solve converged and the Rayleigh quotient still agrees with
+/// `rotation_tol`. Both comparisons use the curvature scale `|H q_0|`
+/// of the first product.
+fn lanczos_quit_early(stop: &LanczosStop, rayleigh: f64, scale: f64, rotation_tol: f64) -> bool {
     if let Some(tol) = stop.rel_tol {
-        if !stop.previous.is_finite() {
-            return false;
-        }
-        let scale = if stop.previous.abs() > 0.0 {
-            stop.previous.abs()
-        } else {
-            1.0
-        };
-        return (rayleigh - stop.previous).abs() <= tol * scale;
+        return ritz_value_agreed(rayleigh, stop.previous, scale, tol);
     }
-    stop.early && ritz_value_agreed(rayleigh, stop.previous, rotation_tol)
+    stop.early && ritz_value_agreed(rayleigh, stop.previous, scale, rotation_tol)
 }
 
-/// Relative change of successive lowest Ritz values. `rel_tol` uses the
-/// connect denominator; otherwise the stock guarded comparison.
+/// Relative change of successive lowest Ritz values. `rel_tol` replaces
+/// the stock tolerance without changing the guarded comparison against
+/// the curvature scale `scale`.
 fn lanczos_ritz_agreed(
     rel_tol: Option<f64>,
     rotation_tol: f64,
     theta: f64,
     previous: Option<f64>,
+    scale: f64,
 ) -> bool {
     let Some(old) = previous else {
         return false;
     };
-    if let Some(tol) = rel_tol {
-        let scale = if old.abs() > 0.0 { old.abs() } else { 1.0 };
-        return (theta - old).abs() <= tol * scale;
-    }
-    ritz_value_agreed(theta, old, rotation_tol)
+    ritz_value_agreed(theta, old, scale, rel_tol.unwrap_or(rotation_tol))
 }
 
 /// Lowest eigenpair of the symmetric tridiagonal (alpha, beta), with
@@ -1694,6 +1720,10 @@ fn jacobi_eigen(a: &mut [f64], v: &mut Vec<f64>, n: usize) {
     for i in 0..n {
         v[i * n + i] = 1.0;
     }
+    let scale = a
+        .iter()
+        .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+    let off_tolerance = 1e-12 * scale;
     for _sweep in 0..64 {
         let mut off = 0.0;
         for i in 0..n {
@@ -1701,12 +1731,12 @@ fn jacobi_eigen(a: &mut [f64], v: &mut Vec<f64>, n: usize) {
                 off += value * value;
             }
         }
-        if off <= 1e-24 {
+        if off <= off_tolerance * off_tolerance {
             break;
         }
         for p in 0..n {
             for qi in (p + 1)..n {
-                if a[p * n + qi].abs() < 1e-18 {
+                if a[p * n + qi].abs() <= 1e-18 * scale {
                     continue;
                 }
                 let theta = (a[qi * n + qi] - a[p * n + p]) / (2.0 * a[p * n + qi]);
@@ -1775,6 +1805,8 @@ struct LanczosCarry {
     beta: Vec<f64>,
     /// Lowest Ritz value after the previous action.
     theta: Option<f64>,
+    /// Largest Hessian action norm formed by this basis.
+    scale: f64,
 }
 
 /// A FIRE translation the per-atom cap shortened while the curvature
@@ -2156,8 +2188,10 @@ impl MinModeSession {
     /// one iteration once the rotational force is under one (eOn
     /// `torque_max`), and a Lanczos estimate stops once two vectors
     /// leave the Ritz residual divided by the absolute Ritz value under
-    /// one. A Ritz value near zero compares that residual with one
-    /// directly. `None`, the default, keeps the window on for a
+    /// one. A Ritz value whose magnitude is at most 1e-14 of the
+    /// estimate's curvature scale, the largest Hessian action norm it
+    /// has formed, uses that scale as the divisor. `None`, the default,
+    /// keeps the window on for a
     /// dimer exactly when its angle test is disabled and `rotation_tol`
     /// is at least the stock 1e-4. Lanczos keeps the window only while
     /// no [`MinModeSession::set_lanczos_rel_tol`] is set.
@@ -2861,6 +2895,7 @@ impl MinModeSession {
                 alpha: Vec::new(),
                 beta: Vec::new(),
                 theta: None,
+                scale: 0.0,
             });
         }
         let Some(mut carry) = self.lanczos_carry.take() else {
@@ -2896,6 +2931,7 @@ impl MinModeSession {
                 return Err(err);
             }
         };
+        carry.scale = carry.scale.max(hv.dot(&hv).sqrt());
         let a = crate::stencil::curvature_along(hv.view(), carry.q[j].view());
         carry.alpha.push(a);
         let mut w = &hv - &(&carry.q[j] * a);
@@ -2909,7 +2945,7 @@ impl MinModeSession {
         let b = w.dot(&w).sqrt();
         let (theta, s) = lowest_ritz(&carry.alpha, &carry.beta);
         let capped = carry.alpha.len() == dim;
-        let coefficients = if !capped && b > 1e-12 {
+        let coefficients = if !capped && b > 1e-12 * carry.scale {
             carry.beta.push(b);
             carry.q.push(w / b);
             let target = extrapolated_eigenvalue(&carry.alpha, &carry.beta, carry.theta, theta);
@@ -3795,6 +3831,8 @@ impl MinModeSession {
             rotations += accepted_rotations;
         }
         self.x = x;
+        // A step that leaves the atoms in place still counts, so a host loop
+        // capped on `iteration` stops at a stationary positive curvature.
         self.iteration += 1;
         self.centre = Some(centre);
         if fire {
@@ -3818,6 +3856,9 @@ impl MinModeSession {
     }
 
     /// Convenience loop over [`MinModeSession::step`].
+    ///
+    /// Every step counts in [`MinModeReport::iteration`], including one
+    /// that leaves the atoms in place, so a stationary point cannot spin.
     pub fn run<S: PointSurface>(
         &mut self,
         surface: &S,
@@ -4585,21 +4626,122 @@ mod tests {
 
     #[test]
     fn lanczos_residual_agreement_is_relative_and_guards_a_vanishing_ritz_value() {
-        assert!(super::lanczos_residual_agreed(1.0e-6, -2.0, 1.0e-4));
-        assert!(!super::lanczos_residual_agreed(3.0e-4, -2.0, 1.0e-4));
-        assert!(super::lanczos_residual_agreed(1.0e-4, 0.0, 1.0e-4));
-        assert!(!super::lanczos_residual_agreed(2.0e-4, 0.0, 1.0e-4));
-        assert!(super::lanczos_residual_agreed(1.0e-4, 1.0e-15, 1.0e-4));
-        assert!(!super::lanczos_residual_agreed(1.0e-4, 1.0e-12, 1.0e-4));
-        assert!(!super::lanczos_residual_agreed(0.0, f64::NAN, 1.0e-4));
-        assert!(!super::lanczos_residual_agreed(f64::NAN, -1.0, 1.0e-4));
-        assert!(!super::lanczos_residual_agreed(0.0, -1.0, f64::NAN));
-        assert!(super::lanczos_residual_below(0.5, -2.0, 1.0));
-        assert!(!super::lanczos_residual_below(2.5, -2.0, 1.0));
-        assert!(!super::lanczos_residual_below(2.0, -2.0, 1.0));
-        assert!(super::lanczos_residual_below(0.5, 0.0, 1.0));
-        assert!(!super::lanczos_residual_below(1.0, 0.0, 1.0));
-        assert!(!super::lanczos_residual_below(0.0, f64::INFINITY, 1.0));
+        assert!(super::lanczos_residual_agreed(1.0e-6, -2.0, 2.0, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(3.0e-4, -2.0, 2.0, 1.0e-4));
+        assert!(super::lanczos_residual_agreed(1.0e-4, 0.0, 1.0, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(2.0e-4, 0.0, 1.0, 1.0e-4));
+        assert!(super::lanczos_residual_agreed(1.0e-4, 1.0e-15, 1.0, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(
+            1.0e-4, 1.0e-12, 1.0, 1.0e-4
+        ));
+        assert!(!super::lanczos_residual_agreed(0.0, f64::NAN, 1.0, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(f64::NAN, -1.0, 1.0, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(0.0, -1.0, 1.0, f64::NAN));
+        assert!(!super::lanczos_residual_agreed(0.0, -1.0, f64::NAN, 1.0e-4));
+        assert!(!super::lanczos_residual_agreed(0.0, -1.0, -1.0, 1.0e-4));
+        assert!(super::lanczos_residual_below(0.5, -2.0, 2.0, 1.0));
+        assert!(!super::lanczos_residual_below(2.5, -2.0, 2.0, 1.0));
+        assert!(!super::lanczos_residual_below(2.0, -2.0, 2.0, 1.0));
+        assert!(super::lanczos_residual_below(0.5, 0.0, 1.0, 1.0));
+        assert!(!super::lanczos_residual_below(1.0, 0.0, 1.0, 1.0));
+        assert!(!super::lanczos_residual_below(0.0, f64::INFINITY, 1.0, 1.0));
+        assert!(super::ritz_value_agreed(-1.00001, -1.0, 1.0, 1.0e-4));
+        assert!(!super::ritz_value_agreed(-1.001, -1.0, 1.0, 1.0e-4));
+        assert!(super::ritz_value_agreed(1.0e-5, 0.0, 1.0, 1.0e-4));
+        assert!(!super::ritz_value_agreed(1.0e-3, 0.0, 1.0, 1.0e-4));
+        assert!(super::ritz_value_agreed(0.0, 0.0, 0.0, 1.0e-4));
+        assert!(!super::ritz_value_agreed(1.0e-300, 0.0, 0.0, 1.0e-4));
+        assert!(!super::ritz_value_agreed(0.0, f64::NAN, 1.0, 1.0e-4));
+    }
+
+    /// Every near-zero fallback reads its tolerance against the
+    /// curvature scale, so multiplying the residual, the Ritz values,
+    /// and the scale by one factor never changes a decision.
+    #[test]
+    fn lanczos_stop_tests_ignore_a_common_curvature_factor() {
+        let tol = 1.0e-2;
+        let cases = [
+            (5.0e-3, 0.0, 0.0, 1.0),
+            (2.0e-2, 0.0, 0.0, 1.0),
+            (5.0e-3, 1.0e-16, 3.0e-15, 1.0),
+            (5.0e-1, -0.5, -0.501, 2.0),
+            (2.0e-2, -1.0, -1.05, 1.5),
+        ];
+        let verdicts = |factor: f64| {
+            cases
+                .iter()
+                .map(|&(residual, theta, old, scale)| {
+                    let (residual, theta, old, scale) = (
+                        residual * factor,
+                        theta * factor,
+                        old * factor,
+                        scale * factor,
+                    );
+                    [
+                        super::lanczos_residual_agreed(residual, theta, scale, tol),
+                        super::lanczos_residual_below(residual, theta, scale, super::TORQUE_MAX),
+                        super::ritz_value_agreed(theta, old, scale, tol),
+                    ]
+                })
+                .collect::<Vec<_>>()
+        };
+        let unit = verdicts(1.0);
+        assert!(unit.iter().flatten().any(|&v| v) && unit.iter().flatten().any(|&v| !v));
+        for factor in [1.0e-3, 1.0e3] {
+            assert_eq!(verdicts(factor), unit, "factor {factor:e}");
+        }
+    }
+
+    /// `V = 0.5 x' diag(h) x` with the exact Hessian action, so a
+    /// rescaled `h` scales every product by the same factor.
+    struct ExactDiagonal(Array1<f64>);
+
+    impl PointSurface for ExactDiagonal {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let gradient = &self.0 * &x;
+            Ok((0.5 * x.dot(&gradient), gradient))
+        }
+
+        fn hessian_vector(
+            &self,
+            _x: ArrayView1<f64>,
+            v: ArrayView1<f64>,
+        ) -> Result<Option<Array1<f64>>, SaddleError> {
+            Ok(Some(&self.0 * &v))
+        }
+    }
+
+    /// The seed has a zero Rayleigh quotient on `diag(-1, 1, 2, 4)`, so
+    /// the first Ritz value takes the near-zero fallback. An absolute
+    /// fallback accepted the seed at the 1e-13 scale and refined it at
+    /// 1e13. Against the curvature scale every scale makes the same
+    /// decisions and returns the same lowest mode.
+    #[test]
+    fn lanczos_decisions_survive_rescaling_the_hessian() {
+        let estimate = |factor: f64| {
+            let surface = ExactDiagonal(array![-1.0, 1.0, 2.0, 4.0] * factor);
+            let seed = array![8.0_f64.sqrt(), 2.0_f64.sqrt(), 1.0, 1.0] / 12.0_f64.sqrt();
+            let config = MinModeConfig::default()
+                .with_kind(MinModeKind::Lanczos)
+                .with_rotation_tol(1.0e-2);
+            let mut session =
+                MinModeSession::new(config, array![0.1, -0.2, 0.05, 0.3], seed).expect("session");
+            session.set_torque_window(Some(false));
+            let estimate = session.estimate_mode(&surface).expect("estimate");
+            (estimate, session.lanczos_ready)
+        };
+        let (unit, unit_ready) = estimate(1.0);
+        assert!(unit.rotations > 1, "{unit:?}");
+        assert!(unit_ready, "{unit:?}");
+        assert!(unit.mode[0].abs() > 0.99, "{unit:?}");
+        for factor in [1.0e-13, 1.0e13] {
+            let (scaled, ready) = estimate(factor);
+            assert_eq!(scaled.rotations, unit.rotations, "factor {factor:e}");
+            assert_eq!(scaled.evaluations, unit.evaluations, "factor {factor:e}");
+            assert_eq!(ready, unit_ready, "factor {factor:e}");
+            assert_abs_diff_eq!(scaled.curvature / factor, unit.curvature, epsilon = 1e-8);
+            assert_abs_diff_eq!(scaled.mode.dot(&unit.mode).abs(), 1.0, epsilon = 1e-8);
+        }
     }
 
     #[test]

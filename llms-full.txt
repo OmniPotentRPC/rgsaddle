@@ -180,6 +180,9 @@ trigger factor is 0.
 ## Leave a minimum with ART nouveau
 `howto/art` is the phased search: a host seed and mask, perpendicular relaxation, Lanczos, a lowest-mode climb, an index-1 certificate, a push both ways off the saddle, and the two quenches. `ArtStatus::Reverted` is not a completed exit.
 
+## Choose search directions from a minimum
+`howto/direction-cover` is `DirectionCover`: a signed cover of unit vectors on every active atom's sphere, an optional Gaussian kick on its neighbours, and a picker that orders the arms by angular gap or by expected improvement of the barrier. Each arm is one `ArtSession`. The coverage readout has the covering radius per atom, a record per arm, and the distinct saddles against draws.
+
 ## Step one point with a stencil
 `howto/stencil` builds `Stencil::point` for a minimiser, the dimer, Lanczos, ART, or eigen following. `Stencil::band` validates its array but band presets are not implemented. The C names are `rgsaddle_stencil_*` and `rgsaddle_last_error`. Python is `rgsaddle.Stencil.point` and `rgsaddle.ase.Point`.
 
@@ -273,7 +276,8 @@ The table below lists the main types.
 | `MinModeSession`               | Dimer or Lanczos lowest-mode search, same stepping contract; `set_position`, `set_mode`, `estimate_mode` for reuse; `set_torque_window` sets the dimer and Lanczos torque window apart from `rotation_tol`; `set_rotation_stop_length` turns on the curvature-aware rotation stop; `set_artn` enables or disables the ART nouveau protocol |
 | `SoftModeDirectionPlan`        | Soft-mode-subspace-first direction seeding (`soft_mode_then_full_directions`, `spectral_gap_rank`). Recovers a sparse Hessian at a minimum, selects the soft-subspace rank `k` from the largest spectral gap, and emits `2 * phase_count` unit directions |
 | `ModeSweepDirectionPlan`       | Deterministic soft-to-stiff Hessian-mode sweep (`hessian_mode_sweep_directions`, `mode_sweep_schedule`). Recovers the Hessian by central differences, diagonalizes it in full, and emits one carrier-weighted, optionally localized unit direction for every non-rigid mode. `minimum_squared_mode_weight` is the proven overlap floor. `mode_sweep_schedule` picks a stratified list of band positions. Non-exhaustive |
-| `ArtSession`                   | ART nouveau in eight persisted phases: masked host seed, perpendicular relaxation, Lanczos, lowest-mode climb, index-1 certificate, push both ways, unconstrained quench, reversibility. `run_events` marks duplicate saddles. `ArtStatus::Reverted` is not a completed exit. `force_calls` lists every surface evaluation. Non-exhaustive `ArtConfig` |
+| `ArtSession`                   | ART nouveau in eight persisted phases: masked host seed, perpendicular relaxation, Lanczos, lowest-mode climb, index-1 certificate, push both ways, unconstrained quench, reversibility. The climb checks curvature and consecutive-mode overlap, recovers the carried mode or restarts from the last accepted index-1 point. When recovery is exhausted it finishes as `ArtStatus::LostCurvature` if the rejected curvature is finite and non-negative and returns `SaddleError::ArtIndexOneLost` otherwise. `run_events` marks duplicate saddles. `ArtStatus::Reverted` is not a completed exit. `force_calls` is the bounded recent window; `force_call_count` is the total. Non-exhaustive `ArtConfig` and `ArtOutcome` |
+| `DirectionCover`               | Signed per-atom direction cover and arm picker for saddle searches from one minimum. Each active atom is its own centre with an even signed cover of `cover_points` on its sphere and an optional Gaussian kick on neighbours within `kick_radius`. The climb is `ArtSession`. `run`, or `suggest`, `run_arm` and `record` for a host loop. `coverage` is the `CoverageReport`: exact covering radius per centre, per arm records, distinct saddles against draws, frequency counts, and the next arm with its score. No Hessian. Non-exhaustive `DirectionCoverConfig` and `CoverBudget` |
 | `IndexKSession`                | Index-k minimum-mode step. `k ` 1= is `MinModeSession`. `indexk_step` is one shot. `reflect_force` and `translated_force` are the subspace maps |
 | `SolidDimer`                   | That search on atoms plus Jacobian-scaled cell strain. `CellMask::frozen` is the fixed-cell dimer. `stress` and `elastic_dipole` are `σ` and `V σ`. `SolidDimerConfig`, `IndexCheck`, `StressCheck`, `SolidDimerReport` and `IndexReport` are non-exhaustive |
 | `VineyardIndexReport`          | The `IndexReport` of a certified `minimum` and `saddle`, returned by `certify_vineyard_pair`. The function needs each point stationary to a force tolerance, a minimum with no projected negative mode, a saddle with exactly one, and `IndexCheck::lowest` of at least two. Non-exhaustive |
@@ -313,7 +317,7 @@ The table below lists the main types.
 | `restricted_prfo_displacement` | Baker restricted-step partitioned RFO from `H` and `g`                                                             |
 | `SellaSaddleConfig`            | Settings of the order-1 Sella session for partitioned rational function optimization |
 | `Cell`                         | 3×3 lattice (rows are vectors), fractional minimum-image wrap                                                      |
-| `SaddleError`                  | Shape, surface, non-finite, solver, invalid, stalled, not-equilibrated, and insufficient-effective-samples errors. The enum is unchanged by fixed-energy LI-NEB: a strict endpoint below `E` is `SaddleError::Invalid`, and `LineNebEndpointViolation` carries the endpoint (`first` or `last`), `V - E`, and the one-based step |
+| `SaddleError`                  | Shape, surface, non-finite, solver, invalid, stalled, ART index-1 loss, not-equilibrated, and insufficient-effective-samples errors. The enum is unchanged by fixed-energy LI-NEB: a strict endpoint below `E` is `SaddleError::Invalid`, and `LineNebEndpointViolation` carries the endpoint (`first` or `last`), `V - E`, and the one-based step |
 | `Stencil`                      | Point builder. Dimer and Lanczos wrap `MinModeSession`. `Stencil::band` rejects band presets as not implemented. See [one stencil](explanation/one-stencil.html) |
 | `Chain`                        | Positions, ids, and roles. `evaluate` uses a fixed block of one image. `Mesh` remeshes (linear, Hermite, or not-a-knot spline), inserts, or windows with no force call |
 | `reparametrize`                | Equal arc-length placement of a band, `Reparametrization::Linear` on the polyline or `NotAKnot` on the not-a-knot cubic spline. `RtrConfig::reparametrization` selects it for the trust-region band |
@@ -350,6 +354,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `constraints` | Types: `Constraints`, `Equality`, `InternalCounts` |
 | `covalent` | Functions: `atomic_number`, `covalent_radius`, `element_symbol`. Constants: `CORDERO_2008_PM`, `LAST_CORDERO_Z` |
 | `defect_pair` | Types: `BasinSaddle`, `CaptureRecord`, `CellMode`, `DefectPairConfig`, `DimerSeed`, `DirectionClass`, `FreeMigration`, `HopOutcome`, `HopTemplate`, `MatchedCapture`, `OuterHop`, `PairSetup`, `PeriodicSinkRate`, `PeriodicSinkSurvival`, `RateCatalogue`, `RateEntry`, `RecombinationVolume`, `SiteOutcome`, `SphereLanding`, `VolumePlacement`, `VolumeSite`. Functions: `attempt_frequency`, `capture_is_spontaneous`, `capture_is_spontaneous_within`, `classify_separation`, `debye_hit_probability`, `debye_matched_radius`, `debye_radius`, `debye_resistance`, `defect_pair_rates`, `descend_to_floor`, `effective_capture_radius`, `embed_free_migration`, `embed_sphere_return`, `kinetic_recombination_volume`, `matched_capture_radius`, `mean_absorption_time`, `pair_separation`, `periodic_capture_log_likelihood`, `periodic_sink_rate`, `periodic_sink_survival`, `product_tangent`, `seeded_saddles`, `segment_band`, `shell_pair_factor`, `smoluchowski_rate`, `sphere_hit_probability`, `spherical_return_probability`, `volume_from_frequency`. Constants: `FREE_CRYSTAL`, `SPONTANEOUS_BARRIER_EV` |
+| `direction_cover` | Types: `ArmFailure`, `ArmId`, `ArmOutcome`, `ArmPolicy`, `ArmRecord`, `ArmSuggestion`, `ArmTrial`, `AtomCoverage`, `CoverBudget`, `CoverageReport`, `DirectionCover`, `DirectionCoverConfig`, `ProductState`, `SaddleEntry`. Functions: `covering_radius_s2`, `sphere_cover` |
 | `eigensolve` | Types: `EigenDevice`, `ExpandKind`, `RitzDecomposition`. Functions: `dense_logabsdet`, `eigh_on`, `exact_eigh`, `exact_eigvalsh`, `expand`, `faer_eigh`, `lowest_on`, `rayleigh_ritz`, `rayleigh_ritz_iter`, `relative_zero_tolerance`, `solve_dense`, `solve_dense_matrix`, `spd_logdet` |
 | `elastic` | Types: `ElasticMultipole`, `LocalField`, `Octupole`, `Quadrupole`, `StrainGradient`. Functions: `quadrupole_energy` |
 | `elastic_dipole` | Types: `AnisotropicGreen`, `AnisotropicGreenConfig`, `CorrectedEnergy`, `CorrectedRate`, `DefectDipole`, `ElasticConstants`, `ElasticCorrection`, `ElasticPairState`, `ElasticRate`, `GreenSecondDerivative`, `InteractionEstimate`, `PeriodicElastic`, `PeriodicElasticConfig`, `Tensor4` |
@@ -381,6 +386,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `pair_network` | Types: `Mat3i`, `PairConfig`, `PairEdge`, `PairExit`, `PairHop`, `PairMove`, `PairNetwork`, `PairStateClass`, `PairTarget`, `SensitivityCover`, `Vec3i`. Functions: `cubic_group`, `director`, `norm2`, `sensitivity_cover` |
 | `pes` | Types: `CartesianHessian`, `CartesianPes`, `HessUpdate` |
 | `pes_internal` | Types: `CellCartesianPes`, `CellInternalPes`, `HessianCarry`, `InternalPes`, `RebuildReason`, `RebuildReport`, `SellaPes`. Functions: `niggli_reduce_cell`, `niggli_reduce_vectors`, `place_perp_dummy` |
+| `placement` | Types: `SitePlacement`. Functions: `push_past`, `translate_onto_sites` |
 | `prfo` | Types: `PartitionedRationalFunctionOptimization`, `PrfoKind`. Functions: `partitioned_rfo_eigen`, `prfo_get_s`, `prfo_stepper`, `prfo_trust_region`, `restricted_partitioned_rfo`, `restricted_prfo_displacement`. Constants: `SYNONYMS` |
 | `prfo_restricted` | Types: `PrfoKind`. Functions: `partitioned_rfo_eigen`, `restricted_partitioned_rfo`, `restricted_prfo_displacement` |
 | `projection` | Types: `ProjectionKind`. Functions: `climbing_image_force`, `dneb_component`, `force_perp` |
@@ -420,7 +426,7 @@ Every public configuration struct, its public fields, and the corresponding chai
 | `AffineSymmetry` | `linear` (`with_linear`), `translation` (`with_translation`) |
 | `AnisotropicGreenConfig` | `angular_points` (`with_angular_points`) |
 | `AnharmonicConfig` | `hvp_step` (`with_hvp_step`), `krylov` (`with_krylov`), `krylov_tolerance` (`with_krylov_tolerance`), `probes` (`with_probes`), `seed` (`with_seed`), `step` (`with_step`) |
-| `ArtConfig` | `basin_rmsd` (`with_basin_rmsd`), `duplicate_rmsd` (`with_duplicate_rmsd`), `eigen_threshold` (`with_eigen_threshold`), `max_climbs` (`with_max_climbs`), `max_pushes` (`with_max_pushes`), `mode` (`with_mode`), `permute_identical` (`with_permute_identical`), `perpendicular` (`with_perpendicular`), `push_length` (`with_push_length`), `push_over` (`with_push_over`), `push_step` (`with_push_step`), `quench` (`with_quench`), `saddle` (`with_saddle`) |
+| `ArtConfig` | `basin_rmsd` (`with_basin_rmsd`), `duplicate_rmsd` (`with_duplicate_rmsd`), `eigen_threshold` (`with_eigen_threshold`), `force_call_window` (`with_force_call_window`), `index_one_recovery_attempts` (`with_index_one_recovery_attempts`), `max_climbs` (`with_max_climbs`), `max_pushes` (`with_max_pushes`), `mode` (`with_mode`), `mode_overlap_tol` (`with_mode_overlap_tol`), `permute_identical` (`with_permute_identical`), `perpendicular` (`with_perpendicular`), `push_length` (`with_push_length`), `push_over` (`with_push_over`), `push_step` (`with_push_step`), `quench` (`with_quench`), `saddle` (`with_saddle`) |
 | `ArtNConfig` | `activation_relaxations` (`with_activation_relaxations`), `basin_push` (`with_basin_push`), `basin_relaxations` (`with_basin_relaxations`), `curvature_floor` (`with_curvature_floor`), `eigenvalue_threshold` (`with_eigenvalue_threshold`), `lanczos_actions` (`with_lanczos_actions`), `lanczos_start` (`with_lanczos_start`), `relaxation_step` (`with_relaxation_step`) |
 | `AutoNebTuning` | `climb` (`with_climb`), `climb_max_steps` (`with_climb_max_steps`), `full_band` (`with_full_band`), `interpolant` (`with_interpolant`), `local_force_tol` (`with_local_force_tol`), `local_max_steps` (`with_local_max_steps`), `n_max` (`with_n_max`), `n_simul` (`with_n_simul`), `record_samples` (`with_record_samples`), `space_energy_ratio` (`with_space_energy_ratio`), `threads` (`with_threads`), `trics` (`with_trics`) |
 | `BandConfig` | `autoneb` (`with_autoneb`), `cell` (`with_cell`), `climbing` (`with_climbing`), `exp_precon` (`with_exp_precon`), `fixed_atoms` (`with_fixed_atoms`), `force_tol` (`with_force_tol`), `free_end` (`with_free_end`), `max_move` (`with_max_move`), `method` (`with_method`), `min_mode` (`with_min_mode`), `projection` (`with_projection`), `quickmin` (`with_quickmin`), `quickmin_options` (`with_quickmin_options`), `remove_translation` (`with_remove_translation`), `saddle_check` (`with_saddle_check`), `solid` (`with_solid`), `spring` (`with_spring`), `string` (`with_string`), `tangent` (`with_tangent`), `time_step` (`with_time_step`), `zoom` (`with_zoom`) |
@@ -430,10 +436,12 @@ Every public configuration struct, its public fields, and the corresponding chai
 | `CiConfig` | `trigger_factor` (`with_trigger_factor`), `trigger_force` (`with_trigger_force`) |
 | `ConnectConfig` | `alpha0` (`with_alpha0`), `band_images` (`with_band_images`), `distance_step_max` (`with_distance_step_max`), `distance_step_min` (`with_distance_step_min`), `energy_difference_threshold` (`with_energy_difference_threshold`), `forcetol` (`with_forcetol`), `forcetol_per_distance` (`with_forcetol_per_distance`), `lanczos_iterations` (`with_lanczos_iterations`), `lanczos_rel_tol` (`with_lanczos_rel_tol`), `minimize_fmax` (`with_minimize_fmax`), `minimize_maxrise` (`with_minimize_maxrise`), `minimize_nsteps` (`with_minimize_nsteps`), `minmode_max_move` (`with_minmode_max_move`), `minmode_memory` (`with_minmode_memory`), `n_loops` (`with_n_loops`), `nhistx` (`with_nhistx`), `nsteps` (`with_nsteps`), `path_initializer` (`with_path_initializer`), `quench_nodes` (`with_quench_nodes`), `saddle_cosp` (`with_saddle_cosp`), `target_distance_other` (`with_target_distance_other`), `target_distance_saddle` (`with_target_distance_saddle`), `trusted_force_difference` (`with_trusted_force_difference`), `trustradius` (`with_trustradius`) |
 | `Continuation` | `delta` (`with_delta`), `images` (`with_images`), `levels` (`with_levels`), `max_steps` (`with_max_steps`) |
+| `CoverBudget` | `max_arms` (`with_max_arms`), `max_force_calls` (`with_max_force_calls`) |
 | `CrystalSymmetryConfig` | `cell` (`with_cell`), `matching_tolerance` (`with_matching_tolerance`), `orbit_tolerance` (`with_orbit_tolerance`), `orthogonality_tolerance` (`with_orthogonality_tolerance`) |
 | `CrystalSymmetryOperation` | `centre` (`with_centre`), `permutation` (`with_permutation`), `rotation` (`with_rotation`), `translation` (`with_translation`) |
 | `CurvatureBound` | `fraction` (`with_fraction`), `lambda0` (`with_lambda0`), `slope` (`with_slope`) |
 | `DefectPairConfig` | `angular_scale` (`with_angular_scale`), `band` (`with_band`), `boltzmann` (`with_boltzmann`), `bulk_stress` (`with_bulk_stress`), `cell_mode` (`with_cell_mode`), `connect_rmsd` (`with_connect_rmsd`), `dimer` (`with_dimer`), `direction_tol` (`with_direction_tol`), `external_stress` (`with_external_stress`), `finite_temperature` (`with_finite_temperature`), `harmonic_atoms` (`with_harmonic_atoms`), `harmonic_step` (`with_harmonic_step`), `images` (`with_images`), `mass` (`with_mass`), `max_band_steps` (`with_max_band_steps`), `max_dimer_steps` (`with_max_dimer_steps`), `pafi` (`with_pafi`), `planes` (`with_planes`), `push` (`with_push`), `relax` (`with_relax`), `seed_fraction` (`with_seed_fraction`), `shooting` (`with_shooting`), `temperatures` (`with_temperatures`), `zero_t_tol` (`with_zero_t_tol`) |
+| `DirectionCoverConfig` | `art` (`with_art`), `art_max_steps` (`with_art_max_steps`), `batch` (`with_batch`), `cell` (`with_cell`), `cover_points` (`with_cover_points`), `cover_sweeps` (`with_cover_sweeps`), `ei_margin` (`with_ei_margin`), `kick_radius` (`with_kick_radius`), `kick_width` (`with_kick_width`), `length_scale` (`with_length_scale`), `minimum_energy_tol` (`with_minimum_energy_tol`), `minimum_rmsd_tol` (`with_minimum_rmsd_tol`), `policy` (`with_policy`), `saddle_energy_tol` (`with_saddle_energy_tol`), `saddle_rmsd_tol` (`with_saddle_rmsd_tol`) |
 | `ExpBandPrecon` | `a` (`with_a`), `c_stab` (`with_c_stab`), `mu` (`with_mu`), `r_cut_factor` (`with_r_cut_factor`) |
 | `FmmSolver` | `green` (`with_green`), `leaf` (`with_leaf`), `theta` (`with_theta`) |
 | `FixedEnergySeed` | `images` (`with_images`), `max_evaluations` (`with_max_evaluations`), `saddle_energy` (`with_saddle_energy`), `target_energy` (`with_target_energy`) |
@@ -567,6 +575,7 @@ The feature macro `RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS` advertises
 modes. Each reports `-1` for a path-only or failed solve.
 
 From minor 60, `rgsaddle_band_set_refine` installs or clears the per-step L-BFGS refine stepper, and `rgsaddle_band_is_refining` reports whether the last first-order step used it. A host checks `rgsaddle_abi_version()` for minor 60 or newer. The worked example is `tests/band_refine.rs`.
+From minor 68, `rgsaddle_autoneb_run` grows an AutoNEB band to completion. `rgsaddle_autoneb_config_t` and `rgsaddle_autoneb_report_t` are the inputs and the result. `RGSADDLE_AUTONEB_CLIMB`, `RGSADDLE_AUTONEB_IDPP`, and `RGSADDLE_AUTONEB_KEEP_TRANSLATION` are the flag bits. The callback stays on the calling thread.
 The request flags are `RGSADDLE_REQ_ONE_IMAGE` (bit 0) and `RGSADDLE_REQ_CLIMBING_IMAGE` (bit 1).
 From a band config at minor 22, the refinement's one-image requests also set bit 1.
 Their `image` is then the climbing image's band index.
@@ -616,7 +625,7 @@ The importable package is `rgsaddle`. `rgsaddle._core` is the nanobind extension
 | `rgsaddle.reparametrize` | Equal-arc-length reparametrization of a path with `scheme`"linear"` or `"not-a-knot"` (`"spline"=) |
 | `rgsaddle.spline_resample` | Interior images at equal steps of the normalized cumulative chord length on the not-a-knot cubic (ABI minor 70) |
 | `rgsaddle._core` | Extension symbols: `ClaimSlot` (`__enter__`, `__exit__`), `MinMode` (`estimate`, `step`, `set_position`, `position`, `mode`, `saddle_index`, `set_saddle_check`), `SellaSaddle` (`step`, `position`), `version`, `project_band`, `dyneb_mask`, `halve_raised_energy`, `trust_update`, `RGSADDLE_FORCE_L2`, `RGSADDLE_FORCE_LINF`, `RGSADDLE_FORCE_MAX_ATOM`, `RGSADDLE_MINMODE_DIMER`, `RGSADDLE_MINMODE_LANCZOS`, `RGSADDLE_IRC_GS2`, `RGSADDLE_IRC_MOROKUMA`, `RGSADDLE_IRC_SELLA_SPHERE` |
-| `rgsaddle.ase.NEB`, `MinModeAtoms`, `Sella`, `saddle_index` | ASE drop-in wrappers for nudged elastic band (`interpolate`, `get_positions`, `set_positions`, `get_potential_energy`, `get_forces`, `saddle_index`), minimum-mode effective forces (`get_forces`), order-1 Sella optimization (`attach`, `run`), and saddle-index certification |
+| `rgsaddle.ase.NEB`, `AutoNEB`, `MinModeAtoms`, `Sella`, `saddle_index` | ASE drop-in wrappers for nudged elastic band (`interpolate`, `get_positions`, `set_positions`, `get_potential_energy`, `get_forces`, `saddle_index`), AutoNEB (`run` returns `AutoNEBReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`, `images`)), minimum-mode effective forces (`get_forces`), order-1 Sella optimization (`attach`, `run`), and saddle-index certification |
 | `rgsaddle.connect` | Run-to-completion double-ended search. `surface(x)` is the one-image `(energy, gradient)` callback. `ConnectReport` holds `position`, `energy`, `force_norm`, `kind`, `hessian_index`, and `evaluations` |
 | `rgsaddle.lineb_solve` | Fixed-energy LI-NEB path and optional harmonic rate. `positions` is `(n_images, 3N)`, `atom_masses` one mass per atom, `molecular` selects coordinate expansion or molecule alignment, =beads=0= leaves `log_rate_over_reactant` as NaN. `LinebResult` holds `positions`, `action`, half periods, temperatures, call tallies, and the log rate |
 | `rgsaddle.Band` | Stepping NEB, simplified-string (=string=True=, `reparametrization`), and free-end adaptive NEB session. `step`, `run`, `positions`, `set_positions`, `evaluation`, `set_string`, `set_free_end`, `target_energy_residual`, `free_end_cuts`, `set_fixed_atoms`, `saddle_index`, `set_saddle_check`, `restart`, `reset` |
@@ -644,6 +653,7 @@ The importable package is `rgsaddle`. `rgsaddle._core` is the nanobind extension
 - `tests/softmode_seeding.rs`: soft-mode-subspace-first direction seeding (`soft_mode_then_full_directions`, `spectral_gap_rank`) against isotropic random starts on coupled wells and Müller-Brown.
 - `tests/makri_vacancy.rs` — Makri, Ortner, and Kermode (2019) Table II 107-atom Morse Cu fcc vacancy counts for ODE12r and ODE12r-Exp, plus simplified string (spline, linear, and climbing spline) barrier parity with NEB
 - `tests/autoneb.rs` — ASE AutoNEB decisions and the Müller-Brown insertion sequence. `tests/autoneb_gate.rs` hashes the insertion list and the trajectory at 1, 2, 3 and 8 threads, and an ignored release run compares AutoNEB with CI-NEB at one force-call budget. Strong scaling of a full AutoNEB run is an ignored test in the crate.
+- `tests/autoneb_abi.rs` runs `tests/c/autoneb_abi.c`: `rgsaddle_autoneb_run` on a double well reports `status` 1 with `max_force` under the stop and a repeatable `iteration` count, reports `status` 0 and `iteration` equal to the step budget when the climb is cut short, and returns `RGSADDLE_INVALID_PARAMETER`, `RGSADDLE_NULL_SURFACE`, `RGSADDLE_SHAPE`, `RGSADDLE_NON_FINITE`, `RGSADDLE_ABI_MISMATCH`, and `RGSADDLE_SURFACE_FAILED` for the matching bad inputs.
 - `tests/minmode_saddle.rs` — dimer / Lanczos
 - `tests/band_workspace.rs`: a warm band step allocates as often at 13
   images as at 5, for five spring, projection and optimizer settings,
@@ -767,7 +777,7 @@ The escape follows Yin, Wang, Chen, Zhang, and Zhang, Phys. Rev. Lett. 124, 0906
 FIRE is the default, as in eOn's velocity NEB stepper. The projected NEB force is not the gradient of the summed image energy the oracle reports, so L-BFGS runs under rgmin's `Accept::Step`: the two-loop direction, capped per atom, with one evaluation and no energy test.
 
 ## Minimum mode
-The dimer rotation is the modified Newton step of Heyden, Bell, and Keil (2005) and Kastner and Sherwood (2008): one trial gradient fixes the Fourier model of the curvature in the rotation plane, the optimal angle is closed form, and the gradient at the rotated dimer is the exact (on a quadratic) combination of the two measured ones, so each rotation costs one evaluation. Rotation planes are Polak-Ribiere conjugate, and the force and direction of a finished rotation are kept for the next centre. A repeated estimate at the same centre, `set_mode`, and `reset` start that sequence again. A failed surface callback leaves the retained pair unchanged. In Rust, a `MinModeConfig` with `rotation_tol < 1e-4` drops the default five-degree dimer angle stop unless `with_rotation_angle_tol` set it explicitly. Lanczos reads `rotation_tol` as a dimensionless tolerance, its lowest Ritz residual divided by the absolute Ritz value, and, when `set_lanczos_rel_tol` is unset, as its relative Ritz-value tolerance. A Ritz value whose magnitude is at most 1e-14 has no scale, so the residual is compared with `rotation_tol` directly and the quotient is never formed. Only in that unset case and with `rotation_tol >= 1e-4` does it infer the classic torque window, which stops once two vectors leave that same ratio under 1, with the same absolute fallback. Those two span the plane of a steepest-descent dimer rotation, and their Ritz vector is the dimer turned to the lowest curvature in it (Zeng, Xiao, and Henkelman, J. Chem. Phys. 140, 044115 (2014), doi:10.1063/1.4862410). Both use the forward difference against the centre gradient by default; `validation/fd_curvature.py` gives its error, `dr |T| / 2 + 2 eps / dr`, and the `dr` that minimizes it for a given gradient noise. `FiniteDifference::Central` trades one more gradient per action for an `O(dr^2)` error.
+The dimer rotation is the modified Newton step of Heyden, Bell, and Keil (2005) and Kastner and Sherwood (2008): one trial gradient fixes the Fourier model of the curvature in the rotation plane, the optimal angle is closed form, and the gradient at the rotated dimer is the exact (on a quadratic) combination of the two measured ones, so each rotation costs one evaluation. Rotation planes are Polak-Ribiere conjugate, and the force and direction of a finished rotation are kept for the next centre. A repeated estimate at the same centre, `set_mode`, and `reset` start that sequence again. A failed surface callback leaves the retained pair unchanged. In Rust, a `MinModeConfig` with `rotation_tol < 1e-4` drops the default five-degree dimer angle stop unless `with_rotation_angle_tol` set it explicitly. Lanczos reads `rotation_tol` as a dimensionless tolerance, its lowest Ritz residual divided by the absolute Ritz value, and, when `set_lanczos_rel_tol` is unset, as its relative Ritz-value tolerance. A Ritz value whose magnitude is at most 1e-14 of the curvature scale, the largest Hessian action norm the estimate has formed, has no magnitude of its own, so the residual is divided by that scale and the quotient is never formed. Only in that unset case and with `rotation_tol >= 1e-4` does it infer the classic torque window, which stops once two vectors leave that same ratio under 1, dividing by the same scale when the Ritz value is that small. Those two span the plane of a steepest-descent dimer rotation, and their Ritz vector is the dimer turned to the lowest curvature in it (Zeng, Xiao, and Henkelman, J. Chem. Phys. 140, 044115 (2014), doi:10.1063/1.4862410). Both use the forward difference against the centre gradient by default; `validation/fd_curvature.py` gives its error, `dr |T| / 2 + 2 eps / dr`, and the `dr` that minimizes it for a given gradient noise. `FiniteDifference::Central` trades one more gradient per action for an `O(dr^2)` error.
 
 The translation steps on the inverted force, whose value (the true energy) is not its potential, as the band's pseudo-energy is not the potential of the projected force. Both sessions accept only methods that step on the force alone (FIRE, L-BFGS under `Accept::Step`, Barzilai-Borwein) and refuse line-searched ones. Between steps the solver's cached force, inverted along the previous mode, is dropped (rgmin `forget_evaluation`) and the centre answers the re-read without a surface call. A turn inside `MODE_RESET_ANGLE` (45 degrees, the Householder cone of Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063; `validation/mode_reset.py`) keeps the L-BFGS pairs and the FIRE velocity. Past that cone the memory is dropped and the FIRE velocity returns to zero. FIRE opens at timestep 1.0 with a ceiling of 2.5 (Bitzek, Koskinen, Gähler, Moseler, and Gumbsch, Phys. Rev. Lett. 97, 170201 (2006), doi:10.1103/PhysRevLett.97.170201). When the per-atom cap shortens a negative-curvature step and the arrival is no longer negative, the move is replaced from the last negative point by `0.01 F`. A capped step that stays negative is kept. A non-negative curvature takes one step along the mode on which the largest atom moves `max_move`, eOn's `maxAtomMotionAppliedV` in its FIRE and L-BFGS steppers. Under `set_cg_translate` that step has Euclidean norm `max_move`, the single step of eOn's conjugate gradients. When the parallel gradient is within half that step of the minimum of the parabola along the mode, the climb keeps the mode's orientation.
 
@@ -1635,7 +1645,7 @@ fn main() -> Result<(), SaddleError> {
 }
 ```
 
-`MinModeSession` estimates a low-curvature direction by dimer rotation or Lanczos, then advances on the min-mode force. L-BFGS takes `Accept::Step` and rgmin's NEB guards: the reflected force is not a potential gradient (Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eq. 9), an empty memory scales the step by 0.01, and a two-loop step that reaches the per-atom cap or faces away from the force drops its pairs. In Rust, a `MinModeConfig` with `rotation_tol < 1e-4` drops the default five-degree dimer angle stop unless `with_rotation_angle_tol` set it explicitly. Lanczos reads `rotation_tol` as a dimensionless tolerance on the lowest Ritz residual divided by the absolute Ritz value and, while `set_lanczos_rel_tol` is unset, as its relative Ritz-value tolerance. A Ritz value whose magnitude is at most 1e-14 compares the residual with `rotation_tol` directly. Only in that unset case and with `rotation_tol >= 1e-4` does Lanczos infer the classic torque window, which stops once two vectors leave that ratio under 1. A repeat visit whose Rayleigh quotient still agrees with the retained curvature returns after one product (Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys. 121, 9776 (2004), doi:10.1063/1.1809574; eOn `quit_early`). While the curvature along that mode is not negative the step moves the largest atom by `max_move` along the mode, as eOn's FIRE and L-BFGS do, and the perpendicular force is dropped. Under `set_cg_translate` that step has Euclidean norm `max_move`, as in eOn's conjugate gradients. A parallel gradient within half that step of the minimum of the parabola along the mode keeps the mode's orientation. Once the curvature is negative the perpendicular force stays and the parallel part is reflected, and the L-BFGS pairs and the FIRE velocity survive a mode turn inside 45 degrees. A turn past that cone drops the memory and zeros the FIRE velocity. FIRE opens at timestep 1.0 and has a ceiling of 2.5. When the per-atom cap shortens a negative-curvature step and the arrival is no longer negative, the move is replaced from the last negative point by 0.01 times the reflected force, the empty-memory scale of the L-BFGS guard. A capped step that stays negative is kept. L-BFGS is unchanged, and no C field was added. Lanczos uses the same translation. `FiniteDifference` selects forward or central Hessian actions. A surface can supply analytic actions and excluded directions through `PointSurface`.
+`MinModeSession` estimates a low-curvature direction by dimer rotation or Lanczos, then advances on the min-mode force. L-BFGS takes `Accept::Step` and rgmin's NEB guards: the reflected force is not a potential gradient (Goswami, Gunde, and Jónsson, Front. Chem. (2026), doi:10.3389/fchem.2026.1807063, Eq. 9), an empty memory scales the step by 0.01, and a two-loop step that reaches the per-atom cap or faces away from the force drops its pairs. In Rust, a `MinModeConfig` with `rotation_tol < 1e-4` drops the default five-degree dimer angle stop unless `with_rotation_angle_tol` set it explicitly. Lanczos reads `rotation_tol` as a dimensionless tolerance on the lowest Ritz residual divided by the absolute Ritz value and, while `set_lanczos_rel_tol` is unset, as its relative Ritz-value tolerance. A Ritz value whose magnitude is at most 1e-14 of the curvature scale, the largest Hessian action norm the estimate has formed, divides the residual by that scale. Only in that unset case and with `rotation_tol >= 1e-4` does Lanczos infer the classic torque window, which stops once two vectors leave that ratio under 1, dividing by the same scale when the Ritz value is that small. A repeat visit whose Rayleigh quotient still agrees with the retained curvature returns after one product (Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys. 121, 9776 (2004), doi:10.1063/1.1809574; eOn `quit_early`). While the curvature along that mode is not negative the step moves the largest atom by `max_move` along the mode, as eOn's FIRE and L-BFGS do, and the perpendicular force is dropped. Under `set_cg_translate` that step has Euclidean norm `max_move`, as in eOn's conjugate gradients. A parallel gradient within half that step of the minimum of the parabola along the mode keeps the mode's orientation. Once the curvature is negative the perpendicular force stays and the parallel part is reflected, and the L-BFGS pairs and the FIRE velocity survive a mode turn inside 45 degrees. A turn past that cone drops the memory and zeros the FIRE velocity. FIRE opens at timestep 1.0 and has a ceiling of 2.5. When the per-atom cap shortens a negative-curvature step and the arrival is no longer negative, the move is replaced from the last negative point by 0.01 times the reflected force, the empty-memory scale of the L-BFGS guard. A capped step that stays negative is kept. L-BFGS is unchanged, and no C field was added. Lanczos uses the same translation. `FiniteDifference` selects forward or central Hessian actions. A surface can supply analytic actions and excluded directions through `PointSurface`.
 
 The reported force norm must satisfy the selected `ForceGate`, and the estimated curvature must be negative. If a translation reaches a stationary point, the session measures curvature at that accepted position before reporting convergence. This directional test does not certify the full Hessian index; the saddle check below does.
 
@@ -1711,7 +1721,7 @@ These `MinModeConfig` fields set the cost of an estimate and of the translation:
 | --- | --- | --- |
 | `difference` | `Forward`: one gradient per Hessian action, error \(O(dr)\). `Central`: two, error \(O(dr^2)\) | `Forward` |
 | `rotation_angle_tol` | The dimer stops rotating when an iteration's trial or fitted optimal angle falls under this many radians; 0 turns the test off | five degrees |
-| `rotation_tol` | Dimer rotational force, in curvature units. At 1e-4 and any looser value a dimer with `rotation_angle_tol` set to 0 also stops after one rotation once that force is under 1. An improved dimer with positive `rotation_angle_tol` leaves the classic window off unless `set_torque_window(Some(true))` enables it. A tighter value drops the default angle stop unless `with_rotation_angle_tol` set it explicitly. Lanczos reads this value as a dimensionless residual, the lowest Ritz residual divided by the absolute Ritz value, and, with `set_lanczos_rel_tol` unset, as the relative change of the lowest Ritz value; a Ritz value near zero compares the residual with the number directly. Only then and at 1e-4 or looser does it infer the window that stops once two vectors leave that ratio under 1 | 1e-4 |
+| `rotation_tol` | Dimer rotational force, in curvature units. At 1e-4 and any looser value a dimer with `rotation_angle_tol` set to 0 also stops after one rotation once that force is under 1. An improved dimer with positive `rotation_angle_tol` leaves the classic window off unless `set_torque_window(Some(true))` enables it. A tighter value drops the default angle stop unless `with_rotation_angle_tol` set it explicitly. Lanczos reads this value as a dimensionless residual, the lowest Ritz residual divided by the absolute Ritz value, and, with `set_lanczos_rel_tol` unset, as the relative change of the lowest Ritz value; a Ritz value whose magnitude is at most 1e-14 of the curvature scale, the largest Hessian action norm the estimate has formed, divides the residual by that scale. Only then and at 1e-4 or looser does it infer the window that stops once two vectors leave that ratio under 1, dividing by the same scale when the Ritz value is that small | 1e-4 |
 | `max_rotations` | Rotation cap for one dimer estimate | 20 |
 | `max_move` | Largest per-atom translation. A curvature that is not negative takes one step along the mode that moves the largest atom by this length, or one of this Euclidean norm under `set_cg_translate`. The L-BFGS pairs and the FIRE velocity are kept while the mode turns by at most 45 degrees, and dropped past that cone | 0.2 |
 | `seed_curvature` | The first empty L-BFGS step uses \(H_0 = 1/\lvert\lambda\rvert\), and the first FIRE displacement uses that scale, when the step fits in `max_move`. Later steps are the stepper's own. `set_seed_curvature` sets the same switch on a live session | off |
@@ -2076,7 +2086,9 @@ The phase is stored on the session. `step` runs one phase and leaves the next on
 7. `Quench` minimizes both images with no constraint.
 8. `Report` decides reversibility.
 
-`run_events` repeats that for many seeds and records a later landing on the same saddle in `ArtBatch::duplicates`. `ArtSession::force_calls` lists every surface evaluation, with the phase that requested it.
+`run_events` repeats that for many seeds and records a later landing on the same saddle in `ArtBatch::duplicates`. `ArtSession::force_calls` lists the most recent `ArtConfig::force_call_window` evaluations (64 by default), with the phase that requested each one; `force_call_count()` is the unbounded total.
+
+During `Lanczos` on the climb, negative curvature and `mode_overlap_tol` keep the search on the accepted index-1 direction. A rejected estimate first gets a direct curvature check along the carried mode. If that direction is no longer negative, ART restarts from the last accepted point with a halved translation cap, up to `index_one_recovery_attempts` times. After that, a finite non-negative rejected curvature finishes the event as `ArtStatus::LostCurvature`, and a negative one (the mode switched) or a non-finite one returns `SaddleError::ArtIndexOneLost`.
 
 `ArtStatus::Connected` requires a converged index-1 certificate, both quench energies below the saddle, one quenched image on the reactant, and the other image a different minimum. Either sign of the push-over may be the return: the mode at the saddle is not required to point back along the path that arrived. `ArtStatus::Reverted` is the other case of one basin, and it is not a completed exit. The structural distance is Euclidean for one atom. For several atoms it is the Kabsch RMSD, or the RMSD of the sorted pair distances when `permute_identical` is set, which is the identical-atom comparison used for the LJ clusters in the paper.
 
@@ -2100,7 +2112,9 @@ of the lowest Ritz pair divided by the absolute Ritz value and the relative
 change of that value, so it keeps its value. A dimer reads `rotation_tol`
 as a rotational force in curvature units, and unit conversion multiplies it
 by energy over length squared. Any other relaxation method is an
-error from `for_units`. `ArtConfig::validate()`
+error from `for_units`. `mode_overlap_tol` is a cosine, and
+`force_call_window` and `index_one_recovery_attempts` are counts, so
+`for_units` keeps their values. `ArtConfig::validate()`
 returns an invalid parameter error when the perpendicular relaxation force
 tolerance is looser than the mode force tolerance, and when the mode force
 tolerance is not finite and positive. It also holds `ArtConfig::mode` to the
@@ -2168,6 +2182,129 @@ fn main() -> Result<(), SaddleError> {
     Ok(())
 }
 ```
+
+# Choose saddle search directions from a minimum (`docs/orgmode/howto/direction-cover.org`)
+
+> Signed per-atom direction cover and arm picker for saddle searches from a minimum (DirectionCover)
+
+`DirectionCover` decides where the saddle searches out of one minimum start, and in which order. It is written for adaptive kinetic Monte Carlo, where every visited minimum needs its low saddles and a measure of how much of the search space has been tried (Xu and Henkelman, J. Chem. Phys. 129, 114104 (2008), doi:10.1063/1.2976010). It supplies the starts and the order only. Each start runs as one `ArtSession`, the phased ART nouveau of `howto/art`, so the push, perpendicular relaxation, Lanczos climb, index-1 certificate and both quenches are the ones documented there.
+
+Nothing here builds a Hessian. The inputs are the minimum, an optional per-atom active mask, a `u64` seed, a `DirectionCoverConfig` and a `CoverBudget`. Bad input returns `SaddleError`; nothing is clamped or replaced.
+
+## Run a budget of arms
+Build the chooser on the surface and the relaxed minimum, then spend a budget. A budget sets `max_arms`, `max_force_calls`, or both; an empty budget is refused.
+
+```rust
+use ndarray::{Array1, ArrayView1, array};
+use rgsaddle::{
+    ArmOutcome, ArtConfig, CoverBudget, DirectionCover, DirectionCoverConfig, MinModeConfig,
+    MinModeKind, PointSurface, SaddleError,
+};
+
+struct DoubleWell;
+
+impl PointSurface for DoubleWell {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (px, py, pz) = (x[0], x[1], x[2]);
+        let e = (px * px - 1.0).powi(2) + 0.25 * (py * py + pz * pz);
+        Ok((e, array![4.0 * px * (px * px - 1.0), 0.5 * py, 0.5 * pz]))
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    let mode = MinModeConfig::default()
+        .with_kind(MinModeKind::Lanczos)
+        .with_saddle_check(None)
+        .with_force_tol(0.02)
+        .with_max_move(0.1)
+        .with_krylov_dim(4)
+        .with_max_rotations(6);
+    let art = ArtConfig::default()
+        .with_mode(mode)
+        .with_push_length(0.5)
+        .with_push_step(0.3)
+        .with_max_pushes(12)
+        .with_max_climbs(25)
+        .with_push_over(0.25);
+    let config = DirectionCoverConfig::default().with_art(art);
+    let mut cover = DirectionCover::new(&DoubleWell, array![-1.0, 0.0, 0.0], None, 7, config)?;
+    let report = cover.run(&DoubleWell, CoverBudget::default().with_max_arms(12))?;
+    assert_eq!(report.saddles.len(), 1);
+    assert!(report
+        .records
+        .iter()
+        .any(|r| r.outcome == ArmOutcome::DuplicateSaddle(0)));
+    Ok(())
+}
+```
+
+The same example is the doctest on `DirectionCover`. Arms whose push points away from the barrier end as `NonConverged` (ART spent its pushes without negative curvature). Once one product is known the picker turns to the untried directions next to it.
+
+## Drive the arms from the host
+`run` is the loop `suggest_batch`, `run_arm` for each pick on rayon's pool, then `record` in pick order. A host that schedules its own workers can split it:
+
+1. `suggest` or `suggest_batch(k)` returns `ArmSuggestion` values: the `ArmId` (centre atom and cover point), its score, and the policy that produced it.
+2. `seed(arm)` is the `ArtSeed` for that arm, if the host runs ART itself; `run_arm(surface, arm)` runs it and returns an `ArmTrial`.
+3. `record(trial)` files the verdict. A host that runs another climb builds the trial with `ArmTrial::connected`, `returned`, `failed` or `non_converged`.
+4. `set_prefactor(arm, ν)` attaches a prefactor the host computed later.
+5. `coverage()` is the readout.
+
+Recording the same arm twice is an error. The picker is a function of the recorded trials, so a host that records in a fixed order gets the same picks whatever its thread count.
+
+## Confine the search to a region
+Pass `Some(&active)` with one `bool` per atom. Only active atoms are centres, and only they move in their own seeds: the ART mask is one on the centre and on each kicked neighbour, zero elsewhere. Neighbour kicks reach atoms within `kick_radius` of the centre, inactive ones included, so set the radius to zero to keep every push on the active atoms alone. A mask of the wrong length is `SaddleError::Shape`; a mask with no active atom is `SaddleError::Invalid`.
+
+## Reference
+### Cover
+Every active atom carries the same cover: `cover_points` signed unit vectors on its own sphere (64 by default, at least 4). A direction and its opposite are separate arms. The points are spread by the geodesic repulsion of Plasencia Gutiérrez, Argáez and Jónsson (J. Chem. Theory Comput. 13, 125 (2017), doi:10.1021/acs.jctc.5b01216), relaxed for `cover_sweeps` Gauss-Seidel sweeps from a start drawn from the seed, then ordered farthest point first. `sphere_cover(n, sweeps, seed)` returns that set.
+
+An arm's seed is its cover vector on the centre plus, when `kick_radius` is positive, independent Gaussian components of standard deviation `kick_width` on every atom within the radius. Pedersen, Hafstein and Jónsson (SIAM J. Sci. Comput. 33, 633 (2011), doi:10.1137/100792743) show that this centre, radius and width set which saddles a minimum-mode search reaches and how often. Distances use the minimum image when `cell` is set; ART itself runs on open coordinates.
+
+### Arm verdicts
+| `ArtStatus`               | `ArmOutcome`                                                        |
+| --- | --- |
+| `Connected`               | `NewSaddle`, or `DuplicateSaddle(id)` for a saddle already recorded |
+| `Reverted`                | `ReturnedToStart`: both quenches came back                          |
+| `Irreversible`            | `Failed(ArmFailure::Disconnected)`                                  |
+| `NotIndexOne`             | `Failed(ArmFailure::NotIndexOne)`                                   |
+| `NotDownhill`             | `Failed(ArmFailure::NotDownhill)`                                   |
+| `LostCurvature`           | `Failed(ArmFailure::LostCurvature)`: curvature recovery was exhausted |
+| `Exhausted`               | `NonConverged`                                                      |
+| `SaddleError::ArtIndexOneLost` | `Failed(ArmFailure::IndexOneLost { ... })`: mode recovery was exhausted |
+| an error from the session | `Failed(ArmFailure::Error(message))`                                |
+
+During a climb, consecutive lowest modes must retain an absolute overlap of `ArtConfig::mode_overlap_tol` (1/√2 by default) and negative curvature. If the estimate loses either condition, ART first measures the carried mode's Rayleigh curvature directly. A still-negative carried mode continues the climb. Otherwise ART restarts from its last accepted index-1 point with a halved translation cap, at most `index_one_recovery_attempts` times (6 by default). When the restarts are spent and the rejected curvature is finite and non-negative, the surface has no unstable mode there: the event finishes as `ArtStatus::LostCurvature`, which `DirectionCover` records as `ArmFailure::LostCurvature`. When the rejected curvature is still negative, the mode switched rather than vanished, and ART returns the typed `SaddleError::ArtIndexOneLost`. A rejected curvature that is not finite returns that same error. `DirectionCover` preserves its attempts, curvature, and overlap in `ArmFailure::IndexOneLost`; it does not turn the failure into a soft-mode result.
+
+Two saddles are one when their energies differ by less than `saddle_energy_tol` and their per-atom RMSD is below `saddle_rmsd_tol`. Product minima use `minimum_energy_tol` and `minimum_rmsd_tol` the same way. The RMSD is per atom and Cartesian, under the minimum image when `cell` is set; it does not match permuted identical atoms, so symmetry copies of one saddle on different atoms count as different saddles.
+
+### Pick policies
+| Policy                | Score of an untried arm                                                                                                     |
+| --- | --- |
+| `Gap` (default)       | angle to the nearest tried direction on the same centre, times the distinct states of the start and the three nearest tried |
+| `ExpectedImprovement` | expected improvement on the barrier from a Gaussian process on the centre's sphere, times the gap over π                    |
+| `Auto`                | `ExpectedImprovement` once two different barriers are known, `Gap` before                                                   |
+
+The states of a gap are the start together with the products of its three nearest tried directions, and the start always counts. A hole whose nearest arms reached products A and B scores three times its angle, one that reached only A scores twice its angle, and one whose edges all came back or failed scores its angle. Failed, non-converged and still pending arms add no state, and a centre with nothing tried scores π. So a hole bounded by arms that led to different minima is tried before one whose edges all came back. The expected improvement is that of Jones, Schonlau and Welch (J. Global Optim. 13, 455 (1998), doi:10.1023/A:1008306431147) with the Gaussian kernel `exp(-‖u - v‖²/2ℓ²)` of the chordal distance between the unit directions `u` and `v`, length scale `length_scale` (0.6, which is in radians for small angles), the mean and variance of all known barriers, and target `best barrier - ei_margin`. The chordal kernel is the Gaussian of three-dimensional space restricted to the sphere, so its matrix on distinct directions is positive definite for every positive `length_scale`; a Gaussian of the geodesic angle is not (Feragen, Lauze and Hauberg, CVPR 2015). The matrix carries a nugget of 1e-8 times the barrier variance on its diagonal, which keeps the Cholesky factorization in double precision valid for fewer than 9000 tried directions on a centre (Demmel's condition, Higham, Accuracy and Stability of Numerical Algorithms, Theorem 10.7). A pivot that is still not positive returns `SaddleError::Singular`; it is never clamped. `ExpectedImprovement` alone refuses to score before two different barriers are known. Ties go to the centre with fewer tried arms, then the lower atom, then the lower cover point, so the first pass touches every centre once. `batch` arms (1 by default) are picked greedily, each scored as if the earlier picks of the batch were already tried.
+
+### Coverage readout
+`CoverageReport` has:
+
+- `subspace_dim`: three times the number of active atoms
+- `covering_radius`: the largest, over centres, of the exact covering radius of that centre's tried signed directions on the sphere (`covering_radius_s2`); π before any arm
+- `atoms`: per centre, the tried count, the covering radius and the distinct states among the start and the products reached, so one before any product
+- `records`: one `ArmRecord` per arm, in record order, with the direction, outcome, saddle and product ids, barrier, optional prefactor and force calls
+- `saddles`, `products`: the distinct saddles with their hit counts, and the distinct product minima
+- `discovery`: distinct saddles after each arm; `saddle_draws` and `frequency_counts` are the connected draws and the number of saddles seen once, twice, and so on, for a Good-Turing (Good, Biometrika 40, 237 (1953), doi:10.1093/biomet/40.3-4.237) or capture-recapture estimate of what is left
+- `force_calls`: the total over all arms
+- `next`: the next suggestion and its score, or `None` when every arm is tried
+
+### Determinism
+Every random draw comes from the `u64` seed. A batch is chosen before it runs, its arms run on rayon's pool, and their trials are recorded in pick order, so the records are the same at one thread and at four; `tests/direction_cover.rs` checks that bitwise.
+
+### Force-call history
+`ArtSession` stores at most the most recent `ArtConfig::force_call_window` force calls with their positions (64 by default). `force_call_count()` and `ArtOutcome::force_call_count` retain the total even after old positions leave the window. Set the window to zero when only counts are needed. Thus the position-history memory of each arm is bounded by the configured window times the Cartesian dimension rather than by all calls spent.
+
+Quick timing observations belong in `NOTES.md`, not in this reference.
 
 # Follow k lowest modes (`docs/orgmode/howto/indexk.org`)
 
@@ -2618,6 +2755,17 @@ which is `sqrt(5)/2 - 1/2 ≈ 0.618`. `tests/bennett_kramers.rs` compares the pl
 `RateCatalogue::to_json` writes `rgsaddle.defect_pair_rates` version 1. `from_json` reads it back. Each entry is one exit channel. The key is `(shell, direction, hop, temperature, cell_repeats)`. `rate_Hz` is `k(T)` in the caller's frequency unit (Hz when the angular scale is `angular_scale_rad_s`).
 
 amsel is the absorbing-Markov selector for superbasin exit distributions. It does not parse this file itself. A loader groups entries that share a shell, a cell and a temperature, and passes `rate_Hz` to the FPTA or MRM kernel as the first-order exit rate of that channel. `hop` and `direction` are the channel name. `dE0`, `dF`, `dF_error`, `dF_harmonic`, `nu`, `vineyard`, `kappa`, the saddle Cauchy stress and the elastic dipole `P ` -V (σ - σ_bulk)= are stored beside the rate so a later run can see what entered `k(T)`.
+
+## Placements
+`translate_onto_sites` and `push_past` build the starting geometries of a relaxation. `translate_onto_sites` pairs the atoms you name with a list of sites, nearest pair first under the minimum image, and puts each atom on its site by the short displacement. Atoms with no site and sites with no atom are left alone. A tie goes to the earlier atom, then the lower site. Relax the result before using it as a minimum. A vacancy centroid and the atoms of a self-interstitial are one use, and an adatom and a hollow are another.
+
+```rust
+let cell = [[l, 0.0, 0.0], [0.0, l, 0.0], [0.0, 0.0, l]];
+let filled = rgsaddle::translate_onto_sites(atoms.view(), cell, [true; 3], &dumbbell, vacancy.view())?;
+let start = filled.positions;
+```
+
+`push_past` returns `saddle + f (saddle - reactant)` with each atom's displacement folded first. Relax the result to leave a saddle on the product side. `f` of 0 returns the saddle and a negative `f` pulls back toward the reactant. Both functions fold the axes named by the `periodic` mask. An axis that is not periodic still needs a vector that makes the cell invertible, and its length is never used. The fold is the shortest image under whole periodic lattice vectors. In an orthogonal cell it rounds each fraction, and a displacement of exactly half a cell keeps its sign. In a sheared, hexagonal or other skewed cell rounding the fractions can miss the nearest image, so the neighbouring images are searched.
 
 ## Relaxed states
 A placement is a starting geometry, not a state. Whether it is a bound pair or has recombined is a property of the minimum it relaxes to, so that minimum has to be reached. `relax_to_tolerance` minimizes in a fixed cell until the largest per-atom force norm, `max_i |F_i|`, is below `RelaxConfig::force_tol` (`DEFAULT_FORCE_TOL`, 1e-3 in the surface's force unit, eV/Å for eV and Å). `RelaxConfig::max_steps` (`DEFAULT_MAX_STEPS`, 10000) is a guard. Reaching it returns `SaddleError::Solver` with the step count and the force reached, never a geometry. The minimizer is any `rgmin::Method`, FIRE 2.0 by default.
@@ -3936,7 +4084,7 @@ For config minors 5 through 62, `rotation_angle_tol` is read as given and 0 keep
 From minor 63, `rotation_angle_tol` = 0 keeps the Rust default angle stop unless flag bit 0, `RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL`, is set; with that bit and 0 the old stop-off behaviour remains.
 Any other value returns `RGSADDLE_INVALID_PARAMETER` and leaves the session unchanged.
 A library below minor 32 does not export the symbol.
-From minor 41 a Lanczos session reads the window too: a step's estimate stops once two Krylov vectors leave the Ritz residual divided by the absolute Ritz value under 1. A Ritz value near zero compares that residual with 1 directly. The value 0 runs the estimate to its dimensionless residual as before.
+From minor 41 a Lanczos session reads the window too: a step's estimate stops once two Krylov vectors leave the Ritz residual divided by the absolute Ritz value under 1. A Ritz value whose magnitude is at most 1e-14 of the estimate's curvature scale, the largest Hessian action norm it has formed, uses that scale as the divisor. The value 0 runs the estimate to its dimensionless residual as before.
 
 ABI minor 43 adds the opt-in ART nouveau controls.
 `rgsaddle_artn_config_default` initializes an `rgsaddle_artn_config_t` with the published defaults, and `rgsaddle_minmode_set_artn` enables those controls on a Lanczos session.
@@ -4036,6 +4184,7 @@ A solid-state band, the trust-region stepper, the simplified string method, and 
 A non-finite position, energy, force, `fmax`, or `scale_fmax` returns `RGSADDLE_NON_FINITE`.
 While the option is on, an interior image that a neighbour pulls back over its threshold is requested alone: `RGSADDLE_REQ_ONE_IMAGE` is set, `image` is that image's band index, `n_images` is the band length, and `RGSADDLE_REQ_CLIMBING_IMAGE` is not set.
 A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 65 before resolving either symbol.
+ABI minor 68 adds the run-to-completion AutoNEB of Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868. `rgsaddle_autoneb_run` grows a band from at least two images and writes `n_max` rows. `rgsaddle_autoneb_config_t` carries the spring `k`, the two force stops, the two step caps, `n_simul`, `n_max`, the projection, the tangent, and `space_energy_ratio`. `RGSADDLE_AUTONEB_CLIMB` arms the climb from the first evaluation of the climbing window. `RGSADDLE_AUTONEB_IDPP` places new images with the image-dependent pair potential. `RGSADDLE_AUTONEB_KEEP_TRANSLATION` leaves the mean Cartesian force in the window. `rgsaddle_autoneb_report_t` reports `status`, `max_force`, `ci_index` (-1 when there is none), `surface_rows`, `n_images`, and `iteration`. `iteration` counts the steps of the last stage alone, also when that stage keeps the window and the band session of the stage before it. The surface callback is the band callback, and it is not entered from another thread. Python calls it as `autoneb_run` and reads `AutonebReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`). `rgsaddle.ase.AutoNEB` is the ASE-shaped wrapper, and its `run()` returns an `AutoNEBReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`, `images`). A run that spends its steps returns `RGSADDLE_OK` with `status` 0, so a host tests `status` and `max_force`. `tests/c/autoneb_abi.c` drives the entry point on a double well and checks the status, the force, the iteration count, and the error returns. A host checks `rgsaddle_abi_version()` for minor 68 before resolving the symbol. The Rust types are `RgsaddleAutonebConfig` and `RgsaddleAutonebReport`.
 
 # Use the headers from a meson project (`docs/orgmode/howto/meson.org`)
 
@@ -4160,7 +4309,7 @@ A calculator exception, including `KeyboardInterrupt`, propagates out of `__call
 
 =lineb_solve(surface, positions, atom_masses, energy, opt_tol, perp_tol, molecular=False, max_steps=1000, beads=0, ...)= runs a fixed-energy LI-NEB path to completion and optionally the harmonic quantum TST rate (`howto/lineb`). `positions` is `(n_images, 3N)`. `atom_masses` holds one positive mass per atom: with =molecular=False= each mass expands to three coordinates, and with =molecular=True= the free molecule is quaternion-aligned. `surface(x)` is the same one-image callback as `connect`. The GIL is released around `rgsaddle_lineb_solve` and taken again inside the trampoline. A calculator exception propagates unchanged. =beads=0= skips the rate and leaves `log_rate_over_reactant` as NaN. An unconverged search raises with the existing non-success C status. `LinebResult` holds `positions`, `action`, both half periods and temperatures, `log_rate_over_reactant`, `iterations`, and the `optimizer_calls`, `measure_calls`, `dynamics_calls`, and `rate_calls` tallies.
 
-`rgsaddle.ase.NEB`, `SimplifiedString`, `GrowingString`, `MinModeAtoms`, and `Sella` are the ASE-shaped calls. `NEB`, `SimplifiedString`, and `GrowingString` read `FixAtoms` from the images into the band's fixed-atom mask: those atoms get zero force rows, `interpolate` leaves them on the first image, and every image must fix the same atoms. `SimplifiedString` runs the simplified string method of E, Ren, and Vanden-Eijnden [eSimplifiedImprovedString2007] with `'not-a-knot'` (or `'spline'`) or `'linear'` equal-arc-length reparametrization and an optional climbing image (`run(fmax, steps)` drives `rgsaddle.Band` under an ASE `Optimizer` subclass so `logfile`, `trajectory`, and attached observers run per step). `GrowingString` runs the growing string method of Peters, Heyden, Bell, and Chakraborty [petersGrowingStringMethod2004] from the endpoint images, handing off to `StringSession` once the fragments join. The migration page says where `NEB` follows ASE and where the endpoint-slope climb does not. IRC and AutoNEB stay on the Rust and C sessions.
+`rgsaddle.ase.NEB`, `AutoNEB`, `SimplifiedString`, `GrowingString`, `MinModeAtoms`, and `Sella` are the ASE-shaped calls. `AutoNEB` runs `autoneb_run`, and its `run()` returns an `AutoNEBReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`, `images`): a `status` of 0 means the last stage spent its steps before it met the force stop. `NEB`, `SimplifiedString`, and `GrowingString` read `FixAtoms` from the images into the band's fixed-atom mask: those atoms get zero force rows, `interpolate` leaves them on the first image, and every image must fix the same atoms. `NEB.interpolate` takes `method` `linear` or `idpp` and `mic`. `idpp` calls `idpp_path`. `DyNEB` freezes images that are already under `fmax`; `NEB` does not, unless =dynamic_relaxation=True= is passed and the `FutureWarning` is accepted. `DimerControl` and `MinModeTranslate` are the dimer parameter object and the optimizer that takes one `MinMode.step`. `SimplifiedString` runs the simplified string method of E, Ren, and Vanden-Eijnden [eSimplifiedImprovedString2007] with `'not-a-knot'` (or `'spline'`) or `'linear'` equal-arc-length reparametrization and an optional climbing image (`run(fmax, steps)` drives `rgsaddle.Band` under an ASE `Optimizer` subclass so `logfile`, `trajectory`, and attached observers run per step). `GrowingString` runs the growing string method of Peters, Heyden, Bell, and Chakraborty [petersGrowingStringMethod2004] from the endpoint images, handing off to `StringSession` once the fragments join. The migration page says where `NEB` follows ASE and where the endpoint-slope climb, the `aseneb` name, and the plain `eb` projection do not. IRC stays on the Rust and C sessions.
 
 `_core.halve_raised_energy(previous, trial, step)` returns `(raised, new_step)`. A trial more than 1e-4 above `previous` halves `step`. `_core.trust_update(radius, predicted, actual, step_norm, sigma_inc, sigma_dec, rho_inc, rho_dec, delta_min)` is the Sella radius after those energy changes. A prediction below 1e-14 in absolute value returns `radius`. Neither call evaluates a surface.
 
@@ -4221,10 +4370,12 @@ The spring constant defaults to 0.1, ASE's value. A `BandSession` still defaults
 
 `dynamic_relaxation`, `fmax`, and `scale_fmax` on `NEB` raise `NotImplementedError`. `DyNEB` takes them: an image under `fmax` is left in place, `scale_fmax` loosens that test with the distance from the highest-energy image, and the default band is unchanged. A variable cell in a periodic direction raises `NotImplementedError` as well.
 
+`AutoNEB` reads `prefix000.traj` and `prefix001.traj` and grows the band with `autoneb_run`. The constructor arguments match `ase.mep.AutoNEB`. The stored images must agree on the atom count, the atomic numbers, `pbc`, and the periodic cell vectors, as ASE's `NEB` requires, and a mismatch raises the same error. The endpoints keep their own `Atoms` records, and a new interior image copies the start, as ASE copies the image left of the cut. `world=None` is `ase.parallel.world`. `parallel=True` on more than one rank raises `NotImplementedError`; with `parallel=False` every rank runs the same search and rank 0 alone writes the trajectories. `remove_rotation_and_translation=True` removes the mean force during the search and, for a free, non-periodic band without `FixAtoms`, fits each image onto the one before it by the Kabsch rotation before and after the search, which is the fit of `minimize_rotation_and_translation`. The steps are the band's FIRE solver. `maxstep` is read from the optimizer class signature when that parameter has a numeric default. A default of None uses the optimizer's documented `defaults['maxstep']`, which is the value ASE applies. `smooth_curve=True`, a non-FIRE optimizer, and `method` `spline` or `string` raise `NotImplementedError`. The final images are written back to `prefixNNN.traj`. Per-iteration trajectory files are not written. The initial fill matches ASE when `n_simul` is 1 or 3. ASE's `run()` returns nothing, and this one returns an `AutoNEBReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`, `images`). `status` is 1 when the last stage met its force stop and 0 when it ran out of steps. `max_force` is the largest force component of that stage and `iteration` is its step count. `positions` is the finished band, shaped `(n_images, 3N)`, and `images` is that band with its endpoints. A spent step budget is not an error, so a caller tests `status`. `all_images`, `status`, `max_force`, and `iteration` on the object hold the same values after the call. With a partially periodic first image, a slab or a wire, the minimum image wraps only the periodic axes, so the band is not folded across its vacuum.
+
 ## From ASE's dimer and from Sella
 `rgsaddle.ase.MinModeAtoms(atoms, mode=...)` estimates a dimer or Lanczos mode and returns the effective force. Above the well the perpendicular force is dropped. Below it the force along the mode is reflected. An ASE optimizer can drive that object.
 
-`MinModeAtoms(atoms, control)` with a `DimerControl` is ASE's dimer call. `displace(method='vector')` applies a Cartesian displacement, `get_eigenmode`, `get_curvature`, and `get_barrier_energy` read the estimate, and `MinModeTranslate` takes the trial step and the conjugate-gradient direction from ASE while the mode comes from this dimer. `order` other than 1, an `eigenmode_method` other than `dimer`, a gauss displacement, and a communicator with `size > 1` raise `NotImplementedError` naming the option. The mode's sign follows the guess. Convergence wants the force below `fmax` and a negative curvature.
+`MinModeAtoms(atoms, control)` with a `DimerControl` is ASE's dimer call. `displace()` with the default `displacement_method='gauss'` draws the same `RandomState` normals as ASE 3.29 when `random_seed` is set, one coordinate at a time. A mask, or a `displacement_center` with `radius` or `number_of_atoms`, limits that draw, and `mic` is the minimum image when the center is an atom index. `method='vector'` still applies a Cartesian displacement. `initial_eigenmode_method='gauss'` (the default) builds the mode from one further draw and restores the positions. `'displacement'` uses the move away from the original positions. `get_potential_energy` stores that guess without rotating it. `get_eigenmode`, `get_curvature`, and `get_barrier_energy` read the estimate, and `MinModeTranslate` takes the trial step and the conjugate-gradient direction from ASE while the rotated mode comes from this dimer. `order` other than 1, an `eigenmode_method` other than `dimer`, and a communicator with `size > 1` raise `NotImplementedError` naming the option. The mode's sign follows the guess. Convergence wants the force below `fmax` and a negative curvature.
 
 `rgsaddle.ase.Sella(atoms, order=1)` is the saddle optimizer. `run(fmax, steps)` is ASE's loop. One step is the partitioned rational-function trust step, not a dimer translation. Masses come from `atoms.get_masses`.
 
@@ -4282,7 +4433,7 @@ ART pushes along the seed until the curvature falls under `art_threshold` (defau
 
 `Stencil::band` checks the array and returns `BAND_PRESET_SEAM` (`band presets stay on feat/band-methods-zoom`, kept for compatibility) because band presets are not implemented in the stencil builder. Use `BandSession`, `AutoNeb`, or `OcinebSession` directly for a band search, and `BandConfig::zoom` or `SpringKind::EnergyWeighted` for zoom-NEB and energy-weighted springs. The chain, the mesh (remesh, insert, window), and the point controller are implemented.
 
-From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only; the stencil symbols were added at ABI minor 16 and remain additive under the current ABI minor 65.
+From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only; the stencil symbols were added at ABI minor 16 and remain additive under the current ABI minor 68.
 
 From Python, `rgsaddle.Stencil.point(x, preset`"dimer")= takes a C-contiguous float64 vector. `step(surface)` releases the thread, and the surface callback re-attaches. `rgsaddle.ase.Point(atoms, preset`"dimer").run(fmax, steps)= is an ASE `Optimizer` whose `step` is one stencil step. A second thread that enters the same handle raises `RuntimeError`.
 
@@ -5471,6 +5622,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_samd_position`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_samd_free`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_idpp_path`. Purpose: Image dependent pair potential initial path. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_autoneb_run`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_trics_path`. Purpose: Translation rotation internal coordinates with splicing, ABI minor 66. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_ocineb_create`. Purpose: Climbing-image band that hands the climbing image to a min-mode climb. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_ocineb_step`. Purpose: One band step, one alignment, or one P-RFO climb step. Parameters: the declaration. Units: the caller's.
@@ -5600,6 +5752,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_sella_saddle_config_t`. Purpose: Sella order-1 (P-RFO + trust).
 - `rgsaddle_constraints_config_t`. Purpose: Empty Constraints chart.
 - `rgsaddle_samd_config_t`. Purpose: Sella BDP thermostat.
+- `rgsaddle_autoneb_config_t`. Purpose: Run-to-completion AutoNEB, ABI minor 68.
+- `rgsaddle_autoneb_report_t`. Purpose: Result of rgsaddle_autoneb_run.
 - `rgsaddle_ocineb_phase_t`. Purpose: Phase of one OCI-NEB host step.
 - `rgsaddle_ocineb_config_t`. Purpose: Hand-off parameters.
 - `rgsaddle_ocineb_report_t`. Purpose: One OCI-NEB step.
@@ -5642,6 +5796,9 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `RGSADDLE_REQ_ONE_IMAGE`. Purpose: Request flags bit 0.
 - `RGSADDLE_REQ_CLIMBING_IMAGE`. Purpose: Request flags bit 1, ABI minor 23.
 - `RGSADDLE_VERSION_INIT`. Purpose: Macro constant in include/rgsaddle.h.
+- `RGSADDLE_AUTONEB_CLIMB`. Purpose: AutoNEB flag bit 0, ABI minor 68.
+- `RGSADDLE_AUTONEB_IDPP`. Purpose: AutoNEB flag bit 1, ABI minor 68.
+- `RGSADDLE_AUTONEB_KEEP_TRANSLATION`. Purpose: AutoNEB flag bit 2, ABI minor 68.
 - `RGSADDLE_STENCIL_MIN`. Purpose: Macro constant in include/rgsaddle.h.
 - `RGSADDLE_STENCIL_DIMER`. Purpose: Macro constant in include/rgsaddle.h.
 - `RGSADDLE_STENCIL_LANCZOS`. Purpose: Macro constant in include/rgsaddle.h.

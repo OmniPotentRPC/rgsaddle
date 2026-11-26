@@ -38,7 +38,11 @@ E_corrected = E_atomistic_periodic + correction.
 
 The smoke cell-size test synthesizes the atomistic long-range contribution from the same periodic sum, then verifies that adding the correction removes its cell drift for several separations and box lengths.
 The full copper job is driven by =scripts/benchmark-elastic-dipole.sh=.
-It builds the defect-pair catalogue once, runs the network volume calculation for every size in =RGSADDLE_REPEATS=, and records the uncorrected and vector-dipole \(V_{iv}\) estimators as separate rows.
+It builds the defect-pair catalogue once, runs the network volume calculation for every size in =RGSADDLE_REPEATS=, and records the vector-return and vector-dipole \(V_{iv}\) estimators as separate rows.
+Both rows carry the vector- and orientation-resolved dipole bias on every hop of the same per-vector network.
+The vector-return row sends a hop past the cutoff back to its source through the return layer of the lumped model.
+The vector-dipole row matches the network to the field-free crystal outside the cutoff.
+Neither row is uncorrected: the run without the dipole interaction is the no-strain-bias row of =benchmarks/defect_pair_run13_volume.csv=.
 
 * Copper reference status
 The opt-in Mishin Cu EAM test uses a reference supercell with 2048 lattice sites by default, relaxes a vacancy and a =[100]= dumbbell, derives their dipoles from the residual stress, and records finite symmetric tensors.

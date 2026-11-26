@@ -20,6 +20,10 @@ fn positive_or(value: f64, default: f64) -> f64 {
     if value > 0.0 { value } else { default }
 }
 
+fn atom_index(value: i64) -> Option<usize> {
+    usize::try_from(value).ok()
+}
+
 fn sella_min_config(cfg: &RgsaddleSellaMinConfig, force_gate: crate::ForceGate) -> SellaMinConfig {
     let defaults = SellaMinConfig::default();
     SellaMinConfig::default()
@@ -256,9 +260,14 @@ pub unsafe extern "C" fn rgsaddle_irc_create(
     if cfg.version.major != RGSADDLE_ABI_MAJOR {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(saddle, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     let md = Array1::from(unsafe { slice::from_raw_parts(mode, dof) }.to_vec());
     let Some(force_gate) = force_gate_of(cfg.force_gate) else {
         return std::ptr::null_mut();
@@ -305,9 +314,14 @@ pub unsafe extern "C" fn rgsaddle_irc_create_from_surface(
     if cfg.version.major != RGSADDLE_ABI_MAJOR {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(saddle, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     let sd = Array1::from(unsafe { slice::from_raw_parts(seed, dof) }.to_vec());
     let Some(force_gate) = force_gate_of(cfg.force_gate) else {
         return std::ptr::null_mut();
@@ -397,7 +411,9 @@ pub unsafe extern "C" fn rgsaddle_irc_position(session: *const RgsaddleIrc, out:
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &*session };
-    let dof = (3 * session.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
     for (i, v) in session.session.position().iter().enumerate() {
         dst[i] = *v;
@@ -462,7 +478,9 @@ mod irc_abi_tests {
     extern "C" fn well_cb(_user: *mut c_void, req: *mut RgsaddleSurfaceRequest) -> i32 {
         unsafe {
             let req = &mut *req;
-            let n = (req.n_atoms * 3) as usize;
+            let Some(n) = f64_len(&[3, req.n_atoms]) else {
+                return RGSADDLE_SHAPE;
+            };
             let pos = slice::from_raw_parts(req.positions, n);
             let x = Array1::from(pos.to_vec());
             let (e, g) = Well.eval(x.view()).unwrap();
@@ -1109,9 +1127,14 @@ pub unsafe extern "C" fn rgsaddle_sella_min_create(
     let Some(force_gate) = force_gate_of(cfg.force_gate) else {
         return std::ptr::null_mut();
     };
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     let sella = sella_min_config(cfg, force_gate);
     match SellaMinSession::new(sella, x, m) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSellaMin { session, n_atoms })),
@@ -1143,9 +1166,14 @@ pub unsafe extern "C" fn rgsaddle_sella_min_create_on(
     if chart.n_atoms != n_atoms {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     let sella = sella_min_config(cfg, force_gate);
     match SellaMinSession::with_chart(sella, x, m, chart.cons.clone()) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSellaMin { session, n_atoms })),
@@ -1177,9 +1205,14 @@ pub unsafe extern "C" fn rgsaddle_sella_min_create_internal(
     if chart.n_atoms != n_atoms {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     let sella = sella_min_config(cfg, force_gate);
     match SellaMinSession::on_internal(sella, x, m, chart.cons.clone()) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSellaMin { session, n_atoms })),
@@ -1208,9 +1241,14 @@ pub unsafe extern "C" fn rgsaddle_sella_min_create_cell(
     let Some(force_gate) = force_gate_of(cfg.force_gate) else {
         return std::ptr::null_mut();
     };
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     let c = unsafe { slice::from_raw_parts(cell, 9) };
     let Ok(lc) = Cell::from_vectors(
         [c[0], c[1], c[2]],
@@ -1266,9 +1304,14 @@ pub unsafe extern "C" fn rgsaddle_sella_min_create_cell_internal(
     if chart.n_atoms != n_atoms {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     let c = unsafe { slice::from_raw_parts(cell, 9) };
     let Ok(lc) = Cell::from_vectors(
         [c[0], c[1], c[2]],
@@ -1351,7 +1394,9 @@ pub unsafe extern "C" fn rgsaddle_sella_min_position(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &*session };
-    let dof = (3 * session.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
     for (i, v) in session.session.position().iter().enumerate() {
         dst[i] = *v;
@@ -1471,9 +1516,14 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create(
     let Some(force_gate) = force_gate_of(cfg.force_gate) else {
         return std::ptr::null_mut();
     };
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     let sella = sella_saddle_config(cfg, force_gate);
     match SellaSaddleSession::new(sella, x, m) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSellaSaddle { session, n_atoms })),
@@ -1505,9 +1555,14 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_on(
     if chart.n_atoms != n_atoms {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     let sella = sella_saddle_config(cfg, force_gate);
     match SellaSaddleSession::with_chart(sella, x, m, chart.cons.clone()) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSellaSaddle { session, n_atoms })),
@@ -1539,9 +1594,14 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_internal(
     if chart.n_atoms != n_atoms {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     let sella = sella_saddle_config(cfg, force_gate);
     match SellaSaddleSession::on_internal(sella, x, m, chart.cons.clone()) {
         Ok(session) => Box::into_raw(Box::new(RgsaddleSellaSaddle { session, n_atoms })),
@@ -1570,9 +1630,14 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_cell(
     let Some(force_gate) = force_gate_of(cfg.force_gate) else {
         return std::ptr::null_mut();
     };
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     let c = unsafe { slice::from_raw_parts(cell, 9) };
     let Ok(lc) = Cell::from_vectors(
         [c[0], c[1], c[2]],
@@ -1628,9 +1693,14 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_create_cell_internal(
     if chart.n_atoms != n_atoms {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     let c = unsafe { slice::from_raw_parts(cell, 9) };
     let Ok(lc) = Cell::from_vectors(
         [c[0], c[1], c[2]],
@@ -1713,7 +1783,9 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_position(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &*session };
-    let dof = (3 * session.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
     for (i, v) in session.session.position().iter().enumerate() {
         dst[i] = *v;
@@ -1750,7 +1822,9 @@ pub unsafe extern "C" fn rgsaddle_sella_saddle_seed_mode(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &mut *session };
-    let dof = (3 * session.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let mode = ndarray::ArrayView1::from(unsafe { slice::from_raw_parts(mode, dof) });
     match session.session.seed_mode(mode, curvature) {
         Ok(()) => RGSADDLE_OK,
@@ -1892,7 +1966,13 @@ pub unsafe extern "C" fn rgsaddle_constraints_create(
     if cfg.version.major != RGSADDLE_ABI_MAJOR {
         return std::ptr::null_mut();
     }
-    match Constraints::new(n_atoms as usize) {
+    let Some(n) = usize::try_from(n_atoms)
+        .ok()
+        .filter(|_| f64_len(&[3, n_atoms]).is_some())
+    else {
+        return std::ptr::null_mut();
+    };
+    match Constraints::new(n) {
         Ok(cons) => Box::into_raw(Box::new(RgsaddleConstraints { cons, n_atoms })),
         Err(_) => std::ptr::null_mut(),
     }
@@ -1912,7 +1992,9 @@ pub unsafe extern "C" fn rgsaddle_constraints_fix_com(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let cons = unsafe { &mut *cons };
-    let dof = (3 * cons.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, cons.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
     match cons.cons.fix_com(x.view()) {
         Ok(()) => RGSADDLE_OK,
@@ -1940,7 +2022,9 @@ pub unsafe extern "C" fn rgsaddle_constraints_fix_bond(
     if i < 0 || j < 0 || i >= cons.n_atoms || j >= cons.n_atoms {
         return RGSADDLE_SHAPE;
     }
-    let dof = (3 * cons.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, cons.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
     let target = if target.is_null() {
         None
@@ -1971,7 +2055,9 @@ pub unsafe extern "C" fn rgsaddle_constraints_residual_norm(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let cons = unsafe { &*cons };
-    let dof = (3 * cons.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, cons.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
     match cons.cons.residual_norm(x.view()) {
         Ok(n) => {
@@ -1998,7 +2084,9 @@ pub unsafe extern "C" fn rgsaddle_constraints_project(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let cons = unsafe { &*cons };
-    let dof = (3 * cons.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, cons.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
     let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
     let p = cons.cons.project(&x, &v);
@@ -2025,7 +2113,9 @@ pub unsafe extern "C" fn rgsaddle_constraints_retract(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let cons = unsafe { &*cons };
-    let dof = (3 * cons.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, cons.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
     let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
     let y = cons.cons.retract(&x, &v);
@@ -2066,7 +2156,9 @@ pub unsafe extern "C" fn rgsaddle_samd_create(
     let Some(f) = surface else {
         return std::ptr::null_mut();
     };
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let pos = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
     let vel = Array1::from(unsafe { slice::from_raw_parts(v0, dof) }.to_vec());
     let defaults = SamdConfig::default();
@@ -2120,7 +2212,9 @@ pub unsafe extern "C" fn rgsaddle_samd_step(
         return RGSADDLE_NULL_SURFACE;
     };
     let session = unsafe { &mut *session };
-    let dof = (3 * session.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let draw = Array1::from(unsafe { slice::from_raw_parts(r, dof) }.to_vec());
     let cs = CSurface {
         f,
@@ -2162,7 +2256,9 @@ pub unsafe extern "C" fn rgsaddle_samd_position(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &*session };
-    let dof = (3 * session.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
     for (i, v) in session.session.position().iter().enumerate() {
         dst[i] = *v;
@@ -2193,9 +2289,14 @@ pub unsafe extern "C" fn rgsaddle_pes_create(
     if position.is_null() || masses.is_null() || n_atoms < 1 {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     match CartesianPes::with_proj(x, m, proj_trans != 0, proj_rot != 0) {
         Ok(pes) => Box::into_raw(Box::new(RgsaddlePes { pes, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -2213,7 +2314,9 @@ pub unsafe extern "C" fn rgsaddle_pes_position(pes: *const RgsaddlePes, out: *mu
         return RGSADDLE_INVALID_PARAMETER;
     }
     let pes = unsafe { &*pes };
-    let dof = (3 * pes.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, pes.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
     for (i, v) in pes.pes.position().iter().enumerate() {
         dst[i] = *v;
@@ -2240,7 +2343,9 @@ pub unsafe extern "C" fn rgsaddle_pes_kick(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let pes = unsafe { &mut *pes };
-    let dof = (3 * pes.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, pes.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let dx = Array1::from(unsafe { slice::from_raw_parts(d, dof) }.to_vec());
     let cs = CSurface {
         f,
@@ -2286,7 +2391,9 @@ pub unsafe extern "C" fn rgsaddle_pes_project(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let pes = unsafe { &*pes };
-    let dof = (3 * pes.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, pes.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
     let p = pes.pes.project(&v);
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
@@ -2311,7 +2418,9 @@ pub unsafe extern "C" fn rgsaddle_pes_retract(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let pes = unsafe { &*pes };
-    let dof = (3 * pes.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, pes.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
     let y = pes.pes.retract(&v);
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
@@ -2337,7 +2446,9 @@ pub unsafe extern "C" fn rgsaddle_pes_transport(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let pes = unsafe { &*pes };
-    let dof = (3 * pes.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, pes.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let x_from = pes.pes.position().to_owned();
     let x_to = Array1::from(unsafe { slice::from_raw_parts(x_to, dof) }.to_vec());
     let v = Array1::from(unsafe { slice::from_raw_parts(v, dof) }.to_vec());
@@ -2374,9 +2485,14 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_create(
     if chart.n_atoms != n_atoms {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
     match InternalPes::new(x, m, chart.cons.clone()) {
         Ok(pes) => Box::into_raw(Box::new(RgsaddleInternalPes { pes, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -2404,14 +2520,24 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_create_dummies(
         return std::ptr::null_mut();
     }
     let chart = unsafe { &*cons };
-    if chart.n_atoms != n_atoms + n_dummy {
+    let Some(n_total) = n_atoms.checked_add(n_dummy) else {
+        return std::ptr::null_mut();
+    };
+    if chart.n_atoms != n_total {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_mass) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
-    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_atoms as usize) }.to_vec());
-    let d =
-        Array1::from(unsafe { slice::from_raw_parts(dummies, (3 * n_dummy) as usize) }.to_vec());
+    let m = Array1::from(unsafe { slice::from_raw_parts(masses, n_mass) }.to_vec());
+    let Some(dummy_dof) = f64_len(&[3, n_dummy]) else {
+        return std::ptr::null_mut();
+    };
+    let d = Array1::from(unsafe { slice::from_raw_parts(dummies, dummy_dof) }.to_vec());
     match InternalPes::with_dummies(x, m, chart.cons.clone(), d) {
         Ok(pes) => Box::into_raw(Box::new(RgsaddleInternalPes { pes, n_atoms })),
         Err(_) => std::ptr::null_mut(),
@@ -2448,44 +2574,70 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_create_from_find(
     if n_dihedrals > 0 && dihedrals.is_null() {
         return std::ptr::null_mut();
     }
-    let n = n_atoms as usize;
-    let mut bond_v = Vec::with_capacity(n_bonds as usize);
+    let Some(n) = f64_len(&[n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_bond) = f64_len(&[n_bonds]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(bond_len) = f64_len(&[2, n_bonds]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_angle) = f64_len(&[n_angles]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(angle_len) = f64_len(&[3, n_angles]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_dihedral) = f64_len(&[n_dihedrals]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(dihedral_len) = f64_len(&[4, n_dihedrals]) else {
+        return std::ptr::null_mut();
+    };
+    let mut bond_v = Vec::with_capacity(n_bond);
     if n_bonds > 0 {
-        let raw = unsafe { slice::from_raw_parts(bonds, 2 * n_bonds as usize) };
+        let raw = unsafe { slice::from_raw_parts(bonds, bond_len) };
         for chunk in raw.as_chunks::<2>().0 {
-            if chunk[0] < 0 || chunk[1] < 0 {
+            let (Some(a), Some(b)) = (atom_index(chunk[0]), atom_index(chunk[1])) else {
                 return std::ptr::null_mut();
-            }
-            bond_v.push([chunk[0] as usize, chunk[1] as usize]);
+            };
+            bond_v.push([a, b]);
         }
     }
-    let mut angle_v = Vec::with_capacity(n_angles as usize);
+    let mut angle_v = Vec::with_capacity(n_angle);
     if n_angles > 0 {
-        let raw = unsafe { slice::from_raw_parts(angles, 3 * n_angles as usize) };
+        let raw = unsafe { slice::from_raw_parts(angles, angle_len) };
         for chunk in raw.as_chunks::<3>().0 {
-            if chunk.iter().any(|&a| a < 0) {
+            let (Some(a), Some(b), Some(c)) = (
+                atom_index(chunk[0]),
+                atom_index(chunk[1]),
+                atom_index(chunk[2]),
+            ) else {
                 return std::ptr::null_mut();
-            }
-            angle_v.push([chunk[0] as usize, chunk[1] as usize, chunk[2] as usize]);
+            };
+            angle_v.push([a, b, c]);
         }
     }
-    let mut dih_v = Vec::with_capacity(n_dihedrals as usize);
+    let mut dih_v = Vec::with_capacity(n_dihedral);
     if n_dihedrals > 0 {
-        let raw = unsafe { slice::from_raw_parts(dihedrals, 4 * n_dihedrals as usize) };
+        let raw = unsafe { slice::from_raw_parts(dihedrals, dihedral_len) };
         for chunk in raw.as_chunks::<4>().0 {
-            if chunk.iter().any(|&a| a < 0) {
+            let (Some(a), Some(b), Some(c), Some(d)) = (
+                atom_index(chunk[0]),
+                atom_index(chunk[1]),
+                atom_index(chunk[2]),
+                atom_index(chunk[3]),
+            ) else {
                 return std::ptr::null_mut();
-            }
-            dih_v.push([
-                chunk[0] as usize,
-                chunk[1] as usize,
-                chunk[2] as usize,
-                chunk[3] as usize,
-            ]);
+            };
+            dih_v.push([a, b, c, d]);
         }
     }
     let found = crate::vocn::Found::from_parts(bond_v, angle_v, dih_v);
-    let dof = 3 * n;
     let x = Array1::from(unsafe { slice::from_raw_parts(position, dof) }.to_vec());
     let m = Array1::from(unsafe { slice::from_raw_parts(masses, n) }.to_vec());
     match InternalPes::from_find(x, m, &found) {
@@ -2507,7 +2659,10 @@ pub unsafe extern "C" fn rgsaddle_place_perp_dummy(
     if x.is_null() || out.is_null() || n_atoms < 2 {
         return RGSADDLE_INVALID_PARAMETER;
     }
-    let pos = Array1::from(unsafe { slice::from_raw_parts(x, (3 * n_atoms) as usize) }.to_vec());
+    let Some(dof) = f64_len(&[3, n_atoms]) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let pos = Array1::from(unsafe { slice::from_raw_parts(x, dof) }.to_vec());
     match crate::place_perp_dummy(pos.view(), i as usize, j as usize) {
         Ok(r) => {
             let dst = unsafe { slice::from_raw_parts_mut(out, 3) };
@@ -2576,7 +2731,9 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_position(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let pes = unsafe { &*pes };
-    let dof = (3 * pes.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, pes.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
     for (i, v) in pes.pes.position().iter().enumerate() {
         dst[i] = *v;
@@ -2652,7 +2809,9 @@ pub unsafe extern "C" fn rgsaddle_internal_pes_grad(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let pes = unsafe { &*pes };
-    let dof = (3 * pes.n_atoms) as usize;
+    let Some(dof) = f64_len(&[3, pes.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let g = Array1::from(unsafe { slice::from_raw_parts(g_cart, dof) }.to_vec());
     let gint = match pes.pes.internals_grad(g.view()) {
         Ok(q) => q,
@@ -2752,7 +2911,9 @@ mod constraints_abi_tests {
     extern "C" fn well_cb(_user: *mut c_void, req: *mut RgsaddleSurfaceRequest) -> i32 {
         unsafe {
             let req = &mut *req;
-            let n = (req.n_atoms * 3) as usize;
+            let Some(n) = f64_len(&[3, req.n_atoms]) else {
+                return RGSADDLE_SHAPE;
+            };
             let pos = slice::from_raw_parts(req.positions, n);
             let e = req.energies;
             let g = slice::from_raw_parts_mut(req.gradients, n);
@@ -3115,7 +3276,9 @@ mod samd_abi_tests {
     extern "C" fn well_cb(_user: *mut c_void, req: *mut RgsaddleSurfaceRequest) -> i32 {
         unsafe {
             let req = &mut *req;
-            let n = (req.n_atoms * 3) as usize;
+            let Some(n) = f64_len(&[3, req.n_atoms]) else {
+                return RGSADDLE_SHAPE;
+            };
             let pos = slice::from_raw_parts(req.positions, n);
             let e = req.energies;
             let g = slice::from_raw_parts_mut(req.gradients, n);
@@ -3746,7 +3909,10 @@ pub unsafe extern "C" fn rgsaddle_growing_string_set_fixed_atoms(
     let mask = if n_atoms == 0 && fixed.is_null() {
         Vec::new()
     } else if n_atoms == session.n_atoms && !fixed.is_null() {
-        let raw = unsafe { slice::from_raw_parts(fixed, n_atoms as usize) };
+        let Some(len) = f64_len(&[n_atoms]) else {
+            return RGSADDLE_SHAPE;
+        };
+        let raw = unsafe { slice::from_raw_parts(fixed, len) };
         if raw.iter().any(|&b| b > 1) {
             return RGSADDLE_INVALID_PARAMETER;
         }
@@ -4155,7 +4321,9 @@ mod torque_window_abi_tests {
     extern "C" fn quadratic_cb(_user: *mut c_void, req: *mut RgsaddleSurfaceRequest) -> i32 {
         unsafe {
             let req = &mut *req;
-            let n = (req.n_atoms * 3) as usize;
+            let Some(n) = f64_len(&[3, req.n_atoms]) else {
+                return RGSADDLE_SHAPE;
+            };
             let pos = slice::from_raw_parts(req.positions, n);
             let gout = slice::from_raw_parts_mut(req.gradients, n);
             let mut energy = 0.0;
@@ -4339,9 +4507,10 @@ mod torque_window_abi_tests {
             unsafe { report.assume_init() }.rotations
         };
 
-        // A minor below `MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR` keeps
-        // the legacy meaning of 0.0: angle stop off. The checks pin that
-        // boundary instead of `RGSADDLE_ABI_MINOR`.
+        // `MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR - 1` is the last minor
+        // that reads a zero rotation_angle_tol as stop off. From
+        // `MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR` a zero value keeps the
+        // Rust default angle stop unless the explicit flag is set.
         let legacy = session_of_with_rotation_angle(
             0,
             MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR - 1,
@@ -4349,14 +4518,15 @@ mod torque_window_abi_tests {
             0,
             0.0,
         );
-        // The introducing minor with 0.0 and no flag keeps the Rust default angle stop.
-        let defaulted = session_of_with_rotation_angle(
+        let introduced = session_of_with_rotation_angle(
             0,
             MINMODE_EXPLICIT_ROTATION_ANGLE_TOL_MINOR,
             1e-8,
             0,
             0.0,
         );
+        // The current minor with 0.0 and no flag keeps the Rust default angle stop.
+        let defaulted = session_of_with_rotation_angle(0, RGSADDLE_ABI_MINOR, 1e-8, 0, 0.0);
         // The current minor with the explicit flag and 0.0 keeps the stop off.
         let explicit_zero = session_of_with_rotation_angle(
             0,
@@ -4369,10 +4539,13 @@ mod torque_window_abi_tests {
         let explicit_nonzero = session_of_with_rotation_angle(0, RGSADDLE_ABI_MINOR, 1e-8, 0, 1e-2);
 
         let legacy_rotations = estimate(legacy);
+        let introduced_rotations = estimate(introduced);
         let defaulted_rotations = estimate(defaulted);
         let explicit_zero_rotations = estimate(explicit_zero);
         let explicit_nonzero_rotations = estimate(explicit_nonzero);
 
+        assert!(legacy_rotations > introduced_rotations);
+        assert_eq!(introduced_rotations, defaulted_rotations);
         assert!(legacy_rotations > defaulted_rotations);
         assert_eq!(legacy_rotations, explicit_zero_rotations);
         assert!(explicit_nonzero_rotations <= legacy_rotations);
@@ -4380,6 +4553,7 @@ mod torque_window_abi_tests {
 
         unsafe {
             rgsaddle_minmode_free(legacy);
+            rgsaddle_minmode_free(introduced);
             rgsaddle_minmode_free(defaulted);
             rgsaddle_minmode_free(explicit_zero);
             rgsaddle_minmode_free(explicit_nonzero);

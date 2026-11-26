@@ -1,0 +1,333 @@
+# Publish Markdown on the orphan branch context7-docs.
+# The narrative pages are Org. docs/export.el exports them to
+# reStructuredText for Sphinx, and this repository has no Markdown
+# exporter, so the steps below call Org's ox-md on every tracked .org
+# file. X.org becomes X.md in the same directory. Tracked Markdown and
+# reStructuredText with no Org source are copied, except towncrier
+# fragments and the Sphinx pages docs/export.el writes from
+# docs/orgmode. A blank export, and an Org file whose only body is an
+# RST include, is left out with a warning. Broken relative links in the
+# Markdown are reported and not rewritten. The branch holds that tree
+# and context7.json as one parentless commit, replaced on each push to
+# develop when the tree changes.
+
+name: Context7 docs
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  context7-docs:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    name: Publish context7-docs
+    steps:
+      # The publish step pushes with the credentials this checkout persists.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: prefix-dev/setup-pixi@ad1da6449d9e506fd127fd67ab2d054a769f6a94 # v0.11.2
+        with:
+          pixi-version: v0.70.2
+          run-install: false
+          cache: false
+
+      - name: Install Emacs at the docs pin
+        run: |
+          set -euo pipefail
+          # pixi.toml feature.docs depends on emacs ">=30.2,<31". There is
+          # no pixi.lock. Pin the conda-forge linux-64 build of 30.2 that
+          # satisfies that range.
+          pixi global install --channel conda-forge 'emacs=30.2=hda76a9e_6'
+          command -v emacs
+          emacs --batch --eval '(princ (format "Emacs %s, Org %s\n" emacs-version (org-version)))'
+
+      - name: Export the docs
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/context7-docs"
+          rm -rf "$out"
+          mkdir -p "$out"
+          # Org names heading anchors with random. A fixed seed keeps them,
+          # and so the published tree, the same from run to run.
+          mkdir -p "$RUNNER_TEMP/emacs-site"
+          printf '%s\n' '(random "context7-docs")' > "$RUNNER_TEMP/emacs-site/site-start.el"
+          export EMACSLOADPATH="$RUNNER_TEMP/emacs-site:"
+          cat > "$RUNNER_TEMP/ox-md-fence.el" <<'EOF'
+          (require 'ox-md)
+          ;; ox-md indents source blocks and drops the language. Fence them.
+          (advice-add 'org-md-example-block :around
+                      (lambda (orig block contents info)
+                        (if (eq (org-element-type block) 'src-block)
+                            (format "```%s\n%s```"
+                                    (or (org-element-property :language block) "")
+                                    (org-remove-indentation
+                                     (org-export-format-code-default block info)))
+                          (funcall orig block contents info))))
+          EOF
+          mapfile -d '' -t orgs < <(git ls-files -z -- '*.org' ':(exclude)docs/newsfragments/**')
+          for org in "${orgs[@]}"; do
+            md="${org%.org}.md"
+            if python3 - "$org" <<'PY'
+          import re
+          import sys
+
+          text = open(sys.argv[1], encoding="utf-8").read()
+          blocks = re.findall(
+              r"(?ims)^[ \t]*#\+begin_export[ \t]+rst\b.*?^[ \t]*#\+end_export[ \t]*$",
+              text,
+          )
+          body = re.sub(
+              r"(?ims)^[ \t]*#\+begin_export[ \t]+rst\b.*?^[ \t]*#\+end_export[ \t]*$",
+              "",
+              text,
+          )
+          kept = []
+          for line in body.splitlines():
+              stripped = line.strip()
+              if not stripped or stripped.startswith("#+") or stripped.startswith("#"):
+                  continue
+              kept.append(stripped)
+          include = any(re.search(r"(?im)^[ \t]*\.\.[ \t]+include::", block) for block in blocks)
+          sys.exit(0 if include and not kept else 1)
+          PY
+            then
+              echo "::warning file=${org}::RST include only, ${md} left out"
+              continue
+            fi
+            # A tracked Markdown file can share this path. Export beside it,
+            # then put the tracked file back so a blank export does not
+            # delete it before the copy below.
+            tracked=0
+            if git cat-file -e "HEAD:${md}" 2>/dev/null; then
+              tracked=1
+            fi
+            rm -f "$md"
+            emacs --batch "$org" --load "$RUNNER_TEMP/ox-md-fence.el" \
+              --eval '(setq make-backup-files nil)' \
+              --eval '(org-md-export-to-markdown)' --kill
+            if [ ! -f "$md" ]; then
+              if [ "$tracked" -eq 1 ]; then
+                git checkout -- "$md"
+              fi
+              echo "::error file=${org}::export wrote no ${md}"
+              exit 1
+            fi
+            python3 - "$md" <<'PY'
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          path.write_text(path.read_text(encoding="utf-8").rstrip("\n") + "\n", encoding="utf-8")
+          PY
+            if ! grep -q '[^[:space:]]' "$md"; then
+              rm -f "$md"
+              if [ "$tracked" -eq 1 ]; then
+                git checkout -- "$md"
+              fi
+              echo "::warning file=${org}::no Markdown content, ${md} left out"
+              continue
+            fi
+            install -D -m 0644 "$md" "$out/$md"
+            rm -f "$md"
+            if [ "$tracked" -eq 1 ]; then
+              git checkout -- "$md"
+            fi
+          done
+          mapfile -d '' -t authored < <(git ls-files -z -- '*.md' '*.rst' \
+            ':(exclude)docs/newsfragments/**' \
+            ':(exclude)ci/release-notes.md' \
+            ':(exclude)third_party/**' \
+            ':(exclude)subprojects/**')
+          for f in "${authored[@]}"; do
+            if [ -e "$out/$f" ]; then
+              continue
+            fi
+            # docs/export.el writes docs/orgmode/X.org to docs/source/X.rst.
+            # The Markdown export of that Org file is the copy on this branch.
+            if [[ "$f" == docs/source/*.rst ]]; then
+              rel="${f#docs/source/}"
+              twin="docs/orgmode/${rel%.rst}.org"
+              if git cat-file -e "HEAD:${twin}" 2>/dev/null; then
+                continue
+              fi
+            fi
+            install -D -m 0644 "$f" "$out/$f"
+          done
+          echo "${#orgs[@]} Org files, $(find "$out" -type f | wc -l) files in the tree"
+
+      - name: Write context7.json
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_DESCRIPTION: ${{ github.event.repository.description }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "refs/heads/${DEFAULT_BRANCH}"
+          prev='{}'
+          if git cat-file -e FETCH_HEAD:context7.json 2>/dev/null; then
+            prev=$(git show FETCH_HEAD:context7.json)
+          elif [ -f context7.json ]; then
+            prev=$(cat context7.json)
+          fi
+          jq -n --argjson prev "$prev" --arg title "$REPO_NAME" --arg description "$REPO_DESCRIPTION" '
+            {projectTitle: ($prev.projectTitle // $title),
+             description: ($prev.description // $description)}
+            + (if ($prev.rules // []) == [] then {} else {rules: $prev.rules} end)
+            | if (.description | length) < 10
+              then error("context7.json needs a description of at least 10 characters")
+              else . end
+          ' > "$RUNNER_TEMP/context7-docs/context7.json"
+          cat "$RUNNER_TEMP/context7-docs/context7.json"
+
+      - name: Report broken relative links
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/context7-docs" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+          from urllib.parse import unquote
+
+          root = Path(sys.argv[1])
+          files = {path.relative_to(root).as_posix(): path.read_text(encoding="utf-8", errors="replace")
+                   for path in root.rglob("*") if path.is_file() and path.suffix.lower() == ".md"}
+
+          def without_fences(text):
+              lines = text.splitlines()
+              out = []
+              fence = None
+              for line in lines:
+                  opening = re.match(r"^( {0,3})(`{3,}|~{3,})", line)
+                  if fence is None and opening:
+                      fence = (opening.group(2)[0], len(opening.group(2)))
+                      out.append("")
+                      continue
+                  if fence and re.match(r"^ {0,3}" + re.escape(fence[0]) + "{" + str(fence[1]) + r",}\s*$", line):
+                      fence = None
+                      out.append("")
+                      continue
+                  out.append("" if fence else line)
+              return out
+
+          def slug(title):
+              title = re.sub(r"<[^>]+>", "", title)
+              title = title.strip().lower()
+              title = re.sub(r"[^\w\s-]", "", title, flags=re.UNICODE)
+              title = re.sub(r"\s+", "-", title)
+              return title
+
+          def anchors(text):
+              found = set(re.findall(r"""\bid=["']([^"']+)["']""", text))
+              found.update(re.findall(r"""\bname=["']([^"']+)["']""", text))
+              for line in text.splitlines():
+                  heading = re.match(r"#{1,6}\s+(.*?)\s*#*\s*$", line)
+                  if heading:
+                      found.add(slug(heading.group(1)))
+              return found
+
+          anchor_of = {name: anchors(text) for name, text in files.items()}
+
+          def resolve(src, dest):
+              dest = dest.strip()
+              if dest.startswith("<") and ">" in dest:
+                  dest = dest[1:dest.index(">")]
+              else:
+                  dest = dest.split()[0] if dest.split() else dest
+              dest = unquote(dest)
+              fragment = ""
+              if "#" in dest:
+                  dest, fragment = dest.split("#", 1)
+              if dest == "":
+                  return src, fragment
+              if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", dest) or dest.startswith("//"):
+                  return None
+              if dest.startswith("/"):
+                  parts = dest.split("/")
+              else:
+                  parent = Path(src).parent.as_posix()
+                  parts = ([] if parent == "." else parent.split("/")) + dest.split("/")
+              normalized = []
+              for part in parts:
+                  if part in ("", "."):
+                      continue
+                  if part == "..":
+                      if normalized:
+                          normalized.pop()
+                      continue
+                  normalized.append(part)
+              return "/".join(normalized), unquote(fragment)
+
+          broken = 0
+          link_re = re.compile(r"(!?)\[([^\]]*)\]\(([^)]*)\)")
+          ref_def = re.compile(r"^[ ]{0,3}\[([^\]]+)\]:[ \t]*(\S+)")
+          ref_use = re.compile(r"(?<!!)\[([^\]]+)\]\[([^\]]*)\]")
+          html_re = re.compile(r"""(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
+          for name, text in sorted(files.items()):
+              lines = without_fences(text)
+              defs = {}
+              for line in lines:
+                  match = ref_def.match(line)
+                  if match:
+                      defs[match.group(1).casefold()] = match.group(2)
+              seen = []
+              for number, line in enumerate(lines, start=1):
+                  for match in link_re.finditer(line):
+                      seen.append((number, match.group(3), match.group(1) == "!"))
+                  for match in ref_use.finditer(line):
+                      key = (match.group(2) or match.group(1)).casefold()
+                      if key in defs:
+                          seen.append((number, defs[key], False))
+                  for match in html_re.finditer(line):
+                      seen.append((number, match.group(1) or match.group(2) or "", False))
+              for number, dest, image in seen:
+                  if dest.strip() == "":
+                      broken += 1
+                      print(f"::warning file={name},line={number}::broken relative link (empty)")
+                      continue
+                  resolved = resolve(name, dest)
+                  if resolved is None:
+                      continue
+                  target, fragment = resolved
+                  kind = "image" if image else "link"
+                  if target not in files:
+                      broken += 1
+                      print(f"::warning file={name},line={number}::broken relative {kind} {dest}")
+                      continue
+                  if fragment and fragment not in anchor_of[target]:
+                      broken += 1
+                      print(f"::warning file={name},line={number}::broken relative anchor {dest}")
+          print(f"broken relative links: {broken}")
+          PY
+
+      - name: Publish the context7-docs branch
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          export GIT_INDEX_FILE="$RUNNER_TEMP/context7-docs.index"
+          rm -f "$GIT_INDEX_FILE"
+          git --work-tree="$RUNNER_TEMP/context7-docs" add -A -- "$RUNNER_TEMP/context7-docs"
+          tree=$(git write-tree)
+          if git ls-remote --exit-code --heads origin context7-docs >/dev/null; then
+            git fetch --no-tags --depth=1 origin refs/heads/context7-docs
+            if [ "$(git rev-parse 'FETCH_HEAD^{tree}')" = "$tree" ]; then
+              echo "context7-docs already holds tree $tree"
+              exit 0
+            fi
+          fi
+          commit=$(git commit-tree "$tree" -m "docs: export the docs of ${GITHUB_SHA}")
+          git push --force origin "${commit}:refs/heads/context7-docs"
+          git ls-tree -r --name-only "$commit"
