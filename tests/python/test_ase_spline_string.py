@@ -44,9 +44,9 @@ def _endpoints():
     return initial, final
 
 
-def _band(initial, final):
+def _band(initial, final, n_interior: int = 3):
     images = []
-    for _ in range(3):
+    for _ in range(n_interior):
         image = initial.copy()
         image.calc = EMT()
         images.append(image)
@@ -100,3 +100,37 @@ def test_method_matches_ase_329_emt(method: str) -> None:
     # 0.05 eV/Angstrom, so the energy is not fixed more tightly than that
     # residual along the path.
     np.testing.assert_allclose(_energies(ours.images), _energies(ase.images), atol=1e-5, rtol=0.0)
+
+
+@pytest.mark.parametrize("method", ["spline", "string"])
+@pytest.mark.parametrize(
+    ("n_interior", "climb", "k"),
+    [
+        (1, True, 0.1),
+        (1, False, [0.05, 0.25]),
+        (3, True, [0.05, 0.1, 0.2, 0.4]),
+    ],
+)
+def test_climb_variable_k_and_three_images(
+    method: str, n_interior: int, climb: bool, k: float | list[float]
+) -> None:
+    initial, final = _endpoints()
+    ase_images = _band(initial, final, n_interior)
+    our_images = _band(initial, final, n_interior)
+    ase = AseNeb(ase_images, k=k, climb=climb, method=method)
+    ours = NEB(our_images, k=k, climb=climb, method=method)
+    ase.interpolate()
+    ours.interpolate()
+    np.testing.assert_allclose(
+        np.stack([image.positions for image in ours.images]),
+        np.stack([image.positions for image in ase.images]),
+        atol=1e-12,
+        rtol=0.0,
+    )
+    np.testing.assert_allclose(ours.get_forces(), ase.get_forces(), atol=1e-9, rtol=0.0)
+    if method == "string":
+        nudged = np.array(ase.get_positions(), dtype=np.float64, copy=True)
+        nudged[0, 0] += 0.03
+        ase.set_positions(nudged)
+        ours.set_positions(np.array(nudged, copy=True))
+        np.testing.assert_allclose(ours.get_positions(), ase.get_positions(), atol=1e-9, rtol=0.0)

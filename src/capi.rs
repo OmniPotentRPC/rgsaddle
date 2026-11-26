@@ -2538,3 +2538,125 @@ mod strict_endpoint_status {
         assert_eq!(status_of(&err), RGSADDLE_INVALID_PARAMETER);
     }
 }
+
+#[cfg(test)]
+mod spline_c_abi {
+    use super::{
+        RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_INVALID_PARAMETER, RGSADDLE_NON_FINITE,
+        RGSADDLE_OK, RgsaddleBandConfig, RgsaddleVersion, SPLINE_TANGENT_MINOR, parse_band_config,
+        rgsaddle_spline_resample,
+    };
+    use crate::tangent::TangentKind;
+
+    fn config(minor: u32, tangent: i32) -> RgsaddleBandConfig {
+        RgsaddleBandConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor,
+            },
+            flags: 0,
+            tangent,
+            spring: 0,
+            projection: 1,
+            method: 0,
+            spring_k: 0.1,
+            spring_ks: std::ptr::null(),
+            ci_trigger_factor: 0.0,
+            ci_trigger_force: 0.0,
+            cell: std::ptr::null(),
+            force_tol: 1e-3,
+            max_move: 0.2,
+            memory: 0,
+        }
+    }
+
+    fn parsed_tangent(minor: u32, tangent: i32) -> TangentKind {
+        let cfg = config(minor, tangent);
+        let parsed = unsafe { parse_band_config(&cfg, 3, 3, None) }.expect("band config parses");
+        parsed.config.tangent
+    }
+
+    #[test]
+    fn a_minor_before_the_spline_field_keeps_the_improved_tangent() {
+        const { assert!(SPLINE_TANGENT_MINOR == 70) };
+        const { assert!(RGSADDLE_ABI_MINOR > SPLINE_TANGENT_MINOR) };
+        assert_eq!(
+            parsed_tangent(SPLINE_TANGENT_MINOR - 1, 2),
+            TangentKind::Improved
+        );
+        assert_eq!(parsed_tangent(SPLINE_TANGENT_MINOR, 2), TangentKind::Spline);
+        assert_eq!(parsed_tangent(RGSADDLE_ABI_MINOR, 2), TangentKind::Spline);
+        assert_eq!(parsed_tangent(RGSADDLE_ABI_MINOR, 1), TangentKind::Improved);
+        assert_eq!(parsed_tangent(RGSADDLE_ABI_MINOR, 0), TangentKind::Simple);
+    }
+
+    unsafe fn resample(n_images: i64, n_atoms: i64, positions: *mut f64, cell: *const f64) -> i32 {
+        unsafe { rgsaddle_spline_resample(n_images, n_atoms, positions, cell) }
+    }
+
+    #[test]
+    fn spline_resample_returns_the_documented_errors() {
+        unsafe {
+            let mut band = vec![0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 1.0, 0.0, 0.0];
+            assert_eq!(
+                resample(3, 1, band.as_mut_ptr(), std::ptr::null()),
+                RGSADDLE_OK
+            );
+            assert!((band[3] - 0.5).abs() < 1e-12);
+            assert_eq!(band[0], 0.0);
+            assert_eq!(band[6], 1.0);
+
+            let mut kept = vec![0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 1.0, 0.0, 0.0];
+            let invalid = [
+                resample(3, 1, std::ptr::null_mut(), std::ptr::null()),
+                resample(2, 1, kept.as_mut_ptr(), std::ptr::null()),
+                resample(3, 0, kept.as_mut_ptr(), std::ptr::null()),
+                resample(-1, 1, kept.as_mut_ptr(), std::ptr::null()),
+                resample(i64::MAX, i64::MAX, kept.as_mut_ptr(), std::ptr::null()),
+            ];
+            assert!(invalid.iter().all(|rc| *rc == RGSADDLE_INVALID_PARAMETER));
+            assert_eq!(kept, [0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 1.0, 0.0, 0.0]);
+
+            kept[4] = f64::NAN;
+            let nan_bits = kept.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+            assert_eq!(
+                resample(3, 1, kept.as_mut_ptr(), std::ptr::null()),
+                RGSADDLE_INVALID_PARAMETER
+            );
+            assert_eq!(
+                kept.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                nan_bits
+            );
+
+            let mut flat = vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0];
+            assert_eq!(
+                resample(3, 1, flat.as_mut_ptr(), std::ptr::null()),
+                RGSADDLE_INVALID_PARAMETER
+            );
+            assert_eq!(flat, [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
+
+            let mut repeated = vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+            assert_eq!(
+                resample(3, 1, repeated.as_mut_ptr(), std::ptr::null()),
+                RGSADDLE_INVALID_PARAMETER
+            );
+            assert_eq!(repeated, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+
+            let cell = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, f64::INFINITY];
+            let mut finite = vec![0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 1.0, 0.0, 0.0];
+            assert_eq!(
+                resample(3, 1, finite.as_mut_ptr(), cell.as_ptr()),
+                RGSADDLE_INVALID_PARAMETER
+            );
+            assert_eq!(finite, [0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 1.0, 0.0, 0.0]);
+
+            let mut huge = vec![0.0, 0.0, 0.0, 1e308, 0.0, 0.0, -1e308, 0.0, 0.0];
+            let huge_before = huge.clone();
+            assert_eq!(
+                resample(3, 1, huge.as_mut_ptr(), std::ptr::null()),
+                RGSADDLE_NON_FINITE
+            );
+            assert_eq!(huge, huge_before);
+        }
+    }
+}
