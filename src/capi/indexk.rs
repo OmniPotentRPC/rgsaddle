@@ -173,6 +173,9 @@ fn search_of(config: &RgsaddleIndexKConfig) -> Result<(MinModeConfig, BlockEigen
     if config.version.major != RGSADDLE_ABI_MAJOR {
         return Err(RGSADDLE_INVALID_PARAMETER);
     }
+    if config.flags != 0 {
+        return Err(RGSADDLE_INVALID_PARAMETER);
+    }
     if config.index < 1 || config.max_rotations < 0 || config.max_block_iterations <= 0 {
         return Err(RGSADDLE_INVALID_PARAMETER);
     }
@@ -201,6 +204,9 @@ pub(crate) fn read_modes(
         return Ok(None);
     }
     let count = n.checked_mul(k).ok_or(RGSADDLE_INVALID_PARAMETER)?;
+    if count == 0 {
+        return Ok(Some(Array2::zeros((n, k))));
+    }
     let raw = unsafe { slice::from_raw_parts(modes, count) };
     let mut block = Array2::zeros((n, k));
     for row in 0..n {
@@ -228,10 +234,10 @@ pub(crate) fn write_modes(modes: ndarray::ArrayView2<f64>, out: &mut [f64]) {
 /// starting directions. Both are copied. The index `k` is `config.index`.
 ///
 /// Returns NULL, with no other diagnostic, for a NULL `config` or `position`,
-/// `n_atoms < 1`, a config of another ABI major, `index < 1` or above
-/// `3 * n_atoms`, a negative `max_rotations`, a non-positive
-/// `max_block_iterations`, an unknown `method`, or seed modes the core crate
-/// rejects. Free the result with [`rgsaddle_indexk_free`].
+/// `n_atoms < 1`, a config of another ABI major, nonzero reserved `flags`,
+/// `index < 1` or above `3 * n_atoms`, a negative `max_rotations`, a
+/// non-positive `max_block_iterations`, an unknown `method`, or seed modes
+/// the core crate rejects. Free the result with [`rgsaddle_indexk_free`].
 ///
 /// # Safety
 /// `config` is valid for reads. `position` holds `3 * n_atoms` doubles. `modes`
@@ -363,6 +369,21 @@ unsafe fn step_with(
     let Some(function) = surface else {
         return RGSADDLE_NULL_SURFACE;
     };
+    unsafe { step_with_body(session, function, hessian, user, out) }
+}
+
+/// Session step after the null checks in [`step_with`].
+///
+/// # Safety
+/// `session` and `out` are non-null. `function` is called with `user`.
+#[cfg(not(kani))]
+unsafe fn step_with_body(
+    session: *mut RgsaddleIndexK,
+    function: RgsaddleSurfaceFn,
+    hessian: Option<HostHessian>,
+    user: *mut c_void,
+    out: *mut RgsaddleReport,
+) -> i32 {
     let session = unsafe { &mut *session };
     let host = HostSurface::new(function, user, session.n_atoms, hessian);
     match session.session.step(&host) {
@@ -384,6 +405,24 @@ unsafe fn step_with(
         }
         Err(err) => status_of(&err),
     }
+}
+
+/// The null checks in [`step_with`] are the Kani contract. The session
+/// step calls `catch_unwind`, which this verifier cannot lower, so the
+/// proof stops before that body.
+///
+/// # Safety
+/// The pointer arguments are not read.
+#[cfg(kani)]
+unsafe fn step_with_body(
+    session: *mut RgsaddleIndexK,
+    function: RgsaddleSurfaceFn,
+    hessian: Option<HostHessian>,
+    user: *mut c_void,
+    out: *mut RgsaddleReport,
+) -> i32 {
+    let _ = (session, function, hessian, user, out);
+    RGSADDLE_NULL_SURFACE
 }
 
 /// Copy the current geometry, `3 * n_atoms` doubles in Angstrom, atom-major,
@@ -689,5 +728,57 @@ mod tests {
             .expect("callback")
             .expect("analytic action");
         assert_eq!(action, Array1::from_vec(vec![2.0, 0.0, -2.0]));
+    }
+
+    fn indexk_config() -> RgsaddleIndexKConfig {
+        RgsaddleIndexKConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            index: 1,
+            method: 0,
+            dr: 1e-3,
+            rotation_tol: 1e-4,
+            max_rotations: 20,
+            force_tol: 1e-3,
+            max_move: 0.2,
+            residual_tol: 1e-4,
+            max_block_iterations: 30,
+        }
+    }
+
+    #[test]
+    fn create_rejects_nonzero_reserved_flags() {
+        let position = [0.2_f64, -0.1, 0.3];
+        let config = indexk_config();
+        let session =
+            unsafe { rgsaddle_indexk_create(&config, 1, position.as_ptr(), std::ptr::null()) };
+        assert!(!session.is_null());
+        unsafe { rgsaddle_indexk_free(session) };
+        let mut rejected_config = config;
+        rejected_config.flags = 1;
+        let rejected = unsafe {
+            rgsaddle_indexk_create(&rejected_config, 1, position.as_ptr(), std::ptr::null())
+        };
+        assert!(rejected.is_null());
+    }
+
+    #[test]
+    fn read_modes_with_a_zero_count_does_not_slice_the_pointer() {
+        let unaligned = 1usize as *const f64;
+        let rows = read_modes(0, 3, unaligned).expect("zero rows");
+        assert_eq!(rows.expect("empty rows").dim(), (0, 3));
+        let columns = read_modes(4, 0, unaligned).expect("zero columns");
+        assert_eq!(columns.expect("empty columns").dim(), (4, 0));
+        let raw = [1.0, 2.0, 3.0, 4.0];
+        let block = read_modes(2, 2, raw.as_ptr())
+            .expect("block")
+            .expect("values");
+        assert_eq!(block[(0, 0)], 1.0);
+        assert_eq!(block[(0, 1)], 2.0);
+        assert_eq!(block[(1, 0)], 3.0);
+        assert_eq!(block[(1, 1)], 4.0);
     }
 }

@@ -111,10 +111,13 @@ impl std::fmt::Display for LandscapeBoundKind {
 /// `search.k` is replaced on each leg by the child index, and
 /// `search.negative_tol` is replaced by `certificate.negative_tol`, so leg
 /// convergence and certification always agree on which curvatures count
-/// as negative. The child index-k search clears `search.search.saddle_check`
-/// and `search.search.artn` on its own copy, so a certificate escape does not
-/// run inside a leg. The landscape certifies every accepted point with
-/// [`LandscapeConfig::certificate`]. `certificate.escape` is not read.
+/// as negative. Each leg copies `search.search` and clears `saddle_check`
+/// and `artn` before the index-k search. `artn` is the ART nouveau
+/// activation. [`IndexKSession::new`] already clears `saddle_check` on
+/// the one-mode session. [`LandscapeSession::new`] still rejects an
+/// invalid `saddle_check`, an invalid `artn`, and an invalid
+/// [`SaddleIndexCheck::escape`]. Accepted points are certified with
+/// [`LandscapeConfig::certificate`] after `escape` is set to `None`.
 ///
 /// The parent and every saddle leg stop on [`crate::MinModeConfig::force_tol`].
 /// A minimum stops on [`RelaxConfig::force_tol`]. All three measure the

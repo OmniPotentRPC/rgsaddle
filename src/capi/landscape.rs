@@ -108,7 +108,13 @@ fn read_cell(cell: *const f64) -> Result<Option<Cell>, i32> {
 }
 
 fn config_of(config: &RgsaddleLandscapeConfig) -> Result<LandscapeConfig, i32> {
-    if config.version.major != RGSADDLE_ABI_MAJOR || config.max_block_iterations <= 0 {
+    if config.version.major != RGSADDLE_ABI_MAJOR {
+        return Err(RGSADDLE_INVALID_PARAMETER);
+    }
+    if config.flags != 0 {
+        return Err(RGSADDLE_INVALID_PARAMETER);
+    }
+    if config.max_block_iterations <= 0 {
         return Err(RGSADDLE_INVALID_PARAMETER);
     }
     let (kind, block) = match config.method {
@@ -403,6 +409,7 @@ pub unsafe extern "C" fn rgsaddle_landscape_node(
 /// Unstable modes of one node, row-major, `3 * n_atoms` by the saddle index.
 ///
 /// `modes` NULL writes `n_columns` and returns. A minimum has no columns.
+/// A non-NULL `modes` pointer is left unread when the column count is zero.
 ///
 /// # Safety
 /// `modes`, when non-NULL, holds `(3 * n_atoms) * n_columns` doubles after
@@ -440,6 +447,9 @@ pub unsafe extern "C" fn rgsaddle_landscape_modes(
         return RGSADDLE_OK;
     }
     let count = node.modes.len();
+    if count == 0 {
+        return RGSADDLE_OK;
+    }
     let out = unsafe { slice::from_raw_parts_mut(modes, count) };
     write_modes(node.modes.view(), out);
     RGSADDLE_OK
@@ -562,5 +572,65 @@ mod layout_tests {
         stamp(&mut report);
         assert_eq!(report.flags, 0);
         assert_eq!(report.version.minor, RGSADDLE_ABI_MINOR);
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::{
+        RGSADDLE_OK, RgsaddleLandscape, rgsaddle_landscape_config_default,
+        rgsaddle_landscape_create, rgsaddle_landscape_free, rgsaddle_landscape_modes,
+    };
+    use crate::landscape::{CriticalPoint, LandscapeConfig, LandscapeSession, PathwayMap};
+    use ndarray::{Array1, Array2};
+
+    #[test]
+    fn create_rejects_nonzero_reserved_flags() {
+        let mut config = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { rgsaddle_landscape_config_default(&mut config) },
+            RGSADDLE_OK
+        );
+        assert_eq!(config.flags, 0);
+        let position = [0.0_f64; 3];
+        let session = unsafe {
+            rgsaddle_landscape_create(&config, 1, position.as_ptr(), std::ptr::null(), 0)
+        };
+        assert!(!session.is_null());
+        unsafe { rgsaddle_landscape_free(session) };
+        config.flags = 1;
+        let rejected = unsafe {
+            rgsaddle_landscape_create(&config, 1, position.as_ptr(), std::ptr::null(), 0)
+        };
+        assert!(rejected.is_null());
+    }
+
+    #[test]
+    fn modes_of_a_minimum_leave_a_non_null_pointer_unread() {
+        let session = LandscapeSession::new(LandscapeConfig::default(), Array1::zeros(3), None)
+            .expect("default landscape");
+        let map = PathwayMap {
+            nodes: vec![CriticalPoint {
+                position: Array1::zeros(3),
+                energy: 0.0,
+                index: 0,
+                curvatures: vec![1.0, 2.0, 3.0],
+                modes: Array2::zeros((3, 0)),
+                evaluations: 1,
+            }],
+            edges: Vec::new(),
+            evaluations: 1,
+        };
+        let session = Box::into_raw(Box::new(RgsaddleLandscape {
+            session,
+            n_atoms: 1,
+            map: Some(map),
+        }));
+        let mut columns = -1;
+        let unaligned = 1usize as *mut f64;
+        let status = unsafe { rgsaddle_landscape_modes(session, 0, unaligned, &mut columns) };
+        assert_eq!(status, RGSADDLE_OK);
+        assert_eq!(columns, 0);
+        unsafe { rgsaddle_landscape_free(session) };
     }
 }

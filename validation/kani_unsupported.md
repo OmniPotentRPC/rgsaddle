@@ -11,9 +11,10 @@ harness is 1.
 Lengths are a `u8` or an `i8`. The same harnesses with an `i64`
 nondeterministic length did not finish in 90 seconds, and a hosted
 runner was stopped while `cap_max_abs` was still running. That was the
-encoding of the length, not an unsupported construct. No callee is
-stubbed: the session body is not reached, and replacing it would drop
-the real function from the proof. No harness is deferred to a schedule.
+encoding of the length, not an unsupported construct. No harness is
+deferred to a schedule. The session body is not reached. One body is
+replaced under `cfg(kani)`, described below, because leaving it in the
+proof drops the build. Every other callee is the real function.
 A shard that does not report success fails the workflow.
 
 The prove step is the only `cargo kani` invocation. It passes
@@ -26,6 +27,14 @@ dimension 128. A larger block uses faer inside `exact_eigh` when the
 feature is on, and panics if that call is reached with the feature
 off. The sella harnesses do not enable a feature or a dependency the
 other shards lack.
+
+`rgsaddle_indexk_step_at` is the one stub. Its null checks stay in
+`step_with`, which the harness calls. The session step after those
+checks is `step_with_body`. Under `cfg(kani)` that function returns
+before the session, because the real body calls `catch_unwind` and
+Kani 0.68 still requires that intrinsic to return `i32` (the toolchain
+returns `bool`). Replacing only that body keeps the real checks in the
+proof. Every other harness calls the real function with no stub.
 
 `model-checking/kani-github-action` defaults to `cargo-kani` with no
 arguments. That command enables `faer` and compiles `pulp` before this
@@ -40,8 +49,8 @@ guards return on a null pointer or a non-positive length before
 With the feature off those functions still compile, and they panic if
 reached, so a harness that entered them would fail.
 
-`cap_max_abs` is two harnesses, null and short. The other 27 entry
-points keep both obligations in one harness. That is 29 proofs of 28
+`cap_max_abs` is two harnesses, null and short. The other 29 entry
+points keep both obligations in one harness. That is 31 proofs of 30
 functions.
 
 Kani 0.68.0, CBMC 6.11.0, on this machine. The command was
@@ -79,11 +88,16 @@ The time column is CBMC's `Verification Time`.
 | `internal_pes_create_dummies_null_and_short` | `rgsaddle_internal_pes_create_dummies` | success, 0 failed | 0.956 |
 | `internal_pes_create_from_find_null_and_short` | `rgsaddle_internal_pes_create_from_find` | success, 0 failed | 1.749 |
 | `place_perp_dummy_null_and_short` | `rgsaddle_place_perp_dummy` | success, 0 failed | 0.622 |
+| `landscape_create_null_and_short` | `rgsaddle_landscape_create` | success, 0 failed | 2.010 |
+| `indexk_step_at_null_and_short` | `rgsaddle_indexk_step_at` | success, 0 failed | 0.073 |
 
 Not harnesses, because the signature has no length:
 
 * Pointer-only entry points, including `rgsaddle_abi_stamp`,
   `rgsaddle_band_step`, and the `free` functions.
+  `rgsaddle_indexk_step_at` is the exception: it has no length, and
+  the harness checks a null session and a null report. Both return
+  before the session is read.
 * `rgsaddle_internal_pes_n_int`, which writes a count and does not take
   a length.
 * A positive length with a live buffer. After the guard the body builds

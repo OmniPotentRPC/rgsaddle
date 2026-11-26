@@ -1738,7 +1738,7 @@ typedef struct {
 /**
  * Create an index-k session. position holds 3 * n_atoms doubles.
  * modes is row-major (3 * n_atoms) by k, or NULL for the coordinate seed.
- * Returns NULL on an unknown major, a non-positive k, or a bad shape.
+ * Returns NULL on an unknown major, nonzero reserved flags, a non-positive k, or a bad shape.
  */
 RgsaddleIndexK *rgsaddle_indexk_create(const rgsaddle_indexk_config_t *config,
                                        int64_t n_atoms, const double *position,
@@ -2387,7 +2387,9 @@ rgsaddle_status_t rgsaddle_landscape_node(const RgsaddleLandscape *session, int6
                                           double *curvatures, int32_t curvature_capacity,
                                           int32_t *n_curvatures, int64_t *evaluations);
 
-/** Unstable modes, row-major, 3 * n_atoms by the saddle index. modes NULL queries n_columns. */
+/** Unstable modes, row-major, 3 * n_atoms by the saddle index. modes NULL queries n_columns.
+ * A node with no columns leaves a non-NULL modes pointer unread.
+ */
 rgsaddle_status_t rgsaddle_landscape_modes(const RgsaddleLandscape *session, int64_t node,
                                            double *modes, int32_t *n_columns);
 

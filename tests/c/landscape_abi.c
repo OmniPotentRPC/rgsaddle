@@ -110,6 +110,14 @@ static int verify_wells_map(RgsaddleLandscape *session, const rgsaddle_landscape
           return 1;
         }
       }
+    } else {
+      unsigned char storage[sizeof(double) + 1];
+      memset(storage, 0x5a, sizeof storage);
+      double *unaligned = (double *)(void *)(storage + 1);
+      st = rgsaddle_landscape_modes(session, i, unaligned, &ncols);
+      if (st != RGSADDLE_OK || ncols != 0) {
+        return fail("zero-column modes read a non-null pointer", st);
+      }
     }
   }
   if (indices[0] != 2 || counts[2] != 1 || counts[1] != 4 || counts[0] != 4) {
@@ -168,6 +176,11 @@ int main(void) {
       rgsaddle_landscape_create(&cfg, 1, origin, NULL, 1) != NULL) {
     return fail("invalid create inputs were accepted", RGSADDLE_INVALID_PARAMETER);
   }
+  cfg.flags = 1;
+  if (rgsaddle_landscape_create(&cfg, 1, origin, NULL, 0) != NULL) {
+    return fail("nonzero reserved flags were accepted", RGSADDLE_INVALID_PARAMETER);
+  }
+  cfg.flags = 0;
 
   cfg.push = 0.5;
   cfg.duplicate_distance = 1.0e-2;

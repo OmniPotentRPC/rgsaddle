@@ -8,9 +8,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ndarray::{Array1, ArrayView1, array};
 use rgsaddle::{
-    Cell, CriticalPoint, ForceGate, IndexKConfig, IndexKSession, LandscapeBoundKind,
+    ArtNConfig, Cell, CriticalPoint, ForceGate, IndexKConfig, IndexKSession, LandscapeBoundKind,
     LandscapeConfig, LandscapeSession, MinModeConfig, MinModeStatus, NEGATIVE_CURVATURE_TOL,
-    PathwayMap, PointSurface, RelaxConfig, SaddleError, SaddleIndexCheck, saddle_index,
+    PathwayMap, PointSurface, RelaxConfig, SaddleError, SaddleEscape, SaddleIndexCheck,
+    saddle_index,
 };
 
 const SIDE: f64 = std::f64::consts::FRAC_1_SQRT_2;
@@ -1117,4 +1118,55 @@ fn landscape_config_setters_cover_every_field() {
     assert_eq!(config.certificate.negative_tol, 2.0e-4);
     assert_eq!(config.force_gate, ForceGate::L2Norm);
     assert_eq!(config.cell.map(|cell| cell.0), Some(cell.0));
+}
+
+#[test]
+fn landscape_new_rejects_invalid_saddle_check_artn_and_escape() {
+    let parent = array![0.0, 0.0, 0.0];
+    let bad_check = LandscapeConfig::default().with_search(IndexKConfig::new(
+        1,
+        MinModeConfig::default()
+            .with_saddle_check(Some(SaddleIndexCheck::default().with_negative_tol(-1.0))),
+    ));
+    assert!(matches!(
+        LandscapeSession::new(bad_check, parent.clone(), None),
+        Err(SaddleError::Invalid(_))
+    ));
+
+    let bad_artn = LandscapeConfig::default().with_search(IndexKConfig::new(
+        1,
+        MinModeConfig::default().with_artn(ArtNConfig::default()),
+    ));
+    assert!(matches!(
+        LandscapeSession::new(bad_artn, parent.clone(), None),
+        Err(SaddleError::Invalid(_))
+    ));
+
+    let bad_escape = LandscapeConfig::default().with_certificate(
+        SaddleIndexCheck::default().with_escape(Some(SaddleEscape::default().with_push(0.0))),
+    );
+    assert!(matches!(
+        LandscapeSession::new(bad_escape, parent, None),
+        Err(SaddleError::Invalid(_))
+    ));
+}
+
+#[test]
+fn landscape_docs_name_artn_activation_and_kept_validation() {
+    let howto = include_str!("../docs/orgmode/howto/landscape.org");
+    let source = include_str!("../src/landscape.rs");
+    for text in [howto, source] {
+        assert!(
+            !text.contains("certificate escape does not"),
+            "clearing artn is the ART nouveau activation, separate from escape"
+        );
+        assert!(
+            text.contains("ART nouveau"),
+            "the wording should name the ART nouveau activation"
+        );
+    }
+    assert!(howto.contains("=IndexKSession::new="));
+    assert!(source.contains("IndexKSession::new"));
+    assert!(howto.contains("invalid =escape="));
+    assert!(source.contains("SaddleIndexCheck::escape"));
 }

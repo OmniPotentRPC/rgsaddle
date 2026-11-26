@@ -445,3 +445,15 @@ fn non_landscape_negative_tol_boundary_is_strict() {
         MinModeStatus::Converged
     );
 }
+
+#[test]
+fn indexk_howto_passes_the_positive_curvature_threshold() {
+    let text = include_str!("../docs/orgmode/howto/indexk.org");
+    assert!(
+        !text.contains("=-NEGATIVE_CURVATURE_TOL="),
+        "with_negative_tol takes the positive tolerance"
+    );
+    assert!(text.contains("=NEGATIVE_CURVATURE_TOL="));
+    assert!(text.contains("non-negative"));
+    assert!(text.contains("=IndexKSession::new= rejects a negative threshold"));
+}
