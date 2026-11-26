@@ -4045,13 +4045,15 @@ impl BandSession {
     /// Drop optimizer history and keep the climbing image, its
     /// baseline, and the cached surface values. A hand-off that moved
     /// an image outside the solver uses this so the next band step
-    /// does not inherit a stale quasi-Newton pair.
+    /// does not inherit a stale quasi-Newton pair. The ODE12r
+    /// rejection count restarts with the stepper.
     pub(crate) fn forget_optimizer(&mut self) {
         self.forget_solver_state();
         self.clear_string_state();
         self.free_end_state.endpoint_dt = None;
         self.free_end_state.prev_end_pos = None;
         self.free_end_state.prev_end_force = None;
+        self.unmoved = 0;
         if let Some(rtr) = &mut self.rtr {
             let gate = self.state.force_gate;
             *rtr = crate::rtr::BandRtr::new(rtr.config, false);
@@ -4117,11 +4119,12 @@ impl BandSession {
     }
 
     /// The model-update boundary: drop quasi-Newton history, the
-    /// climbing baseline, the armed climbing image, and every cached
-    /// surface value (endpoint energies, the last evaluation, and the
-    /// dynamic NEB image answers, step and origin). The next
-    /// evaluation carries the whole band. Use it when the surface
-    /// itself changed (a surrogate refit, a new calculator setting).
+    /// climbing baseline, the armed climbing image, the ODE12r
+    /// rejection count, and every cached surface value (endpoint
+    /// energies, the last evaluation, and the dynamic NEB image
+    /// answers, step and origin). The next evaluation carries the
+    /// whole band. Use it when the surface itself changed (a surrogate
+    /// refit, a new calculator setting).
     pub fn reset(&mut self) {
         self.restart();
         self.state.set_endpoints(None);
@@ -6201,5 +6204,50 @@ mod tests {
             assert_abs_diff_eq!(last.energies[i + 1], *want, epsilon = 1e-12);
             assert_abs_diff_eq!(last.gradients[(i + 1, 0)], scale, epsilon = 1e-12);
         }
+    }
+
+    /// `E = 20 y^2`. The opening ODE12r step of length 1 overshoots and
+    /// the trial is rejected, so the band stays where it was.
+    struct StiffValley;
+
+    impl BandSurface for StiffValley {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                let y = row[1];
+                energies[i] = 20.0 * y * y;
+                gradients[(i, 0)] = 0.0;
+                gradients[(i, 1)] = 40.0 * y;
+                gradients[(i, 2)] = 0.0;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reset_then_step_matches_a_fresh_session_after_ode12r_rejections() {
+        let band = array![[0.0, 0.0, 0.0], [1.0, 0.5, 0.0], [2.0, 0.0, 0.0]];
+        let config = BandConfig::default()
+            .with_spring(SpringKind::Uniform { k: 0.0 })
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_max_move(0.0)
+            .with_method(Method::Ode12r);
+        let mut aged = BandSession::new(config.clone(), band.clone()).unwrap();
+        aged.unmoved = 64;
+        aged.reset();
+        let mut fresh = BandSession::new(config, band).unwrap();
+        assert_eq!(aged.unmoved, fresh.unmoved);
+        let aged_step = aged.step(&StiffValley).expect("reset session steps");
+        let fresh_step = fresh.step(&StiffValley).expect("fresh session steps");
+        assert_eq!(aged_step.status, fresh_step.status);
+        assert_eq!(aged_step.status, BandStatus::Running);
+        assert_eq!(aged.positions(), fresh.positions());
+        assert_eq!(aged.unmoved, fresh.unmoved);
     }
 }

@@ -1,0 +1,1 @@
+~BandSession::reset~ restarts the ODE12r rejection count with the stepper, so a new surface is not reported stalled on its first unchanged trial.
