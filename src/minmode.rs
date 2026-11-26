@@ -1922,6 +1922,7 @@ pub struct MinModeSession {
     /// A Krylov that only hit its dimension cap does not, so the next
     /// estimate at this point keeps iterating instead of returning
     /// the truncated vector after one product.
+    /// [`MinModeSession::reset`] clears it with the Krylov block.
     lanczos_ready: bool,
     /// Krylov basis kept across [`MinModeSession::push_estimate`]
     /// calls at one geometry. [`MinModeSession::estimate_mode`] and
@@ -2218,8 +2219,8 @@ impl MinModeSession {
     }
 
     /// The Krylov vectors and Hessian actions of the last Lanczos
-    /// estimate, empty after a dimer rotation or when the surface
-    /// excludes directions.
+    /// estimate, empty after a dimer rotation, when the surface
+    /// excludes directions, or after [`MinModeSession::reset`].
     pub fn krylov_block(&self) -> &[(Array1<f64>, Array1<f64>)] {
         &self.krylov
     }
@@ -2371,9 +2372,10 @@ impl MinModeSession {
     }
 
     /// Drop optimizer history, dimer rotation history, carried
-    /// curvature, the FIRE stall latch, and the cached centre gradient
-    /// at a surface-epoch boundary. The mode stays as the next seed.
-    /// The saddle-index certificate and the escape count go too.
+    /// curvature, the FIRE stall latch, the Lanczos Krylov block, and
+    /// the cached centre gradient at a surface-epoch boundary. The
+    /// mode stays as the next seed. The saddle-index certificate and
+    /// the escape count go too.
     pub fn reset(&mut self) {
         self.forget_search();
         self.saddle.certified = None;
@@ -2393,6 +2395,8 @@ impl MinModeSession {
         self.fire_stall_force = f64::NAN;
         self.fire_stall_energy = f64::NAN;
         self.fire_stall_count = 0;
+        self.krylov.clear();
+        self.lanczos_ready = false;
         self.capped_fire = None;
         self.solver_stepped = false;
         self.lbfgs_seeded = false;
@@ -4578,6 +4582,32 @@ mod tests {
         assert_eq!(stalled.mode(), fresh.mode());
         assert_abs_diff_eq!(stalled.curvature(), fresh.curvature(), epsilon = 0.0);
         assert_eq!(stalled.fire_stall_count, fresh.fire_stall_count);
+    }
+
+    #[test]
+    fn reset_then_step_matches_a_fresh_session_after_a_lanczos_estimate() {
+        let surface = DiagonalQuadratic(array![-10.0, 80.0, 2.0]);
+        let start = array![0.3, 0.2, 0.1];
+        let mode = array![1.0, 0.0, 0.0];
+        let config = MinModeConfig::default()
+            .with_kind(MinModeKind::Lanczos)
+            .with_krylov_dim(3)
+            .with_saddle_check(None);
+        let mut aged = MinModeSession::new(config.clone(), start, mode).unwrap();
+        aged.step(&surface).unwrap();
+        assert!(!aged.krylov_block().is_empty());
+        aged.reset();
+        let mut fresh =
+            MinModeSession::new(config, aged.position().to_owned(), aged.mode().to_owned())
+                .unwrap();
+        assert_eq!(aged.krylov_block(), fresh.krylov_block());
+        assert!(aged.krylov_block().is_empty());
+        aged.step(&surface).unwrap();
+        fresh.step(&surface).unwrap();
+        assert_eq!(aged.position(), fresh.position());
+        assert_eq!(aged.mode(), fresh.mode());
+        assert_eq!(aged.krylov_block(), fresh.krylov_block());
+        assert_abs_diff_eq!(aged.curvature(), fresh.curvature(), epsilon = 0.0);
     }
 
     #[test]

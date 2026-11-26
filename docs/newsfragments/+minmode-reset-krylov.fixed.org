@@ -1,0 +1,1 @@
+~MinModeSession::reset~ drops the Lanczos Krylov block and its early quit flag, so ~krylov_block~ is empty until the next estimate.
