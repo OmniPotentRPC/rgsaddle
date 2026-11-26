@@ -363,3 +363,82 @@ fn lj7_exits_are_index_one_reversible_and_reverts_fail() {
     assert!(again.reverted);
     assert_ne!(failed, ArtStatus::Connected);
 }
+
+/// Forces stay finite. The finite-difference action overflows on the
+/// opening Lanczos probe, and the Rayleigh value on the seed is NaN
+/// because that overflow sits on a coordinate the seed does not move.
+struct OpeningNanCurvature {
+    push: f64,
+    dr: f64,
+}
+
+impl PointSurface for OpeningNanCurvature {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let along = x[0] - self.push;
+        let off_axis = x[1].hypot(x[2]);
+        let probe = along > self.dr * 0.5 && along < self.dr * 2.0 && off_axis < 1.0e-8;
+        let mut gradient = Array1::zeros(x.len());
+        if probe {
+            gradient[1] = f64::MAX;
+        }
+        Ok((0.0, gradient))
+    }
+}
+
+#[test]
+fn opening_leg_does_not_keep_a_non_finite_curvature() {
+    let dr = 1.0e-3;
+    let push = 1.0;
+    let mode = MinModeConfig::default()
+        .with_kind(MinModeKind::Lanczos)
+        .with_saddle_check(None)
+        .with_krylov_dim(1)
+        .with_max_rotations(1)
+        .with_dr(dr);
+    let config = ArtConfig::default()
+        .with_mode(mode)
+        .with_push_length(push)
+        .with_max_pushes(2);
+    let mut session = ArtSession::new(
+        config,
+        Array1::zeros(3),
+        Array1::from_vec(vec![1.0, 0.0, 0.0]),
+        full_mask(3),
+    )
+    .expect("session");
+    let surface = OpeningNanCurvature { push, dr };
+    let sentinel = session.curvature().to_bits();
+
+    let pushed = session.step(&surface).expect("push");
+    assert_eq!(pushed.phase, ArtPhase::Perpendicular);
+    let relaxed = session.step(&surface).expect("perpendicular");
+    assert_eq!(relaxed.phase, ArtPhase::Lanczos);
+
+    let opened = session.step(&surface);
+    match &opened {
+        Ok(report) => assert!(
+            report.curvature.is_finite(),
+            "opening curvature {} status {:?} phase {:?}",
+            report.curvature,
+            report.status,
+            report.phase
+        ),
+        Err(SaddleError::NonFinite("ART curvature")) => {}
+        Err(other) => panic!("unexpected opening error: {other:?}"),
+    }
+    assert!(
+        matches!(opened, Err(SaddleError::NonFinite("ART curvature"))),
+        "non-finite opening curvature must fail the step, got {opened:?}"
+    );
+    assert_eq!(session.status(), ArtStatus::Running);
+    assert_eq!(session.phase(), ArtPhase::Lanczos);
+    assert_eq!(session.curvature().to_bits(), sentinel);
+    let outcome = session.outcome();
+    assert_eq!(outcome.status, ArtStatus::Running);
+    assert_eq!(outcome.phase, ArtPhase::Lanczos);
+    assert_ne!(outcome.phase, ArtPhase::Push);
+    assert_ne!(outcome.status, ArtStatus::Exhausted);
+    assert_eq!(outcome.curvature.to_bits(), sentinel);
+    assert!(outcome.curvature.is_nan());
+    assert!(session.curvature().is_nan());
+}

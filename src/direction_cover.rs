@@ -1373,15 +1373,25 @@ fn kernel(a: [f64; 3], b: [f64; 3], length_scale: f64) -> f64 {
     let chord2 = (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2);
     let scale2 = length_scale * length_scale;
     if scale2 == 0.0 {
-        if chord2 == 0.0 {
-            return 1.0;
-        }
-        if chord2 > 0.0 {
-            return 0.0;
-        }
-        return f64::NAN;
+        return zero_scale_kernel(chord2);
     }
     (-0.5 * chord2 / scale2).exp()
+}
+
+/// Zero-scale limit of [`kernel`].
+///
+/// One on a repeated direction (`chord2 == 0`), zero on a positive
+/// chord, and NaN when `chord2` is negative or not a real number.
+/// A squared Euclidean chord of two real points is never negative;
+/// that branch is the same non-ordered case as a NaN chord.
+fn zero_scale_kernel(chord2: f64) -> f64 {
+    if chord2 == 0.0 {
+        1.0
+    } else if chord2 > 0.0 {
+        0.0
+    } else {
+        f64::NAN
+    }
 }
 
 /// Lower Cholesky factor of a symmetric positive definite matrix.
@@ -1862,6 +1872,52 @@ mod tests {
         assert_eq!(kernel(here, here, length_scale), 1.0);
         assert_eq!(kernel(here, there, length_scale), 0.0);
         assert_eq!(kernel(here, here, 0.6), 1.0);
+    }
+
+    #[test]
+    fn kernel_at_scale_zero_is_the_repeated_direction_limit() {
+        let here = [0.0, 0.0, 1.0];
+        let there = [0.0, 1.0, 0.0];
+        assert_eq!(0.0 * 0.0, 0.0);
+        assert_eq!(kernel(here, here, 0.0), 1.0);
+        assert_eq!(kernel(here, there, 0.0), 0.0);
+        assert_eq!(kernel(here, here, -0.0), 1.0);
+        assert_eq!(kernel(here, there, -0.0), 0.0);
+    }
+
+    #[test]
+    fn kernel_subnormal_scale_uses_the_zero_scale_limit() {
+        let here = [0.0, 0.0, 1.0];
+        let there = [1.0, 0.0, 0.0];
+        let tiny = f64::from_bits(1);
+        let large = f64::from_bits(f64::MIN_POSITIVE.to_bits() - 1);
+        assert!(tiny.is_subnormal());
+        assert!(large.is_subnormal());
+        assert_eq!(tiny * tiny, 0.0);
+        assert_eq!(large * large, 0.0);
+        assert_eq!(kernel(here, here, tiny), 1.0);
+        assert_eq!(kernel(here, there, tiny), 0.0);
+        assert_eq!(kernel(here, here, large), 1.0);
+        assert_eq!(kernel(here, there, -large), 0.0);
+    }
+
+    #[test]
+    fn kernel_nan_or_negative_chord_at_zero_scale_is_not_a_number() {
+        let here = [0.0, 0.0, 1.0];
+        let nan_direction = [f64::NAN, 0.0, 0.0];
+        // inf - inf is not a real chord, so the squared length is NaN and
+        // the comparison against zero fails both ways. A negative squared
+        // chord cannot come from a real pair; it takes the same branch.
+        let opposed_infinities = [f64::INFINITY, 0.0, 0.0];
+        assert!(kernel(here, nan_direction, 0.0).is_nan());
+        assert!(kernel(opposed_infinities, opposed_infinities, 0.0).is_nan());
+        assert!(kernel(here, nan_direction, f64::from_bits(1)).is_nan());
+        assert!(zero_scale_kernel(-1.0).is_nan());
+        assert!(zero_scale_kernel(f64::NAN).is_nan());
+        assert!(zero_scale_kernel(f64::NEG_INFINITY).is_nan());
+        assert_eq!(zero_scale_kernel(0.0), 1.0);
+        assert_eq!(zero_scale_kernel(-0.0), 1.0);
+        assert_eq!(zero_scale_kernel(4.0), 0.0);
     }
 
     #[test]
