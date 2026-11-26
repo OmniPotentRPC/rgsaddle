@@ -1,0 +1,1 @@
+The C++ status-switch test compiles into a fresh temporary directory, so overlapping runs no longer share one executable path.

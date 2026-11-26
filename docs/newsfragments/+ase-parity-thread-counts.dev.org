@@ -1,0 +1,1 @@
+The AutoNEB parity calculator counts force calls on the calling thread, so a parallel run of its test no longer shares one counter.

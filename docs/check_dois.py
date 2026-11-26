@@ -527,6 +527,9 @@ def crossref_authors(doi: str) -> list[list[str]] | None:
             given = ""
         if not isinstance(family, str):
             family = ""
+        # Older Crossref deposits spell a slashed o or l as `o/` or `l/`, as in `So/rensen`.
+        given = re.sub(r"(?<=[OoLl])/", "", given)
+        family = re.sub(r"(?<=[OoLl])/", "", family)
         parsed.append(name_tokens(f"{given} {family}"))
     return parsed
 

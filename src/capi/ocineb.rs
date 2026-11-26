@@ -82,16 +82,23 @@ pub unsafe extern "C" fn rgsaddle_ocineb_create(
     if config.version.major != RGSADDLE_ABI_MAJOR || minmode.method == 3 {
         return std::ptr::null_mut();
     }
-    let dof = (3 * n_atoms) as usize;
+    let Some(dof) = super::f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
     let Some(parsed) = (unsafe { parse_band_config(band, n_images, dof, None) }) else {
         return std::ptr::null_mut();
     };
     let Some(minmode_config) = minmode_config_from(minmode) else {
         return std::ptr::null_mut();
     };
-    let total = dof * n_images as usize;
+    let Some(total) = super::f64_len(&[n_images, 3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(n_rows) = usize::try_from(n_images).ok() else {
+        return std::ptr::null_mut();
+    };
     let flat = unsafe { slice::from_raw_parts(positions, total) };
-    let Ok(initial) = Array2::from_shape_vec((n_images as usize, dof), flat.to_vec()) else {
+    let Ok(initial) = Array2::from_shape_vec((n_rows, dof), flat.to_vec()) else {
         return std::ptr::null_mut();
     };
     let per_image = parsed.per_image;

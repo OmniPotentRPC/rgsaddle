@@ -574,8 +574,13 @@ impl IndexKSession {
         max_steps: usize,
     ) -> Result<IndexKReport, SaddleError> {
         let mut report = self.step(surface)?;
-        while report.status == MinModeStatus::Running && report.iteration < max_steps {
+        let mut calls = 1usize;
+        while report.status == MinModeStatus::Running
+            && report.iteration < max_steps
+            && calls < max_steps
+        {
             report = self.step(surface)?;
+            calls += 1;
         }
         Ok(report)
     }

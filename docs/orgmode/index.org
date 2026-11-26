@@ -74,6 +74,7 @@ while report.status != BandStatus::Converged {
    howto/path-initialization
    howto/minmode
    howto/art
+   howto/direction-cover
    howto/indexk
    howto/landscape
    howto/solid-dimer

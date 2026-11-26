@@ -247,6 +247,40 @@ def lineb_solve(surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64]
     Fixed-energy LI-NEB path and optional harmonic rate. positions is (n_images, 3N). atom_masses is one positive mass per atom; molecular=False expands them to coordinates, molecular=True aligns the free molecule. The default callback receives one image. With batch_surface=True, surface(x) receives (rows, 3N) and returns (rows,) energies and (rows, 3N) gradients in input order. Call counts count geometries. beads=0 skips the rate and leaves log_rate_over_reactant as NaN. A calculator exception propagates. An unconverged search raises with the C status.
     """
 
+class AutonebReport:
+    @property
+    def status(self) -> int:
+        """1 when the last stage converged, otherwise 0."""
+
+    @property
+    def max_force(self) -> float:
+        """Largest force component of the last stage."""
+
+    @property
+    def ci_index(self) -> int:
+        """Climbing image, or -1."""
+
+    @property
+    def surface_rows(self) -> int:
+        """Rows passed to the surface. One row is one force call."""
+
+    @property
+    def n_images(self) -> int:
+        """Images in the finished band, endpoints included."""
+
+    @property
+    def iteration(self) -> int:
+        """Steps of the last stage."""
+
+    @property
+    def positions(self) -> NDArray[numpy.float64]:
+        """Copy of the finished band, shaped (n_images, 3N)."""
+
+def autoneb_run(surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]], positions: numpy.typing.NDArray[numpy.float64], k: float = 0.1, climb: bool = True, n_simul: int = 3, n_max: int = 7, force_tol: float = 0.025, local_force_tol: float = 0.025, local_max_steps: int = 10000, climb_max_steps: int = 10000, projection: str = 'neb', tangent: str = 'improved', remove_translation: bool = False, space_energy_ratio: float = 0.5, max_move: float = 0.2, idpp: bool = False, cell: numpy.typing.NDArray[numpy.float64] | None = None, fixed: numpy.typing.NDArray[numpy.uint8] | None = None) -> AutonebReport:
+    """
+    Run AutoNEB to completion (ABI minor 68). positions is (n_init >= 2, 3N). surface(x) receives (rows, 3N) and returns (energies, gradients). One row is one force call. The search stays on the calling thread.
+    """
+
 class SessionReport:
     @property
     def status(self) -> int:

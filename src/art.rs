@@ -21,8 +21,10 @@
 //! 8. [`ArtPhase::Report`] records whether the quenches are reversible
 //!    and [`run_events`] marks a later copy of the same saddle.
 //!
-//! Every `PointSurface::eval` performed for the session is appended to
-//! [`ArtSession::force_calls`]. The perpendicular block and the quenches
+//! The most recent `PointSurface::eval` calls are retained by
+//! [`ArtSession::force_calls`] in the bounded
+//! [`ArtConfig::force_call_window`]; [`ArtSession::force_call_count`]
+//! remains the total. The perpendicular block and the quenches
 //! are [`crate::relax_to_tolerance`]. The curvature and the climb are a
 //! Lanczos [`crate::MinModeSession`] with its ART-nouveau shortcut and
 //! its own saddle check left off, so those numerics are not copied.
@@ -66,6 +68,7 @@
 //! # Ok::<(), SaddleError>(())
 //! ```
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use ndarray::{Array1, Array2, ArrayView1};
@@ -75,6 +78,7 @@ use rgmin::Method;
 use crate::cell_log::M3;
 use crate::error::SaddleError;
 use crate::force::ForceGate;
+use crate::linalg::numerical_hvp;
 use crate::minmode::{FiniteDifference, MinModeConfig, MinModeKind, MinModeSession, PointSurface};
 use crate::relax::{RelaxConfig, relax_to_tolerance};
 use crate::saddle_index::{SaddleIndexCheck, saddle_index};
@@ -131,7 +135,10 @@ pub enum ArtStatus {
     NotIndexOne,
     /// A quench energy is not below the saddle.
     NotDownhill,
-    /// The lowest curvature became non-negative during the climb.
+    /// The lowest curvature became finite and non-negative during the
+    /// climb, along both the new estimate and the carried mode, and
+    /// stayed so after [`ArtConfig::index_one_recovery_attempts`]
+    /// restarts from the last accepted index-1 point.
     LostCurvature,
     /// The push budget, the climb budget, or [`ArtSession::run`]'s cap was spent.
     Exhausted,
@@ -184,6 +191,16 @@ pub struct ArtConfig {
     pub duplicate_rmsd: f64,
     /// Compare structures as identical atoms, up to permutation.
     pub permute_identical: bool,
+    /// Most recent force evaluations retained with their full positions.
+    /// The default is 64; the total evaluation count is kept separately.
+    pub force_call_window: usize,
+    /// Smallest absolute overlap accepted between consecutive climb modes.
+    pub mode_overlap_tol: f64,
+    /// Restarts from the last accepted index-1 point before the climb
+    /// gives up: with [`ArtStatus::LostCurvature`] when the rejected
+    /// curvature is finite and non-negative, otherwise with
+    /// [`SaddleError::ArtIndexOneLost`].
+    pub index_one_recovery_attempts: usize,
 }
 
 with_setters!(ArtConfig {
@@ -200,6 +217,9 @@ with_setters!(ArtConfig {
     with_basin_rmsd => basin_rmsd: val f64,
     with_duplicate_rmsd => duplicate_rmsd: val f64,
     with_permute_identical => permute_identical: val bool,
+    with_force_call_window => force_call_window: val usize,
+    with_mode_overlap_tol => mode_overlap_tol: val f64,
+    with_index_one_recovery_attempts => index_one_recovery_attempts: val usize,
 });
 
 impl Default for ArtConfig {
@@ -227,6 +247,9 @@ impl Default for ArtConfig {
             basin_rmsd: 0.08,
             duplicate_rmsd: 0.08,
             permute_identical: false,
+            force_call_window: 64,
+            mode_overlap_tol: std::f64::consts::FRAC_1_SQRT_2,
+            index_one_recovery_attempts: 6,
         }
     }
 }
@@ -272,6 +295,9 @@ impl ArtConfig {
             basin_rmsd: 0.08,
             duplicate_rmsd: 0.08,
             permute_identical: false,
+            force_call_window: 64,
+            mode_overlap_tol: std::f64::consts::FRAC_1_SQRT_2,
+            index_one_recovery_attempts: 6,
         }
     }
 
@@ -392,6 +418,14 @@ impl ArtConfig {
                 "ART push and climb budgets must be at least one".into(),
             ));
         }
+        if !(self.mode_overlap_tol.is_finite()
+            && self.mode_overlap_tol >= 0.0
+            && self.mode_overlap_tol <= 1.0)
+        {
+            return Err(SaddleError::Invalid(
+                "ART mode overlap tolerance must be finite and in [0, 1]".into(),
+            ));
+        }
         self.perpendicular.check()?;
         self.quench.check()?;
         if !(self.mode.force_tol.is_finite() && self.mode.force_tol > 0.0) {
@@ -470,6 +504,34 @@ pub struct ArtForceCall {
     pub max_force: f64,
 }
 
+#[derive(Debug)]
+struct CallLog {
+    calls: VecDeque<ArtForceCall>,
+    total: usize,
+    capacity: usize,
+}
+
+impl CallLog {
+    fn new(capacity: usize) -> Self {
+        Self {
+            calls: VecDeque::with_capacity(capacity),
+            total: 0,
+            capacity,
+        }
+    }
+
+    fn push(&mut self, call: ArtForceCall) {
+        self.total = self.total.saturating_add(1);
+        if self.capacity == 0 {
+            return;
+        }
+        if self.calls.len() == self.capacity {
+            self.calls.pop_front();
+        }
+        self.calls.push_back(call);
+    }
+}
+
 /// Reversibility of the two quenched images.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArtReversibility {
@@ -519,6 +581,10 @@ pub struct ArtReport {
 }
 
 /// A finished or partial event.
+///
+/// Non-exhaustive: [`ArtSession::outcome`] and [`run_events`] build it,
+/// and a pattern on it needs `..`.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct ArtOutcome {
     /// Verdict. [`ArtStatus::Running`] if the host stopped early.
@@ -563,8 +629,12 @@ pub struct ArtOutcome {
     pub reversibility: Option<ArtReversibility>,
     /// Earlier event in a [`run_events`] batch with the same saddle.
     pub duplicate_of: Option<usize>,
-    /// Every force evaluation of the event.
+    /// Most recent force evaluations of the event, bounded by
+    /// [`ArtConfig::force_call_window`].
     pub force_calls: Vec<ArtForceCall>,
+    /// Total force evaluations, including entries no longer in
+    /// [`Self::force_calls`].
+    pub force_call_count: usize,
 }
 
 /// One later event whose saddle matches an earlier one.
@@ -667,7 +737,19 @@ pub struct ArtSession {
     back_force: f64,
     reversibility: Option<ArtReversibility>,
     phases: Vec<ArtPhase>,
-    calls: Arc<Mutex<Vec<ArtForceCall>>>,
+    calls: Arc<Mutex<CallLog>>,
+    last_good: Option<IndexOneCheckpoint>,
+    recovery_attempts: usize,
+}
+
+#[derive(Clone)]
+struct IndexOneCheckpoint {
+    x: Array1<f64>,
+    mode: Array1<f64>,
+    gradient: Array1<f64>,
+    energy: f64,
+    curvature: f64,
+    max_force: f64,
 }
 
 impl ArtSession {
@@ -698,6 +780,7 @@ impl ArtSession {
         }
         let modes = MinModeSession::new(config.estimator(), minimum.clone(), direction.clone())?;
         let n = minimum.len();
+        let force_call_window = config.force_call_window;
         Ok(Self {
             config,
             gate: ForceGate::LinfNorm,
@@ -733,7 +816,9 @@ impl ArtSession {
             back_force: f64::NAN,
             reversibility: None,
             phases: Vec::new(),
-            calls: Arc::new(Mutex::new(Vec::new())),
+            calls: Arc::new(Mutex::new(CallLog::new(force_call_window))),
+            last_good: None,
+            recovery_attempts: 0,
         })
     }
 
@@ -768,21 +853,37 @@ impl ArtSession {
     }
 
     /// Last Lanczos curvature.
+    ///
+    /// A non-finite opening estimate or climb step returns
+    /// [`SaddleError::NonFinite`] and does not replace this value.
+    /// Before the first finite estimate this is NaN.
     #[must_use]
     pub fn curvature(&self) -> f64 {
         self.curvature
     }
 
-    /// Force evaluations so far, in order.
+    /// Retained force evaluations in chronological order.
+    ///
+    /// At most [`ArtConfig::force_call_window`] entries are returned.
+    /// Use [`Self::force_call_count`] for the total.
     #[must_use]
     pub fn force_calls(&self) -> Vec<ArtForceCall> {
         match self.calls.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poison) => poison.into_inner().clone(),
+            Ok(guard) => guard.calls.iter().cloned().collect(),
+            Err(poison) => poison.into_inner().calls.iter().cloned().collect(),
         }
     }
 
-    /// The event as it stands, including every force call.
+    /// Total force evaluations so far.
+    #[must_use]
+    pub fn force_call_count(&self) -> usize {
+        match self.calls.lock() {
+            Ok(guard) => guard.total,
+            Err(poison) => poison.into_inner().total,
+        }
+    }
+
+    /// The event as it stands, including its bounded force-call window.
     #[must_use]
     pub fn outcome(&self) -> ArtOutcome {
         ArtOutcome {
@@ -808,6 +909,7 @@ impl ArtSession {
             reversibility: self.reversibility,
             duplicate_of: None,
             force_calls: self.force_calls(),
+            force_call_count: self.force_call_count(),
         }
     }
 
@@ -916,12 +1018,19 @@ impl ArtSession {
         };
         self.modes.set_mode(seed)?;
         let estimate = self.modes.estimate_mode(&logged)?;
-        self.mode = estimate.mode;
-        self.curvature = estimate.curvature;
         match self.leg {
             Leg::Opening => {
+                // NaN and infinity fail the threshold comparison, so the
+                // event would push again or stop exhausted while carrying
+                // that value. Refuse the estimate instead of recording it.
+                if !estimate.curvature.is_finite() {
+                    return Err(SaddleError::NonFinite("ART curvature"));
+                }
+                self.mode = estimate.mode;
+                self.curvature = estimate.curvature;
                 if self.curvature < self.config.eigen_threshold {
                     self.leg = Leg::Climbing;
+                    self.save_index_one_checkpoint();
                     self.phase = ArtPhase::Climb;
                 } else if self.pushes >= self.config.max_pushes {
                     self.finish(ArtStatus::Exhausted);
@@ -930,9 +1039,24 @@ impl ArtSession {
                 }
             }
             Leg::Climbing => {
-                if !(self.curvature.is_finite() && self.curvature < 0.0) {
-                    self.finish(ArtStatus::LostCurvature);
-                } else if self.max_force <= self.config.mode.force_tol {
+                let overlap = estimate.mode.dot(&self.mode).abs();
+                let retained = estimate.curvature.is_finite()
+                    && estimate.curvature < 0.0
+                    && overlap.is_finite()
+                    && overlap >= self.config.mode_overlap_tol;
+                if retained {
+                    let mut mode = estimate.mode;
+                    if mode.dot(&self.mode) < 0.0 {
+                        mode.mapv_inplace(|value| -value);
+                    }
+                    self.mode = mode;
+                    self.curvature = estimate.curvature;
+                    self.recovery_attempts = 0;
+                    self.save_index_one_checkpoint();
+                } else if !self.recover_index_one(surface, estimate.curvature, overlap)? {
+                    return Ok(());
+                }
+                if self.max_force <= self.config.mode.force_tol {
                     self.phase = ArtPhase::Certify;
                 } else if self.climbs >= self.config.max_climbs {
                     self.finish(ArtStatus::Exhausted);
@@ -942,6 +1066,85 @@ impl ArtSession {
             }
         }
         Ok(())
+    }
+
+    fn save_index_one_checkpoint(&mut self) {
+        self.last_good = Some(IndexOneCheckpoint {
+            x: self.x.clone(),
+            mode: self.mode.clone(),
+            gradient: self.gradient.clone(),
+            energy: self.energy,
+            curvature: self.curvature,
+            max_force: self.max_force,
+        });
+    }
+
+    /// Keep the carried unstable direction when its direct Rayleigh
+    /// curvature remains negative. Otherwise restart from the last point
+    /// where the mode was accepted. Once the restarts are spent, a
+    /// finite non-negative estimate finishes the event as
+    /// [`ArtStatus::LostCurvature`] and a negative or non-finite one
+    /// is a lost mode.
+    fn recover_index_one<S: PointSurface>(
+        &mut self,
+        surface: &S,
+        rejected_curvature: f64,
+        overlap: f64,
+    ) -> Result<bool, SaddleError> {
+        let logged = Counting {
+            inner: surface,
+            log: Arc::clone(&self.calls),
+            gate: self.gate,
+            phase: ArtPhase::Lanczos,
+        };
+        let hv = numerical_hvp(
+            &logged,
+            self.x.view(),
+            self.gradient.view(),
+            self.mode.view(),
+            self.config.mode.dr,
+            self.config.mode.difference == FiniteDifference::Central,
+        )?;
+        let carried_curvature = self.mode.dot(&hv);
+        drop(logged);
+        if carried_curvature.is_finite() && carried_curvature < 0.0 {
+            self.curvature = carried_curvature;
+            self.recovery_attempts = 0;
+            self.save_index_one_checkpoint();
+            return Ok(true);
+        }
+
+        self.recovery_attempts = self.recovery_attempts.saturating_add(1);
+        if self.recovery_attempts > self.config.index_one_recovery_attempts {
+            if rejected_curvature.is_finite() && rejected_curvature >= 0.0 {
+                self.curvature = rejected_curvature;
+                self.finish(ArtStatus::LostCurvature);
+                return Ok(false);
+            }
+            return Err(SaddleError::ArtIndexOneLost {
+                attempts: self.recovery_attempts - 1,
+                curvature: rejected_curvature,
+                overlap,
+            });
+        }
+        let checkpoint = self.last_good.clone().ok_or(SaddleError::ArtIndexOneLost {
+            attempts: self.recovery_attempts,
+            curvature: rejected_curvature,
+            overlap,
+        })?;
+        self.x = checkpoint.x;
+        self.mode = checkpoint.mode;
+        self.gradient = checkpoint.gradient;
+        self.energy = checkpoint.energy;
+        self.curvature = checkpoint.curvature;
+        self.max_force = checkpoint.max_force;
+        let mut recovery_mode = self.config.estimator();
+        if recovery_mode.max_move > 0.0 {
+            recovery_mode.max_move *= 0.5_f64.powi(self.recovery_attempts as i32);
+        }
+        self.modes = MinModeSession::new(recovery_mode, self.x.clone(), self.mode.clone())?;
+        self.phase = ArtPhase::Climb;
+        Ok(false)
     }
 
     fn climb<S: PointSurface>(&mut self, surface: &S) -> Result<(), SaddleError> {
@@ -955,6 +1158,9 @@ impl ArtSession {
             .set_position(self.x.clone(), Some(self.gradient.clone()))?;
         self.modes.set_mode(self.mode.clone())?;
         let stepped = self.modes.step(&logged)?;
+        if !stepped.curvature.is_finite() {
+            return Err(SaddleError::NonFinite("ART curvature"));
+        }
         self.curvature = stepped.curvature;
         self.mode = self.modes.mode().to_owned();
         self.x = self.modes.position().to_owned();
@@ -986,6 +1192,9 @@ impl ArtSession {
             Some(self.mode.view()),
             &[],
         )?;
+        if found.curvatures.iter().any(|value| !value.is_finite()) {
+            return Err(SaddleError::NonFinite("ART curvature"));
+        }
         self.saddle_index = Some(found.index);
         self.certificate_converged = found.converged;
         self.curvatures = found.curvatures;
@@ -1096,10 +1305,7 @@ impl ArtSession {
     }
 
     fn call_len(&self) -> usize {
-        match self.calls.lock() {
-            Ok(guard) => guard.len(),
-            Err(poison) => poison.into_inner().len(),
-        }
+        self.force_call_count()
     }
 
     fn report(&self, evaluations: usize) -> ArtReport {
@@ -1145,7 +1351,10 @@ pub fn run_events<S: PointSurface>(
         })?;
         session
             .run(surface, max_steps)
-            .map_err(|error| SaddleError::Invalid(format!("ART event {index} failed: {error}")))?;
+            .map_err(|error| match error {
+                typed @ SaddleError::ArtIndexOneLost { .. } => typed,
+                other => SaddleError::Invalid(format!("ART event {index} failed: {other}")),
+            })?;
         outcomes.push(session.outcome());
     }
     let duplicates = assign_duplicates(
@@ -1325,7 +1534,7 @@ fn snap_to_plane(position: &mut Array1<f64>, anchor: &Array1<f64>, axis: &Array1
 fn observed_eval<S: PointSurface>(
     surface: &S,
     x: ArrayView1<f64>,
-    log: &Arc<Mutex<Vec<ArtForceCall>>>,
+    log: &Arc<Mutex<CallLog>>,
     gate: ForceGate,
     phase: ArtPhase,
 ) -> Result<(f64, Array1<f64>), SaddleError> {
@@ -1357,7 +1566,7 @@ fn observed_eval<S: PointSurface>(
     Ok((energy, gradient))
 }
 
-fn push_call(log: &Arc<Mutex<Vec<ArtForceCall>>>, call: ArtForceCall) {
+fn push_call(log: &Arc<Mutex<CallLog>>, call: ArtForceCall) {
     match log.lock() {
         Ok(mut guard) => guard.push(call),
         Err(poison) => poison.into_inner().push(call),
@@ -1366,7 +1575,7 @@ fn push_call(log: &Arc<Mutex<Vec<ArtForceCall>>>, call: ArtForceCall) {
 
 struct Counting<'a, S> {
     inner: &'a S,
-    log: Arc<Mutex<Vec<ArtForceCall>>>,
+    log: Arc<Mutex<CallLog>>,
     gate: ForceGate,
     phase: ArtPhase,
 }
@@ -1391,7 +1600,7 @@ impl<S: PointSurface> PointSurface for Counting<'_, S> {
 
 struct Hyperplane<'a, S> {
     inner: &'a S,
-    log: Arc<Mutex<Vec<ArtForceCall>>>,
+    log: Arc<Mutex<CallLog>>,
     gate: ForceGate,
     phase: ArtPhase,
     axis: Array1<f64>,
@@ -1773,6 +1982,28 @@ mod tests {
         }
     }
 
+    struct RotatedQuadratic {
+        negative: f64,
+        positive: f64,
+        cosine: f64,
+        sine: f64,
+    }
+
+    impl PointSurface for RotatedQuadratic {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let along = self.cosine * x[0] + self.sine * x[1];
+            let across = -self.sine * x[0] + self.cosine * x[1];
+            let mut gradient = x.to_owned();
+            gradient[0] = self.negative * along * self.cosine - self.positive * across * self.sine;
+            gradient[1] = self.negative * along * self.sine + self.positive * across * self.cosine;
+            let rest = x.iter().skip(2).map(|value| value * value).sum::<f64>();
+            Ok((
+                0.5 * (self.negative * along * along + self.positive * across * across + rest),
+                gradient,
+            ))
+        }
+    }
+
     fn well_config() -> ArtConfig {
         let mode = MinModeConfig::default()
             .with_kind(MinModeKind::Lanczos)
@@ -1783,6 +2014,7 @@ mod tests {
             .with_max_rotations(6);
         ArtConfig::default()
             .with_mode(mode)
+            .with_force_call_window(4_096)
             .with_push_length(0.8)
             .with_max_pushes(3)
             .with_max_climbs(25)
@@ -1988,6 +2220,9 @@ mod tests {
             basin_rmsd,
             duplicate_rmsd,
             permute_identical,
+            force_call_window,
+            mode_overlap_tol,
+            index_one_recovery_attempts,
         } = config;
         let MinModeConfig {
             kind,
@@ -2033,6 +2268,7 @@ mod tests {
             ("saddle.dr".into(), *saddle_dr),
             ("basin_rmsd".into(), *basin_rmsd),
             ("duplicate_rmsd".into(), *duplicate_rmsd),
+            ("mode_overlap_tol".into(), *mode_overlap_tol),
         ];
         let mut discrete = vec![
             ("mode.kind".to_string(), format!("{kind:?}")),
@@ -2056,6 +2292,11 @@ mod tests {
             ("saddle.seed".into(), format!("{seed:?}")),
             ("saddle.escape".into(), format!("{escape:?}")),
             ("permute_identical".into(), format!("{permute_identical:?}")),
+            ("force_call_window".into(), format!("{force_call_window:?}")),
+            (
+                "index_one_recovery_attempts".into(),
+                format!("{index_one_recovery_attempts:?}"),
+            ),
         ];
         for (name, relax) in [("perpendicular", perpendicular), ("quench", quench)] {
             let RelaxConfig {
@@ -2079,8 +2320,8 @@ mod tests {
     /// With unit mass a time is a length over the square root of an energy.
     /// A force is an energy per length and a curvature an energy per length
     /// squared. The Lanczos rotation stop is a relative residual and a
-    /// relative Ritz change, and the rotation angle is in radians, so
-    /// neither carries a unit. A dimer rotation stop is a curvature;
+    /// relative Ritz change, the rotation angle is in radians, and the mode
+    /// overlap is a cosine, so none carries a unit. A dimer rotation stop is a curvature;
     /// [`ArtConfig::scaled`] converts that reading when the mode is a dimer.
     fn dimension(name: &str) -> (f64, i32) {
         match name {
@@ -2097,7 +2338,7 @@ mod tests {
             "mode.force_tol" | "perpendicular.force_tol" | "quench.force_tol" => (1.0, -1),
             "eigen_threshold" | "saddle.residual_tol" | "saddle.negative_tol" => (1.0, -2),
             "mode.time_step" | "perpendicular.initial_step" | "quench.initial_step" => (-0.5, 1),
-            "mode.rotation_tol" | "mode.rotation_angle_tol" => (0.0, 0),
+            "mode.rotation_tol" | "mode.rotation_angle_tol" | "mode_overlap_tol" => (0.0, 0),
             other => panic!("no dimension recorded for {other}"),
         }
     }
@@ -2542,9 +2783,10 @@ mod tests {
         assert_eq!(report.saddle_index, Some(1));
         let outcome = session.outcome();
         assert_eq!(
-            outcome.force_calls.len(),
+            outcome.force_call_count,
             surface.calls.load(Ordering::Relaxed)
         );
+        assert!(outcome.force_calls.len() <= well_config().force_call_window);
         assert!(
             outcome
                 .force_calls
@@ -2642,6 +2884,180 @@ mod tests {
             assert_eq!(left.max_force.to_bits(), right.max_force.to_bits());
             assert_eq!(left.position, right.position);
         }
+    }
+
+    #[test]
+    fn large_active_mask_retains_the_index_one_mode() {
+        let dimensions = 3 * 500;
+        let minimum = Array1::zeros(dimensions);
+        let mut seed = Array1::zeros(dimensions);
+        seed[0] = 1.0;
+        let mut mask = Array1::zeros(dimensions);
+        mask[0] = 1.0;
+        let mode = MinModeConfig::default()
+            .with_kind(MinModeKind::Lanczos)
+            .with_krylov_dim(4)
+            .with_max_rotations(4)
+            .with_dr(1e-4);
+        let config = ArtConfig::default().with_mode(mode);
+        let mut session = ArtSession::new(config, minimum, seed.clone(), mask).unwrap();
+        session.leg = Leg::Climbing;
+        session.gradient.fill(0.0);
+        session.energy = 0.0;
+        session.max_force = 1.0;
+        session.curvature = -0.25;
+        let surface = RotatedQuadratic {
+            negative: -4.0,
+            positive: 1.0,
+            cosine: 0.5,
+            sine: 3.0_f64.sqrt() / 2.0,
+        };
+
+        session.lanczos(&surface).unwrap();
+
+        assert!(session.mode().dot(&seed) > 0.999_999);
+        assert!(session.curvature() < 0.0);
+        assert_eq!(session.phase(), ArtPhase::Climb);
+    }
+
+    #[test]
+    fn unrecoverable_index_one_loss_is_typed() {
+        let minimum = Array1::zeros(3);
+        let seed = array![1.0, 0.0, 0.0];
+        let config = ArtConfig::default()
+            .with_mode(
+                MinModeConfig::default()
+                    .with_kind(MinModeKind::Lanczos)
+                    .with_krylov_dim(3)
+                    .with_max_rotations(3)
+                    .with_dr(1e-4),
+            )
+            .with_mode_overlap_tol(0.9)
+            .with_index_one_recovery_attempts(0);
+        let mut session = ArtSession::new(config, minimum, seed, array![1.0, 0.0, 0.0]).unwrap();
+        session.leg = Leg::Climbing;
+        session.gradient.fill(0.0);
+        session.energy = 0.0;
+        session.max_force = 1.0;
+        session.curvature = -1.0;
+        session.save_index_one_checkpoint();
+        let surface = RotatedQuadratic {
+            negative: -1.0,
+            positive: 4.0,
+            cosine: 0.5,
+            sine: 3.0_f64.sqrt() / 2.0,
+        };
+
+        let error = session.lanczos(&surface).unwrap_err();
+
+        assert!(matches!(error, SaddleError::ArtIndexOneLost { .. }));
+        assert_eq!(session.status(), ArtStatus::Running);
+    }
+
+    #[test]
+    fn exhausted_curvature_recovery_finishes_as_lost_curvature() {
+        let minimum = Array1::zeros(3);
+        let seed = array![1.0, 0.0, 0.0];
+        let config = ArtConfig::default()
+            .with_mode(
+                MinModeConfig::default()
+                    .with_kind(MinModeKind::Lanczos)
+                    .with_krylov_dim(3)
+                    .with_max_rotations(3)
+                    .with_dr(1e-4),
+            )
+            .with_index_one_recovery_attempts(0);
+        let mut session = ArtSession::new(config, minimum, seed, array![1.0, 0.0, 0.0]).unwrap();
+        session.leg = Leg::Climbing;
+        session.gradient.fill(0.0);
+        session.energy = 0.0;
+        session.max_force = 1.0;
+        session.curvature = -1.0;
+        session.save_index_one_checkpoint();
+        let surface = RotatedQuadratic {
+            negative: 2.0,
+            positive: 4.0,
+            cosine: 0.5,
+            sine: 3.0_f64.sqrt() / 2.0,
+        };
+
+        session.lanczos(&surface).unwrap();
+
+        assert_eq!(session.status(), ArtStatus::LostCurvature);
+        assert_eq!(session.phase(), ArtPhase::Finished);
+        assert!(session.curvature() >= 0.0, "{}", session.curvature());
+    }
+
+    #[test]
+    fn non_finite_rejected_curvature_is_a_lost_mode() {
+        for rejected in [f64::INFINITY, f64::NAN] {
+            let minimum = Array1::zeros(3);
+            let seed = array![1.0, 0.0, 0.0];
+            let config = ArtConfig::default()
+                .with_mode(
+                    MinModeConfig::default()
+                        .with_kind(MinModeKind::Lanczos)
+                        .with_krylov_dim(3)
+                        .with_max_rotations(3)
+                        .with_dr(1e-4),
+                )
+                .with_index_one_recovery_attempts(0);
+            let mut session =
+                ArtSession::new(config, minimum, seed, array![1.0, 0.0, 0.0]).unwrap();
+            session.leg = Leg::Climbing;
+            session.gradient.fill(0.0);
+            session.energy = 0.0;
+            session.max_force = 1.0;
+            session.curvature = -1.0;
+            session.save_index_one_checkpoint();
+            let surface = RotatedQuadratic {
+                negative: 2.0,
+                positive: 4.0,
+                cosine: 1.0,
+                sine: 0.0,
+            };
+
+            let error = session
+                .recover_index_one(&surface, rejected, 0.25)
+                .unwrap_err();
+
+            match error {
+                SaddleError::ArtIndexOneLost {
+                    attempts,
+                    curvature,
+                    overlap,
+                } => {
+                    assert_eq!(attempts, 0);
+                    assert_eq!(overlap, 0.25);
+                    assert_eq!(curvature.to_bits(), rejected.to_bits());
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+            assert_eq!(session.status(), ArtStatus::Running);
+        }
+    }
+
+    #[test]
+    fn force_call_positions_are_bounded() {
+        let config = ArtConfig::default().with_force_call_window(3);
+        let session = ArtSession::new(
+            config,
+            array![-1.0, 0.0, 0.0],
+            array![1.0, 0.0, 0.0],
+            full_mask(3),
+        )
+        .unwrap();
+        let surface = Well {
+            calls: AtomicUsize::new(0),
+        };
+        for step in 0..10 {
+            let x = array![-1.0 + 0.01 * step as f64, 0.0, 0.0];
+            session.observe(&surface, x.view(), ArtPhase::Push).unwrap();
+        }
+        let calls = session.force_calls();
+        assert_eq!(session.force_call_count(), 10);
+        assert_eq!(calls.len(), 3);
+        assert!((calls[0].position[0] + 0.93).abs() < 1e-12);
     }
 
     fn run_well() -> Vec<ArtForceCall> {

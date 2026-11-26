@@ -2,9 +2,11 @@
 # Benchmark entry point for the full Cu V_iv cell-size campaign.
 #
 # The Mishin catalogue is generated once for every requested cell.  The
-# network assembly writes both the field-free (without correction) and
-# vector-dipole (with correction) estimators, so the two columns use the
-# same atomistic saddles and statistical samples.
+# network assembly writes both the vector-return estimator (dipole-biased
+# hops, return layer past the cutoff) and the vector-dipole estimator
+# (the same hops, matched to the field-free crystal outside the cutoff),
+# so the two closures use the same atomistic saddles and statistical
+# samples.  Neither is uncorrected; that is the no-strain-bias run.
 
 set -euo pipefail
 
@@ -23,7 +25,7 @@ cargo test --release --test mishin_cu defect_pair_cu_catalogue -- --ignored --ex
 
 target="${ROOT}/benchmarks/elastic_dipole_viv_series.csv"
 printf '%s\n' \
-    'cell_repeats,temperature_K,correction,estimator,V_iv_Omega,sigma_Omega,notes' \
+    'cell_repeats,temperature_K,closure,estimator,V_iv_Omega,sigma_Omega,notes' \
     >"${target}"
 
 IFS=',' read -r -a repeats_values <<<"${RGSADDLE_REPEATS}"
@@ -50,16 +52,16 @@ with source.open(newline="") as handle:
     for row in csv.DictReader(handle):
         estimator = row.get("estimator", "")
         if estimator.startswith("vector-return:"):
-            mode = "without"
+            mode = "return-layer"
         elif estimator.startswith("vector-dipole:"):
-            mode = "with"
+            mode = "matched"
         else:
             continue
         rows.append(
             {
                 "cell_repeats": repeats,
                 "temperature_K": row["temperature_K"],
-                "correction": mode,
+                "closure": mode,
                 "estimator": estimator.split(":", 1)[1],
                 "V_iv_Omega": row["volume_over_Omega"],
                 "sigma_Omega": row["sigma"],
@@ -73,7 +75,7 @@ with target.open("a", newline="") as handle:
         fieldnames=[
             "cell_repeats",
             "temperature_K",
-            "correction",
+            "closure",
             "estimator",
             "V_iv_Omega",
             "sigma_Omega",
@@ -83,7 +85,7 @@ with target.open("a", newline="") as handle:
     writer.writerows(rows)
 
 if not rows:
-    raise SystemExit("network volume produced no with/without correction rows")
+    raise SystemExit("network volume produced no vector-return or vector-dipole rows")
 PY
 done
 

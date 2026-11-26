@@ -8,8 +8,8 @@ use ndarray::{Array1, Array2, ArrayView1};
 use super::{
     RGSADDLE_ABI_MAJOR, RGSADDLE_ABI_MINOR, RGSADDLE_INVALID_PARAMETER, RGSADDLE_NO_EVALUATION,
     RGSADDLE_NULL_REPORT, RGSADDLE_NULL_SESSION, RGSADDLE_NULL_SURFACE, RGSADDLE_OK,
-    RgsaddleReport, RgsaddleSurfaceFn, RgsaddleSurfaceRequest, RgsaddleVersion, stamp_report,
-    status_of,
+    RGSADDLE_SHAPE, RgsaddleReport, RgsaddleSurfaceFn, RgsaddleSurfaceRequest, RgsaddleVersion,
+    f64_len, stamp_report, status_of,
 };
 use crate::capi_kappa::RgsaddleHessianFn;
 use crate::error::SaddleError;
@@ -38,8 +38,9 @@ pub struct RgsaddleIndexKConfig {
     /// eV/Angstrom^2. For Lanczos it is dimensionless: the lowest Ritz
     /// residual divided by the absolute Ritz value, and, with no host
     /// relative tolerance, the relative change of that value. A Ritz
-    /// value near zero compares the residual with this bound directly.
-    /// The core crate's default is 0.0001.
+    /// value whose magnitude is at most 1e-14 of the curvature scale,
+    /// the largest Hessian action norm the estimate has formed, divides
+    /// the residual by that scale. The core crate's default is 0.0001.
     pub rotation_tol: f64,
     /// Cap on dimer rotations, or Lanczos actions, in one step; zero or more.
     pub max_rotations: i64,
@@ -179,6 +180,9 @@ fn search_of(config: &RgsaddleIndexKConfig) -> Result<(MinModeConfig, BlockEigen
     if config.index < 1 || config.max_rotations < 0 || config.max_block_iterations <= 0 {
         return Err(RGSADDLE_INVALID_PARAMETER);
     }
+    let Ok(max_rotations) = usize::try_from(config.max_rotations) else {
+        return Err(RGSADDLE_INVALID_PARAMETER);
+    };
     let (kind, block) = match config.method {
         0 => (MinModeKind::Dimer, BlockEigenKind::Lobpcg),
         1 => (MinModeKind::Lanczos, BlockEigenKind::BlockLanczos),
@@ -189,7 +193,7 @@ fn search_of(config: &RgsaddleIndexKConfig) -> Result<(MinModeConfig, BlockEigen
         .with_kind(kind)
         .with_dr(config.dr)
         .with_rotation_tol(config.rotation_tol)
-        .with_max_rotations(config.max_rotations as usize)
+        .with_max_rotations(max_rotations)
         .with_force_tol(config.force_tol)
         .with_max_move(config.max_move);
     Ok((search, block))
@@ -203,7 +207,9 @@ pub(crate) fn read_modes(
     if modes.is_null() {
         return Ok(None);
     }
-    let count = n.checked_mul(k).ok_or(RGSADDLE_INVALID_PARAMETER)?;
+    let n_i = i64::try_from(n).map_err(|_| RGSADDLE_INVALID_PARAMETER)?;
+    let k_i = i64::try_from(k).map_err(|_| RGSADDLE_INVALID_PARAMETER)?;
+    let count = f64_len(&[n_i, k_i]).ok_or(RGSADDLE_INVALID_PARAMETER)?;
     if count == 0 {
         return Ok(Some(Array2::zeros((n, k))));
     }
@@ -256,8 +262,12 @@ pub unsafe extern "C" fn rgsaddle_indexk_create(
     let Ok((search, block)) = search_of(cfg) else {
         return std::ptr::null_mut();
     };
-    let k = cfg.index as usize;
-    let n = (3 * n_atoms) as usize;
+    let Some(n) = f64_len(&[3, n_atoms]) else {
+        return std::ptr::null_mut();
+    };
+    let Some(k) = f64_len(&[i64::from(cfg.index)]) else {
+        return std::ptr::null_mut();
+    };
     if k > n {
         return std::ptr::null_mut();
     }
@@ -445,7 +455,10 @@ pub unsafe extern "C" fn rgsaddle_indexk_position(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &*session };
-    let dst = unsafe { slice::from_raw_parts_mut(out, (3 * session.n_atoms) as usize) };
+    let Some(dof) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
+    let dst = unsafe { slice::from_raw_parts_mut(out, dof) };
     for (slot, value) in dst.iter_mut().zip(session.session.position().iter()) {
         *slot = *value;
     }
@@ -477,9 +490,17 @@ pub unsafe extern "C" fn rgsaddle_indexk_modes(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &*session };
-    let n = (3 * session.n_atoms) as usize;
-    let mode_out = unsafe { slice::from_raw_parts_mut(modes, n * session.k) };
-    let curve_out = unsafe { slice::from_raw_parts_mut(curvatures, session.k) };
+    let Ok(k) = i64::try_from(session.k) else {
+        return RGSADDLE_SHAPE;
+    };
+    let Some(count) = f64_len(&[3, session.n_atoms, k]) else {
+        return RGSADDLE_SHAPE;
+    };
+    let Some(k_len) = f64_len(&[k]) else {
+        return RGSADDLE_SHAPE;
+    };
+    let mode_out = unsafe { slice::from_raw_parts_mut(modes, count) };
+    let curve_out = unsafe { slice::from_raw_parts_mut(curvatures, k_len) };
     write_modes(session.session.modes(), mode_out);
     for (slot, value) in curve_out
         .iter_mut()
@@ -550,7 +571,9 @@ pub unsafe extern "C" fn rgsaddle_indexk_set_position(
         return RGSADDLE_INVALID_PARAMETER;
     }
     let session = unsafe { &mut *session };
-    let n = (3 * session.n_atoms) as usize;
+    let Some(n) = f64_len(&[3, session.n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let x = Array1::from(unsafe { slice::from_raw_parts(position, n) }.to_vec());
     let gradient = if gradient.is_null() {
         None
@@ -605,11 +628,17 @@ pub unsafe extern "C" fn rgsaddle_reflect_force(
     if std::ptr::eq(force, out as *const f64) {
         return RGSADDLE_INVALID_PARAMETER;
     }
-    let n = n as usize;
-    let k = k as usize;
-    let Some(count) = n.checked_mul(k) else {
+    let Some(n_len) = f64_len(&[n]) else {
         return RGSADDLE_INVALID_PARAMETER;
     };
+    let Some(k_len) = f64_len(&[k]) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let Some(count) = f64_len(&[n, k]) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
+    let n = n_len;
+    let k = k_len;
     let force_raw = unsafe { slice::from_raw_parts(force, n) };
     let mode_raw = unsafe { slice::from_raw_parts(modes, count) };
     let mut block = Array2::zeros((n, k));

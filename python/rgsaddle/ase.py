@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -1044,6 +1045,396 @@ class SingleCalculatorNEB(NEB):
         super().__init__(images, *args, **kwargs)
 
 
+def _kabsch(target: Float64, moving: Float64) -> Float64:
+    """``moving`` rotated and translated onto ``target`` at the least RMSD.
+
+    Kabsch's fit, the optimum ``ase.build.minimize_rotation_and_translation``
+    reaches for a non-periodic image. Rows are atoms. A reflection is not
+    a rotation, so the last singular direction flips when the fit would
+    otherwise mirror the image.
+    """
+    centre = moving.mean(axis=0)
+    target_centre = target.mean(axis=0)
+    p = moving - centre
+    q = target - target_centre
+    u, _s, vt = np.linalg.svd(p.T @ q)
+    flip = np.eye(3)
+    if np.linalg.det(u @ vt) < 0.0:
+        flip[2, 2] = -1.0
+    return np.asarray(p @ (u @ flip @ vt) + target_centre, dtype=np.float64)
+
+
+def _align_rows(rows: Float64, natoms: int) -> Float64:
+    """Each image of ``rows`` (images, 3N) fitted onto the one before it."""
+    aligned = np.array(rows, dtype=np.float64, copy=True).reshape(len(rows), natoms, 3)
+    for index in range(1, len(aligned)):
+        aligned[index] = _kabsch(aligned[index - 1], aligned[index])
+    return np.ascontiguousarray(aligned.reshape(len(rows), natoms * 3))
+
+
+def _pair_of(value: Any, name: str) -> tuple[float, float] | None:
+    """Two-stage ``(build, climb)`` number, or None when ``value`` is scalar."""
+    if isinstance(value, (list, tuple, np.ndarray)):
+        values = [float(v) for v in np.asarray(value, dtype=np.float64).reshape(-1)]
+        if len(values) != 2:
+            raise ValueError(f"{name}: expected one number or a pair, got {len(values)}")
+        return values[0], values[1]
+    return None
+
+
+@dataclass(frozen=True)
+class AutoNEBReport:
+    """Outcome of :meth:`AutoNEB.run`.
+
+    The fields are ``status``, ``max_force``, ``ci_index``,
+    ``surface_rows``, ``n_images``, ``iteration``, ``positions``, and
+    ``images``. ``status`` is 1 when the last stage met its force stop
+    and 0 when it ran out of steps, and ``converged`` is that test.
+    ``max_force`` is the largest force component of the last stage, in
+    the calculator's force units. ``iteration`` counts the steps of the
+    last stage. ``ci_index`` is the climbing image or -1,
+    ``surface_rows`` counts the force calls, and ``n_images`` includes
+    the endpoints. ``positions`` is the finished band, shaped
+    ``(n_images, 3N)``, and ``images`` holds the same band as ``Atoms``
+    with the calculators attached.
+    """
+
+    status: int
+    max_force: float
+    ci_index: int
+    surface_rows: int
+    n_images: int
+    iteration: int
+    positions: Float64
+    images: list[Any]
+
+    @property
+    def converged(self) -> bool:
+        return self.status == 1
+
+
+class AutoNEB:
+    """AutoNEB over endpoint images stored as ``prefix000.traj``.
+
+    Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016),
+    doi:10.1063/1.4961868. The growth, the spring rescaling, and the
+    window relaxation run in the Rust core. The constructor arguments
+    match ``ase.mep.AutoNEB``. ``world=None`` is ``ase.parallel.world``.
+    Image-parallel MPI (``parallel=True`` on more than one rank) is
+    refused. With ``parallel=False`` every rank runs the same search and
+    rank 0 alone writes the trajectories. The stored images must agree
+    on the atom count, the atomic numbers, ``pbc``, and the periodic
+    cell vectors, as ASE's ``NEB`` requires. The endpoints keep their
+    own ``Atoms`` records and a new interior image copies the start.
+    ``remove_rotation_and_translation=True`` removes the mean force in
+    the core and, for a free, non-periodic band, fits every image onto
+    the one before it (Kabsch) before and after the search, as
+    ``minimize_rotation_and_translation`` does. The
+    optimizer must be FIRE or a subclass of it: the steps are the
+    band's FIRE solver, and ``maxstep`` on that class is the per-atom
+    cap. A numeric signature default is that number. A default of
+    None uses the optimizer's documented ``defaults['maxstep']``,
+    which is the value ASE applies. ``smooth_curve=True`` is refused.
+    Final images are written back to ``prefixNNN.traj``.
+
+    ``run`` returns an :class:`AutoNEBReport`: ``status``, ``max_force``,
+    ``ci_index``, ``surface_rows``, ``n_images``, ``iteration``,
+    ``positions``, and ``images``. ``status`` and ``max_force`` tell a
+    caller whether the last stage converged, because ASE's own ``run``
+    returns nothing and an exhausted step budget is not an error.
+    ``all_images``, ``iteration``, ``status``, ``max_force``,
+    ``surface_rows``, and ``ci`` hold the same values after the call.
+    """
+
+    def __init__(
+        self,
+        attach_calculators: Any,
+        prefix: Any,
+        n_simul: int,
+        n_max: int,
+        iter_folder: str = "AutoNEB_iter",
+        fmax: Any = 0.025,
+        maxsteps: Any = 10000,
+        k: float = 0.1,
+        climb: bool = True,
+        method: str = "eb",
+        optimizer: Any = None,
+        remove_rotation_and_translation: bool = False,
+        space_energy_ratio: float = 0.5,
+        world: Any = None,
+        parallel: bool = True,
+        smooth_curve: bool = False,
+        interpolate_method: str = "idpp",
+    ) -> None:
+        del iter_folder
+        if smooth_curve:
+            raise NotImplementedError("smooth_curve is not this AutoNEB")
+        if interpolate_method not in ("idpp", "linear"):
+            raise ValueError("interpolate_method must be idpp or linear")
+        if method in ("spline", "string"):
+            raise NotImplementedError(
+                "AutoNEB method must be improvedtangent, aseneb, eb, or dneb"
+            )
+        if method not in ("improvedtangent", "aseneb", "eb", "dneb"):
+            raise NotImplementedError(
+                "AutoNEB method must be improvedtangent, aseneb, eb, or dneb"
+            )
+        if world is None:
+            import ase.parallel
+
+            world = ase.parallel.world
+        if parallel and int(getattr(world, "size", 1)) != 1:
+            raise NotImplementedError("this AutoNEB evaluates images on the calling thread")
+        self.attach_calculators = attach_calculators
+        self.prefix = str(prefix)
+        self.n_simul = int(n_simul)
+        self.n_max = int(n_max)
+        if self.n_simul < 1:
+            raise ValueError("n_simul must be at least 1")
+        if self.n_max < self.n_simul + 2:
+            raise ValueError("n_max must be at least n_simul + 2")
+        self.climb = bool(climb)
+        self.fmax = fmax
+        self.maxsteps = maxsteps
+        self.k = float(k)
+        self.method = method
+        self.remove_rotation_and_translation = bool(remove_rotation_and_translation)
+        self.space_energy_ratio = float(space_energy_ratio)
+        self.parallel = bool(parallel)
+        self.world = world
+        self.smooth_curve = False
+        self.interpolate_method = interpolate_method
+        self.optimizer = optimizer
+        self.all_images: list[Any] = []
+        self.iteration = 0
+        self.status = 0
+        self.max_force = float("nan")
+        self.surface_rows = 0
+        self.ci: int | None = None
+
+    def run(self) -> AutoNEBReport:
+        """Grow and relax the band, then report how the last stage ended.
+
+        Returns an :class:`AutoNEBReport` with ``status``, ``max_force``,
+        ``ci_index``, ``surface_rows``, ``n_images``, ``iteration``,
+        ``positions``, and ``images``.
+        """
+        from ase.io import read, write
+
+        from rgsaddle._core import autoneb_run
+
+        self._load(read)
+        if len(self.all_images) < 2:
+            raise ValueError("AutoNEB needs the two endpoints")
+        _check_images(self.all_images)
+        start, end = self.all_images[0], self.all_images[-1]
+        template = start
+        pool: list[Any] = []
+
+        def surface(x: Float64) -> tuple[Float64, Float64]:
+            rows = int(x.shape[0])
+            fresh: list[Any] = []
+            while len(pool) < rows:
+                image = template.copy()
+                pool.append(image)
+                fresh.append(image)
+            if fresh:
+                self.attach_calculators(fresh)
+            natoms = len(template)
+            energies = np.empty(rows, dtype=np.float64)
+            gradients = np.empty((rows, natoms * 3), dtype=np.float64)
+            for index in range(rows):
+                atoms = pool[index]
+                atoms.set_positions(
+                    np.asarray(x[index], dtype=np.float64).reshape(natoms, 3),
+                    apply_constraint=False,
+                )
+                energies[index] = float(atoms.get_potential_energy())
+                gradients[index] = -np.ascontiguousarray(
+                    atoms.get_forces(), dtype=np.float64
+                ).reshape(-1)
+            return energies, gradients
+
+        natoms = len(template)
+        positions = _image_positions(self.all_images)
+        rotate = self._can_align()
+        if rotate:
+            positions = _align_rows(positions, natoms)
+        local_fmax, force_tol = _staged(self.fmax)
+        local_steps, climb_steps = _staged_int(self.maxsteps)
+        report = autoneb_run(
+            surface,
+            positions,
+            k=self.k,
+            climb=self.climb,
+            n_simul=self.n_simul,
+            n_max=self.n_max,
+            force_tol=force_tol,
+            local_force_tol=local_fmax,
+            local_max_steps=local_steps,
+            climb_max_steps=climb_steps,
+            projection=self.method,
+            tangent="improved",
+            remove_translation=self.remove_rotation_and_translation,
+            space_energy_ratio=self.space_energy_ratio,
+            max_move=_optimizer_maxstep(self.optimizer),
+            idpp=self.interpolate_method == "idpp",
+            cell=_periodic_cell(self.all_images),
+            fixed=_fixed_atoms(self.all_images),
+        )
+        count = int(report.n_images)
+        finished = np.asarray(report.positions, dtype=np.float64)[:count]
+        if rotate:
+            finished = _align_rows(finished, natoms)
+        coords = finished.reshape(count, natoms, 3)
+        # Each endpoint keeps its own Atoms record. A new interior image
+        # copies the start, as ASE copies the image left of the cut.
+        self.all_images = []
+        for index in range(count):
+            image = (end if index == count - 1 else start).copy()
+            image.set_positions(coords[index], apply_constraint=False)
+            self.all_images.append(image)
+        self.attach_calculators(self.all_images)
+        self.iteration = int(report.iteration)
+        self.status = int(report.status)
+        self.max_force = float(report.max_force)
+        self.surface_rows = int(report.surface_rows)
+        self.ci = None if int(report.ci_index) < 0 else int(report.ci_index)
+        # Every rank runs the same serial search. One rank writes.
+        if int(getattr(self.world, "rank", 0)) == 0:
+            for index, image in enumerate(self.all_images):
+                write(f"{self.prefix}{index:03d}.traj", image)
+        barrier = getattr(self.world, "barrier", None)
+        if callable(barrier):
+            barrier()
+        return AutoNEBReport(
+            status=self.status,
+            max_force=self.max_force,
+            ci_index=int(report.ci_index),
+            surface_rows=self.surface_rows,
+            n_images=count,
+            iteration=self.iteration,
+            positions=finished,
+            images=self.all_images,
+        )
+
+    def _load(self, read: Any) -> None:
+        import os
+
+        if not os.path.isfile(f"{self.prefix}000.traj"):
+            raise OSError(f"No file with name {self.prefix}000.traj was found")
+        index_exists = [
+            i for i in range(self.n_max) if os.path.isfile(f"{self.prefix}{i:03d}.traj")
+        ]
+        if len(index_exists) < 2:
+            raise OSError("AutoNEB needs a start point and an end point")
+        for index, found in enumerate(index_exists):
+            if index != found:
+                raise OSError("AutoNEB files must be ordered sequentially without gaps")
+        self.all_images = [read(f"{self.prefix}{i:03d}.traj") for i in index_exists]
+        self.iteration = 0
+
+    def _can_align(self) -> bool:
+        """The rigid fit applies to a free, non-periodic band.
+
+        A periodic band keeps the mean force removal alone, as ASE drops
+        the rotation there. A fixed atom must not move, so a band with
+        ``FixAtoms`` is not rotated either.
+        """
+        if not self.remove_rotation_and_translation:
+            return False
+        if _fixed_atoms(self.all_images) is not None:
+            return False
+        return not bool(np.asarray(self.all_images[0].pbc, dtype=bool).any())
+
+    def get_energies(self) -> list[float]:
+        """Potential energy of each image. A missing calculator result is NaN."""
+        energies = []
+        for image in self.all_images:
+            try:
+                energies.append(float(image.get_potential_energy()))
+            except RuntimeError:
+                energies.append(float("nan"))
+        return energies
+
+
+def _staged(value: Any) -> tuple[float, float]:
+    pair = _pair_of(value, "fmax")
+    if pair is None:
+        number = float(value)
+        return number, number
+    return pair
+
+
+def _staged_int(value: Any) -> tuple[int, int]:
+    pair = _pair_of(value, "maxsteps")
+    if pair is None:
+        number = int(value)
+        return number, number
+    return int(pair[0]), int(pair[1])
+
+
+def _documented_maxstep(optimizer: type) -> float:
+    """The maxstep ASE applies when the signature default is None.
+
+    FIRE's constructor copies ``defaults['maxstep']`` onto the instance
+    in that case. A class that does not publish a real number there has
+    no cap to read.
+    """
+    documented = getattr(optimizer, "defaults", None)
+    step = documented.get("maxstep") if isinstance(documented, dict) else None
+    if isinstance(step, bool) or not isinstance(step, (int, float)):
+        raise NotImplementedError("the optimizer does not document a numeric maxstep")
+    return float(step)
+
+
+def _fire_optimizer(optimizer: Any) -> type:
+    try:
+        from ase.optimize import FIRE
+    except ImportError as err:
+        raise NotImplementedError("AutoNEB optimizer is FIRE") from err
+    if optimizer is None:
+        return cast(type, FIRE)
+    if isinstance(optimizer, type) and issubclass(optimizer, FIRE):
+        return optimizer
+    raise NotImplementedError("AutoNEB steps with the band FIRE solver; pass FIRE")
+
+
+def _optimizer_maxstep(optimizer: Any) -> float:
+    """FIRE's per-atom cap.
+
+    A numeric signature default is that number. ASE 3.29 leaves
+    ``maxstep`` as None and applies ``defaults['maxstep']``. None uses
+    that documented default.
+    """
+    import inspect
+
+    optimizer = _fire_optimizer(optimizer)
+    try:
+        signature = inspect.signature(optimizer)
+    except (TypeError, ValueError) as err:
+        raise NotImplementedError("the optimizer does not document a numeric maxstep") from err
+    parameter = signature.parameters.get("maxstep")
+    if (
+        parameter is None
+        or parameter.default is inspect.Signature.empty
+        or parameter.default is None
+    ):
+        return _documented_maxstep(optimizer)
+    if isinstance(parameter.default, bool) or not isinstance(parameter.default, (int, float)):
+        raise NotImplementedError("the optimizer does not document a numeric maxstep")
+    return float(parameter.default)
+
+def _is_float3(value: Any) -> bool:
+    """True for a 3-tuple of Python floats, which is ASE's position center."""
+    try:
+        if len(value) != 3:
+            return False
+    except TypeError:
+        return False
+    return [type(item) for item in value] == [float, float, float]
+
+
 def _effective_force(forces: Float64, mode: Float64, curvature: float) -> Float64:
     """ASE force after the minimum-mode translation of the gradient."""
     flat = np.asarray(forces, dtype=np.float64).reshape(-1)
@@ -1065,7 +1456,8 @@ class DimerControl:
 
     Unknown names raise ``ValueError``. ``logfile=None`` keeps the run
     quiet. An MPI communicator with ``size > 1`` raises
-    ``NotImplementedError``.
+    ``NotImplementedError``. ``displacement_method`` and
+    ``initial_eigenmode_method`` default to ``gauss``, as in ASE 3.29.
     """
 
     _DEFAULTS: dict[str, Any] = {
@@ -1185,9 +1577,10 @@ class MinModeAtoms:
 
     The ASE call is ``MinModeAtoms(atoms, control)`` with a
     ``DimerControl``. ``displace``, ``get_eigenmode``, ``get_curvature``
-    and ``get_barrier_energy`` are that interface. ``mode=``, ``kind``,
-    ``dr`` and ``max_rotations`` remain for a search that does not build
-    a control object. ``order`` other than 1 and a non-dimer
+    and ``get_barrier_energy`` are that interface. ``random_seed`` seeds
+    the Gaussian draw the way ASE 3.29 does. ``mode=``, ``kind``, ``dr``
+    and ``max_rotations`` remain for a search that does not build a
+    control object. ``order`` other than 1 and a non-dimer
     ``eigenmode_method`` raise ``NotImplementedError``.
     """
 
@@ -1205,9 +1598,9 @@ class MinModeAtoms:
         comm: Any = None,
         **kwargs: Any,
     ) -> None:
-        del random_seed
         if comm is not None and int(getattr(comm, "size", 1)) > 1:
             raise NotImplementedError("MinModeAtoms comm with world.size > 1")
+        self._seed_random(random_seed, comm)
         if control is not None and mode is None and not hasattr(control, "get_parameter"):
             mode = control
             control = None
@@ -1292,6 +1685,24 @@ class MinModeAtoms:
             return np.array(mode, dtype=np.float64, copy=True)
         return np.array(mode / norm, dtype=np.float64, copy=True)
 
+    def _seed_random(self, random_seed: int | None, comm: Any) -> None:
+        """Seed the same ``RandomState`` ASE 3.29 uses for a gauss draw."""
+        if random_seed is None:
+            import time
+
+            clock = time.time()
+            world = comm
+            if world is None:
+                import ase.parallel
+
+                world = ase.parallel.world
+            size = int(getattr(world, "size", 1))
+            if size > 1:
+                clock = float(world.sum(clock)) / size
+            random_seed = int(("%30.9f" % clock)[-9:])
+        self.random_seed = int(random_seed)
+        self.random_state = np.random.RandomState(self.random_seed)
+
     def _initialize_eigenmode(self) -> None:
         if self._have_mode:
             return
@@ -1301,11 +1712,16 @@ class MinModeAtoms:
             guess[0] = 1.0
         else:
             method = str(self.control.get_parameter("initial_eigenmode_method")).lower()
-            pos = np.asarray(self.atoms.get_positions(), dtype=np.float64)
+            pos = np.array(self.atoms.get_positions(), dtype=np.float64, copy=True)
             if method == "displacement" and np.any(pos - self._origin):
                 guess = (pos - self._origin).reshape(-1)
             elif method == "gauss":
-                raise NotImplementedError("initial_eigenmode_method 'gauss'")
+                # ASE displaces, reads the step as the mode, and puts the
+                # atoms back. The positions after this call are unchanged.
+                self.displace(log=False, method="gauss")
+                moved = np.asarray(self.atoms.get_positions(), dtype=np.float64)
+                guess = (moved - pos).reshape(-1)
+                self.atoms.set_positions(pos)
             else:
                 raise NotImplementedError(
                     f"initial_eigenmode_method '{method}' needs a displacement from the original positions"
@@ -1313,6 +1729,8 @@ class MinModeAtoms:
         self._mode0 = self._unit_mode(np.asarray(guess, dtype=np.float64))
         self._have_mode = True
         self._session = None
+        self._eigenmode = self._mode0.reshape(count, 3).copy()
+        self.mode = np.array(self._mode0, dtype=np.float64, copy=True)
 
     def __ase_optimizable__(self) -> _MinModeView:
         return _MinModeView(self)
@@ -1411,6 +1829,12 @@ class MinModeAtoms:
         return self.get_forces(real=False, pos=pos)
 
     def get_potential_energy(self) -> float:
+        """Energy at the current positions, after the initial mode exists.
+
+        A gauss or displacement guess is stored here and is not rotated.
+        ``get_forces`` rotates it.
+        """
+        self._initialize_eigenmode()
         return float(self.atoms.get_potential_energy())
 
     def get_barrier_energy(self) -> float:
@@ -1434,6 +1858,51 @@ class MinModeAtoms:
         assert self._eigenmode is not None
         return self._eigenmode
 
+    def _clear_mode(self) -> None:
+        self._have_mode = False
+        self._session = None
+        self._eigenmode = None
+        self._invalidate()
+
+    def _center_mask(
+        self,
+        center: Any,
+        radius: float | None,
+        number_of_atoms: int | None,
+        mic: bool,
+    ) -> list[bool] | None:
+        """Atoms near ``center``, using ASE's center rules."""
+        if center is None:
+            return None
+        count = len(self.atoms)
+        if isinstance(center, int):
+            index = int(center) % count
+            distances = [
+                (atom, float(self.atoms.get_distance(atom, index, mic=mic))) for atom in range(count)
+            ]
+        elif _is_float3(center):
+            origin = np.asarray(center, dtype=np.float64)
+            positions = np.asarray(self.atoms.get_positions(), dtype=np.float64)
+            distances = [
+                (atom, float(np.linalg.norm(positions[atom] - origin))) for atom in range(count)
+            ]
+        else:
+            raise ValueError(
+                "displacement_center must be either the number of an atom in MinModeAtoms "
+                "object or a 3D position (3-tuple of floats)."
+            )
+        if radius is not None:
+            within_radius = [distance < float(radius) for _atom, distance in distances]
+        else:
+            within_radius = [True] * count
+        if number_of_atoms is not None:
+            nearest = [atom for atom, _distance in sorted(distances, key=lambda item: item[1])]
+            chosen = set(nearest[: int(number_of_atoms)])
+            within_count = [atom in chosen for atom in range(count)]
+        else:
+            within_count = [True] * count
+        return [within_count[atom] and within_radius[atom] for atom in range(count)]
+
     def displace(
         self,
         displacement_vector: Any = None,
@@ -1446,27 +1915,30 @@ class MinModeAtoms:
         mic: bool = True,
         log: bool = True,
     ) -> None:
-        """Move atoms. ``method='vector'`` applies ``displacement_vector``."""
+        """Move atoms.
+
+        ``method='vector'`` applies ``displacement_vector``.
+        ``method='gauss'`` (the ``DimerControl`` default) adds one normal
+        deviate per coordinate from ``random_seed``. A mask holds the
+        other atoms. ``displacement_center`` with ``radius`` or
+        ``number_of_atoms`` keeps the draw in that neighbourhood.
+        ``mic`` is passed to ``get_distance`` when the center is an atom
+        index. ``log`` is accepted and does not write a file.
+        """
         del log
-        refused = [
-            name
-            for name, value in (
-                ("displacement_center", displacement_center),
-                ("radius", radius),
-                ("number_of_atoms", number_of_atoms),
-                ("gauss_std", gauss_std),
-            )
-            if value is not None
-        ]
-        if refused:
-            raise NotImplementedError("displace " + ", ".join(refused))
-        if mic is not True:
-            raise NotImplementedError("displace mic")
         if self.control is not None:
             if mask is None:
                 mask = self.control.get_parameter("mask")
             if method is None:
                 method = self.control.get_parameter("displacement_method")
+            if gauss_std is None:
+                gauss_std = self.control.get_parameter("gauss_std")
+            if displacement_center is None:
+                displacement_center = self.control.get_parameter("displacement_center")
+            if radius is None:
+                radius = self.control.get_parameter("displacement_radius")
+            if number_of_atoms is None:
+                number_of_atoms = self.control.get_parameter("number_of_displacement_atoms")
         if method is None:
             method = "vector" if displacement_vector is not None else "gauss"
         method_name = str(method).lower()
@@ -1476,17 +1948,67 @@ class MinModeAtoms:
             )
         if displacement_vector is None and method_name == "vector":
             raise ValueError(f"A displacement_vector must be supplied when using method = '{method}'.")
-        if method_name != "vector":
-            raise NotImplementedError(f"displacement_method '{method}'")
-        vector = np.array(displacement_vector, dtype=np.float64, copy=True)
-        if mask is not None:
-            selected = np.asarray(mask, dtype=bool)
-            vector[~selected] = 0.0
-        self.atoms.set_positions(self.atoms.get_positions() + vector)
-        self._have_mode = False
-        self._session = None
-        self._eigenmode = None
-        self._invalidate()
+        if displacement_center is not None and radius is None and number_of_atoms is None:
+            raise ValueError(
+                "When displacement_center is chosen, either radius or number_of_atoms must be supplied."
+            )
+        # The vector update without a center is the path the Pt hop test locks.
+        if method_name == "vector" and displacement_center is None:
+            vector = np.array(displacement_vector, dtype=np.float64, copy=True)
+            if mask is not None:
+                selected = np.asarray(mask, dtype=bool)
+                vector[~selected] = 0.0
+            self.atoms.set_positions(self.atoms.get_positions() + vector)
+            self._clear_mode()
+            return
+        count = len(self.atoms)
+        center_mask = self._center_mask(displacement_center, radius, number_of_atoms, mic)
+        if mask is None:
+            selected_atoms = [True] * count
+            if center_mask is None:
+                warnings.warn(
+                    "It was not possible to figure out which atoms to "
+                    "displace, Will try to displace all atoms.\n",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        else:
+            selected_atoms = [bool(bit) for bit in np.asarray(mask).reshape(-1)]
+            if len(selected_atoms) != count:
+                raise ValueError(f"mask length {len(selected_atoms)} does not match {count} atoms")
+        if center_mask is not None:
+            selected_atoms = [
+                selected_atoms[atom] and center_mask[atom] for atom in range(count)
+            ]
+        if displacement_vector is None:
+            if method_name != "gauss":
+                raise ValueError(f"Invalid displacement method >>{method!s}<<")
+            if not gauss_std and self.control is not None:
+                gauss_std = self.control.get_parameter("gauss_std")
+            if gauss_std is None:
+                gauss_std = 0.1
+            std = gauss_std
+            drawn: list[list[Any]] = []
+            for atom in range(count):
+                if selected_atoms[atom]:
+                    drawn.append([self.random_state.normal(0.0, std) for _ in range(3)])
+                else:
+                    drawn.append([0.0, 0.0, 0.0])
+            step: Any = drawn
+        else:
+            array = np.asarray(displacement_vector, dtype=np.float64)
+            if array.shape != (count, 3):
+                raise ValueError(
+                    f"displacement_vector shape {array.shape} does not match {(count, 3)}"
+                )
+            step = [
+                [float(array[atom, 0]), float(array[atom, 1]), float(array[atom, 2])]
+                if selected_atoms[atom]
+                else [0.0, 0.0, 0.0]
+                for atom in range(count)
+            ]
+        self.atoms.set_positions(self.atoms.get_positions() + step)
+        self._clear_mode()
 
 
 class MinModeTranslate:
@@ -1692,17 +2214,42 @@ class Sella:
         return bool(host.run(fmax=fmax, steps=steps))
 
 
+# A non-periodic axis gets a vector this many times the reach of the images.
+# The minimum image wraps a difference only past half of it, so that axis
+# never wraps, and the matrix stays invertible for the Rust cell.
+_OPEN_AXIS_REACH = 16.0
+
+
 def _periodic_cell(images: list[Any]) -> Float64 | None:
+    """Row-major cell for the minimum image of the band, or None in free space.
+
+    ``images[0].pbc`` decides which axes are periodic. A periodic axis keeps
+    its lattice vector. Each non-periodic axis takes a vector normal to the
+    periodic ones, so that the minimum image wraps only along the periodic
+    plane or line and the slab or wire is not folded across its vacuum.
+    """
     if not images:
         return None
     pbc = np.asarray(images[0].pbc, dtype=bool)
     if not pbc.any():
         return None
-    raw = np.asarray(images[0].cell.array, dtype=np.float64).copy()
+    cell = np.asarray(images[0].cell.array, dtype=np.float64)
+    if pbc.all():
+        return np.ascontiguousarray(cell.copy(), dtype=np.float64)
+    lattice = cell[pbc]
+    _, singular, rows = np.linalg.svd(lattice)
+    if singular.min() <= 1e-12 * singular.max():
+        raise ValueError("the periodic axes need linearly independent cell vectors")
+    normals = rows[len(lattice) :]
+    points = np.concatenate([np.asarray(image.get_positions(), dtype=np.float64) for image in images])
+    reach = float(np.sqrt((lattice * lattice).sum(axis=1)).max())
+    for normal in normals:
+        reach += float(np.ptp(points @ normal))
+    open_rows = iter(normals * (_OPEN_AXIS_REACH * reach))
+    full = np.empty((3, 3), dtype=np.float64)
     for axis in range(3):
-        if not pbc[axis]:
-            raw[axis, :] = 0.0
-    return np.ascontiguousarray(raw, dtype=np.float64)
+        full[axis] = cell[axis] if pbc[axis] else next(open_rows)
+    return np.ascontiguousarray(full, dtype=np.float64)
 
 
 class _StringView:
