@@ -1366,10 +1366,22 @@ impl BarrierModel {
 /// definite for every \(\ell > 0\). The Gaussian of the geodesic angle
 /// is not positive definite on \(S^2\) for long length scales (Feragen,
 /// Lauze and Hauberg, CVPR 2015). For small angles the chord is the
-/// angle.
+/// angle. When `length_scale` squared underflows to zero, the value is
+/// the zero-scale limit: one on a repeated direction and zero on a
+/// positive chord, which avoids a `0/0` NaN.
 fn kernel(a: [f64; 3], b: [f64; 3], length_scale: f64) -> f64 {
     let chord2 = (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2);
-    (-0.5 * chord2 / (length_scale * length_scale)).exp()
+    let scale2 = length_scale * length_scale;
+    if scale2 == 0.0 {
+        if chord2 == 0.0 {
+            return 1.0;
+        }
+        if chord2 > 0.0 {
+            return 0.0;
+        }
+        return f64::NAN;
+    }
+    (-0.5 * chord2 / scale2).exp()
 }
 
 /// Lower Cholesky factor of a symmetric positive definite matrix.
@@ -1839,6 +1851,17 @@ mod tests {
             negative.is_empty(),
             "(length scale, smallest Cholesky pivot): {negative:?}"
         );
+    }
+
+    #[test]
+    fn kernel_stays_finite_when_length_scale_squared_underflows() {
+        let here = [0.0, 0.0, 1.0];
+        let there = [1.0, 0.0, 0.0];
+        let length_scale = f64::MIN_POSITIVE;
+        assert_eq!(length_scale * length_scale, 0.0);
+        assert_eq!(kernel(here, here, length_scale), 1.0);
+        assert_eq!(kernel(here, there, length_scale), 0.0);
+        assert_eq!(kernel(here, here, 0.6), 1.0);
     }
 
     #[test]
