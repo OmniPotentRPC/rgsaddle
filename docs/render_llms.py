@@ -33,6 +33,14 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("tutorials/dimer.org", "Dimer and Lanczos minimum-mode searches"),
             ("tutorials/sella.org", "Order-1 saddle optimization with Sella's P-RFO trust step"),
             ("tutorials/quickstart.org", "Intrinsic reaction coordinate (IRC) forward and reverse branches"),
+            (
+                "tutorials/pafi.org",
+                "PAFI free-energy profile and rate on an analytic surface, in Rust and Python",
+            ),
+            (
+                "tutorials/oh-tst.org",
+                "OH-TST from a dimer seed through the optimal plane, transmission, and a rate, in Rust and Python",
+            ),
         ],
     ),
     (
@@ -53,11 +61,35 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("howto/strain-rate.org", "Elastic dipoles, multipoles, FMM fields, and strain response of a hop"),
             ("howto/defect-pair-rates.org", "Defect-pair hop rates, PAFI free energy, Bennett-Chandler kappa, and pair networks"),
             ("howto/npt-lattice.org", "Isotropic NPT lattice sampling with blocking standard errors"),
+            (
+                "howto/pafi.org",
+                "Projected average force integration: a free-energy profile along a path at finite temperature",
+            ),
             ("howto/oh-tst.org", "Optimal hyperplanar transition state theory (OH-TST) and reversible work"),
             ("howto/lammps-hyperplane.org", "Plane-constrained BAOAB sampling with LAMMPS through lammpc"),
+            (
+                "howto/rgpot.org",
+                "Wrap an rgpot potential as a PointSurface and run relaxation, a dimer search, and PAFI",
+            ),
+            (
+                "howto/pafi-ohtst-restarting.org",
+                "Continue a PAFI error target, or extend an OH-TST plane sample from the last configuration",
+            ),
+            (
+                "howto/pafi-ohtst-parallel-sampling.org",
+                "PAFI samples its planes together; each OH-TST call keeps one sequential chain",
+            ),
+            (
+                "howto/pafi-ohtst-checking-convergence.org",
+                "Read PAFI effective-sample diagnostics and OH-TST quadrature node counts",
+            ),
             ("howto/sparse-hessian.org", "Direct Curtis-Powell-Reid sparse Hessian recovery by distance-2 colouring"),
             ("howto/sella.org", "P-RFO, restricted P-RFO, Index1Session, Sella sessions, internal coordinates, cell charts, and SAMD"),
             ("howto/irc.org", "Intrinsic reaction coordinate (IRC) integration with SellaSphere, GS2, and Morokuma steps"),
+            (
+                "howto/geodesic.org",
+                "Shorten an initial path in a redundant coordinate chart before any potential call",
+            ),
             ("howto/lineb.org", "Fixed-energy tunneling paths, imaginary-time replicas, fluctuation spectra, and thermal rates"),
             ("howto/path-initialization.org", "Choosing linear, IDPP, or TRICS path initializers across NEB, AutoNEB, and C"),
             ("howto/io.org", "Reading and writing CON frames and restart bands"),
@@ -73,14 +105,31 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
         "Explanation and reference",
         [
             ("explanation/mep.org", "Mass-weighted intrinsic reaction coordinates and unweighted minimum energy paths"),
+            (
+                "explanation/ohtst-pafi-exact.org",
+                "Deterministic integrals used to check sampled PAFI and OH-TST estimates",
+            ),
             ("explanation/one-stencil.org", "Householder reflection shared by climbing-image NEB and minimum-mode searches"),
             ("explanation/hyperplane-methods.org", "PAFI, OH-TST, and constrained-ensemble samplers on one geometric footing"),
             ("explanation/symmetry-regions.org", "Crystal symmetry operations, path multiplicity, and hard Voronoi regions"),
             ("explanation/trics.org", "Translation-rotation internal coordinates, stability diagnostic maze, and segment splicing"),
+            (
+                "explanation/pafi-ohtst.org",
+                "Transition state theory shared by PAFI, OH-TST, and harmonic TST",
+            ),
+            (
+                "explanation/elastic-dipole.org",
+                "Finite-cell elastic dipole correction for periodic images, and the benchmark row labels",
+            ),
             ("reference/architecture.org", "Crate architecture and module boundaries"),
             ("reference/lammps-hyperplane.org", "LAMMPS hyperplane sampler contract and C ABI hooks"),
             ("reference/bibliography.org", "Literature bibliography"),
             ("reference/c-symbols.org", "Complete C ABI symbol index for include/rgsaddle.h"),
+            (
+                "reference/pafi.org",
+                "Public PAFI configuration, result types, and the functions that connect them",
+            ),
+            ("reference/ohtst.org", "Public OH-TST configuration and result types"),
             ("contributing/index.org", "Build, test, MSRV, Python stub, documentation, and release workflow"),
         ],
     ),
@@ -236,7 +285,33 @@ def render_llms_full_txt() -> str:
     return "\n".join(chunks).rstrip() + "\n"
 
 
+def listed_guides() -> set[str]:
+    return {rel for _title, entries in SECTIONS for rel, _summary in entries}
+
+
+def unlisted_guides() -> list[str]:
+    """Org pages under docs/orgmode that SECTIONS does not name.
+
+    changelog.org is the towncrier sink, not a guide.
+    """
+    listed = listed_guides()
+    missing: list[str] = []
+    for path in sorted(ORG_DIR.rglob("*.org")):
+        rel = path.relative_to(ORG_DIR).as_posix()
+        if rel == "changelog.org" or rel in listed:
+            continue
+        missing.append(rel)
+    return missing
+
+
 def main_check_only() -> int:
+    missing = unlisted_guides()
+    if missing:
+        print(
+            "Org guides missing from the llms page list:\n" + "\n".join(missing),
+            file=sys.stderr,
+        )
+        return 1
     expected_llms = render_llms_txt()
     expected_full = render_llms_full_txt()
     if not LLMS_OUT.is_file() or LLMS_OUT.read_text(encoding="utf-8") != expected_llms:
@@ -265,6 +340,9 @@ def main() -> int:
         if rc == 0:
             print("llms.txt and llms-full.txt ok")
         return rc
+
+    if unlisted_guides():
+        return main_check_only()
 
     expected_llms = render_llms_txt()
     expected_full = render_llms_full_txt()
