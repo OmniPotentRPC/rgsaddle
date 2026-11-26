@@ -48,7 +48,7 @@ static_assert(offsetof(rgsaddle_landscape_report_t, evaluations) == 40, "report 
 
 /* Introduction minor of rgsaddle_landscape_create, _config_default, _run,
  * _node, _modes, _edge, and _free. */
-static constexpr std::uint32_t landscape_symbol_minor = 66;
+static constexpr std::uint32_t landscape_symbol_minor = 69;
 
 int main(int argc, char** argv) {
     const double origin[3] = {0.0, 0.0, 0.0};
@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "Landscape constructor accepted an older minor\n");
             return 11;
         } catch (std::runtime_error const& err) {
-            if (std::string(err.what()).find("1.66") == std::string::npos) {
+            if (std::string(err.what()).find("1.69") == std::string::npos) {
                 std::fprintf(stderr, "unexpected guard error: %s\n", err.what());
                 return 12;
             }

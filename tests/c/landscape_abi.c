@@ -1,4 +1,4 @@
-/* Raw C smoke test for the solution-landscape ABI (minor 66). */
+/* Raw C smoke test for the solution-landscape ABI (minor 69). */
 #include "rgsaddle.h"
 #include "main_abi_contract.h"
 

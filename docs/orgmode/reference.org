@@ -298,7 +298,7 @@ For config minors 5 through 62 this field is read as given, so 0 disables the an
 From minor 63, 0 keeps the Rust default unless flag bit 0, =RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL=, is set; then 0 disables it.
 The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 63 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
-=RGSADDLE_ABI_MINOR= is 66.
+=RGSADDLE_ABI_MINOR= is 69.
 =rgsaddle_band_set_dynamic= (minor 65) sets or clears =DynamicNeb= on a band.
 =rgsaddle_dyneb_mask= (minor 65) applies that mask to a projected band.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
@@ -328,7 +328,6 @@ The feature macro =RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS= advertises
 modes. Each reports =-1= for a path-only or failed solve.
 
 From minor 60, =rgsaddle_band_set_refine= installs or clears the per-step L-BFGS refine stepper, and =rgsaddle_band_is_refining= reports whether the last first-order step used it. A host checks =rgsaddle_abi_version()= for minor 60 or newer. The worked example is =tests/band_refine.rs=.
-From minor 66, =rgsaddle_landscape_config_default=, =rgsaddle_landscape_create=, =rgsaddle_landscape_run=, =rgsaddle_landscape_node=, =rgsaddle_landscape_modes=, =rgsaddle_landscape_edge=, and =rgsaddle_landscape_free= expose the downward pathway search. =RGSADDLE_LANDSCAPE_BOUND= reports a node or evaluation limit and does not return a pathway. =rgsaddle_landscape_run= takes the geometry-aware Hessian action =rgsaddle_hessian_at_fn=, which minor 66 also adds with =rgsaddle_indexk_step_at=. =rgsaddle_hessian_fn= keeps its original signature from minor 37. =rgsaddle_landscape_report_t= has =flags= after =version=. The worked example is =tests/landscape.rs=.
 The request flags are =RGSADDLE_REQ_ONE_IMAGE= (bit 0) and =RGSADDLE_REQ_CLIMBING_IMAGE= (bit 1).
 From a band config at minor 22, the refinement's one-image requests also set bit 1.
 Their =image= is then the climbing image's band index.
@@ -336,6 +335,7 @@ Their =image= is then the climbing image's band index.
 It takes a row-major cell or NULL.
 From minor 64, =rgsaddle_geodesic_config_default=, =rgsaddle_geodesic_path=, and =rgsaddle_geodesic_morse= interpolate a path in a redundant coordinate chart (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303). =rgsaddle_geodesic_path= takes a host chart. =rgsaddle_geodesic_morse= uses Eq. (7) with alpha 1.7 and beta 0.01. A NULL config selects the defaults, including an image cap of 32, so it requires =n_images= of at least 32. A supplied cap above =n_images= is =RGSADDLE_INVALID_PARAMETER=.
 From minor 66, =rgsaddle_trics_path= refines an image-major unwrapped Cartesian path in translation-rotation internal coordinates with splicing and writes the refined path to =out= (which may alias =initial= for in-place refinement). Its length controls are in angstrom and =length_per_angstrom= converts the caller's coordinates.
+From minor 69, =rgsaddle_landscape_config_default=, =rgsaddle_landscape_create=, =rgsaddle_landscape_run=, =rgsaddle_landscape_node=, =rgsaddle_landscape_modes=, =rgsaddle_landscape_edge=, and =rgsaddle_landscape_free= expose the downward pathway search. =RGSADDLE_LANDSCAPE_BOUND= reports a node or evaluation limit and does not return a pathway. =rgsaddle_landscape_run= takes the geometry-aware Hessian action =rgsaddle_hessian_at_fn=, which minor 69 also adds with =rgsaddle_indexk_step_at=. =rgsaddle_hessian_fn= keeps its original signature from minor 37. =rgsaddle_landscape_report_t= has =flags= after =version=. The worked example is =tests/landscape.rs=.
 =rgsaddle_ocineb_step= reports the hand-off phase (band, tangent alignment, or minimum-mode translation).
 =rgsaddle_connect= runs the double-ended search of =connect= to completion on two endpoint arrays and a host surface.
 The surface writes energy and the Cartesian gradient for one image.
