@@ -487,7 +487,7 @@ pub struct MinModeReport {
     pub curvature: f64,
     /// Rotation iterations (dimer) or Hessian actions (Lanczos).
     pub rotations: usize,
-    /// Number of steps taken.
+    /// Number of steps taken, including steps that leave the atoms in place.
     pub iteration: usize,
     /// Surface evaluations during this call, centre included.
     pub evaluations: usize,
@@ -3795,6 +3795,8 @@ impl MinModeSession {
             rotations += accepted_rotations;
         }
         self.x = x;
+        // A step that leaves the atoms in place still counts, so a host loop
+        // capped on `iteration` stops at a stationary positive curvature.
         self.iteration += 1;
         self.centre = Some(centre);
         if fire {
@@ -3818,6 +3820,9 @@ impl MinModeSession {
     }
 
     /// Convenience loop over [`MinModeSession::step`].
+    ///
+    /// Every step counts in [`MinModeReport::iteration`], including one
+    /// that leaves the atoms in place, so a stationary point cannot spin.
     pub fn run<S: PointSurface>(
         &mut self,
         surface: &S,

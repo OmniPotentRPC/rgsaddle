@@ -314,7 +314,9 @@ pub unsafe extern "C" fn rgsaddle_saddle_index(
         Ok(check) => check.unwrap_or_default(),
         Err(rc) => return rc,
     };
-    let dof = 3 * n_atoms as usize;
+    let Some(dof) = super::f64_len(&[3, n_atoms]) else {
+        return RGSADDLE_SHAPE;
+    };
     let read = |p: *const f64| {
         (!p.is_null()).then(|| Array1::from(unsafe { slice::from_raw_parts(p, dof) }.to_vec()))
     };

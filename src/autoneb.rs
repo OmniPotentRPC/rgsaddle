@@ -781,7 +781,8 @@ pub struct AutoNebReport {
     pub surface_rows: usize,
     /// Number of images, endpoints included.
     pub n_images: usize,
-    /// Steps of the last stage's band session.
+    /// Steps the last stage took. A window kept from the stage before
+    /// does not carry that stage's steps into this count.
     pub iteration: usize,
 }
 
@@ -1464,6 +1465,9 @@ impl AutoNeb {
                     max_force: report.max_force,
                 });
             }
+            // A kept window's session counts the steps of every stage it
+            // served. The stage reports only its own.
+            report.iteration = taken;
             let relaxed = open.session.positions().to_owned();
             let evaluation = open.session.evaluation();
             (report, rows, relaxed, evaluation, steps)
@@ -1973,6 +1977,27 @@ mod tests {
         let report = search.run(&Flat).unwrap();
         assert_eq!(report.status, BandStatus::Converged);
         assert_eq!(search.sessions_opened, 1);
+    }
+
+    #[test]
+    fn a_kept_window_reports_the_steps_of_its_last_stage() {
+        let config = band_with(
+            AutoNebTuning::default()
+                .with_n_simul(1)
+                .with_n_max(3)
+                .with_local_max_steps(2)
+                .with_climb_max_steps(1),
+        );
+        let initial = array![[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let mut search = AutoNeb::new(config, initial).unwrap();
+        let report = search.run(&Flat).unwrap();
+        assert_eq!(search.sessions_opened, 1);
+        let stages = search.stages();
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[1].stage, AutoNebStage::Climb);
+        assert!(!stages[1].opened_session);
+        assert_eq!(stages[1].steps.len(), 1);
+        assert_eq!(report.iteration, 1, "{report:?}");
     }
 
     struct DelayLeft {

@@ -1,0 +1,1 @@
+~rgsaddle.ase.AutoNEB~ reads ~world=None~ as ~ase.parallel.world~, as ASE does. Image-parallel MPI is still refused, and with ~parallel=False~ only rank 0 writes the trajectories, so ranks no longer write the same files at once.
