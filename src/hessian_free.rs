@@ -413,6 +413,10 @@ fn rademacher_unit(n: usize, seed: u64) -> Array1<f64> {
 
 /// Extract the `k` lowest eigenpairs of a symmetric operator via block Lanczos
 /// with full two-pass Gram-Schmidt reorthogonalization.
+///
+/// `max_iters` must be at least `k`. A smaller limit returns
+/// [`SaddleError::Invalid`]. `k` above the operator dimension returns
+/// [`SaddleError::Shape`].
 pub fn lanczos_lowest_modes(
     op: &mut dyn HessianAction,
     k: usize,
@@ -431,12 +435,12 @@ pub fn lanczos_lowest_modes(
             "Lanczos tolerance must be finite and non-negative, got {tol}"
         )));
     }
-    let m_max = max_iters.min(n).max(k);
-    if m_max < k {
+    if max_iters < k {
         return Err(SaddleError::Invalid(format!(
             "Lanczos iteration limit {max_iters} is smaller than requested mode count {k}"
         )));
     }
+    let m_max = max_iters.min(n);
     let mut basis: Vec<Array1<f64>> = Vec::with_capacity(m_max);
     let mut hv_cache: Vec<Array1<f64>> = Vec::with_capacity(m_max);
     let mut block = Vec::with_capacity(k);
@@ -774,5 +778,22 @@ mod tests {
             vals: array![1.0, -0.5, 3.0],
         };
         assert!(slq_logdet_ratio(&mut op_a, &mut op_b, 2, 3, 1).is_err());
+    }
+
+    #[test]
+    fn lanczos_rejects_an_iteration_limit_below_the_mode_count() {
+        let mut op = DiagOp {
+            vals: array![1.0, 2.0, 3.0, 4.0],
+        };
+        let err = lanczos_lowest_modes(&mut op, 3, 2, 1.0e-8, 11).unwrap_err();
+        match err {
+            SaddleError::Invalid(message) => {
+                assert!(
+                    message.contains("iteration limit") && message.contains("smaller"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected Invalid, got {other}"),
+        }
     }
 }
