@@ -4123,16 +4123,40 @@ impl BandSession {
     /// rejection count, the Zoom-NEB stability record, the free-end
     /// cut memory and initial fixed energy, and every cached surface
     /// value (endpoint energies, the last evaluation, and the dynamic
-    /// NEB image answers, step and origin). The next evaluation
+    /// NEB image answers, step and origin). The stepper is built
+    /// again, so the FIRE time step returns to the configured start,
+    /// and the iteration count returns to zero. The next evaluation
     /// carries the whole band. Use it when the surface itself changed
     /// (a surrogate refit, a new calculator setting).
     pub fn reset(&mut self) {
         self.restart();
+        self.rebuild_steppers();
+        self.iteration = 0;
         self.state.set_endpoints(None);
         self.free_end_state = free_end::FreeEndState::default();
         self.zoom = zoom::ZoomState::default();
         self.state.drop_last();
         self.state.dynamic_run().clear_answers();
+    }
+
+    /// Replace both steppers with the ones a new session builds.
+    /// `forget` keeps the FIRE time step it has grown, so a surface
+    /// change builds the stepper again. A HiGHS selection is applied
+    /// to the new steppers.
+    fn rebuild_steppers(&mut self) {
+        let method = if self.config.quickmin {
+            Method::QuickMin
+        } else {
+            self.config.method.clone()
+        };
+        let dof = self.positions.ncols();
+        let segment = if self.solid.is_some() { dof + 9 } else { dof };
+        let interior_dof = (self.positions.nrows() - 2) * segment;
+        self.solver = build_solver(&self.config, &method, interior_dof);
+        self.step_switch = build_step_switch(&self.config, &method, interior_dof);
+        if self.highs {
+            self.set_highs(true);
+        }
     }
 
     /// Set the force tolerance without dropping quasi-Newton pairs.
@@ -6251,5 +6275,54 @@ mod tests {
         assert_eq!(aged_step.status, BandStatus::Running);
         assert_eq!(aged.positions(), fresh.positions());
         assert_eq!(aged.unmoved, fresh.unmoved);
+    }
+
+    /// Five downhill FIRE steps grow the time step (`n_min` is 5).
+    /// `forget` keeps that step, so reset has to build the stepper
+    /// again before the next move can match a new session.
+    #[test]
+    fn reset_then_step_matches_a_fresh_session_after_fire_grows_dt() {
+        struct Well;
+
+        impl BandSurface for Well {
+            fn eval(
+                &self,
+                positions: ArrayView2<f64>,
+                energies: &mut Array1<f64>,
+                gradients: &mut Array2<f64>,
+            ) -> Result<(), SaddleError> {
+                for (i, row) in positions.outer_iter().enumerate() {
+                    let (x, y, z) = (row[0], row[1], row[2]);
+                    energies[i] = (x * x - 1.0).powi(2) + 2.0 * y * y + 2.0 * z * z;
+                    gradients[(i, 0)] = 4.0 * x * (x * x - 1.0);
+                    gradients[(i, 1)] = 4.0 * y;
+                    gradients[(i, 2)] = 4.0 * z;
+                }
+                Ok(())
+            }
+        }
+
+        let band = Array2::from_shape_fn((9, 3), |(i, c)| {
+            let t = i as f64 / 8.0;
+            [-1.0 + 2.0 * t, 0.3 * (std::f64::consts::PI * t).sin(), 0.0][c]
+        });
+        let config = BandConfig::default()
+            .with_max_move(0.1)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_climbing(None);
+        let mut aged = BandSession::new(config.clone(), band).unwrap();
+        for _ in 0..6 {
+            let report = aged.step(&Well).unwrap();
+            assert_eq!(report.status, BandStatus::Running);
+        }
+        aged.reset();
+        let mut fresh = BandSession::new(config, aged.positions().to_owned()).unwrap();
+        assert_eq!(aged.iteration(), fresh.iteration());
+        let aged_step = aged.step(&Well).unwrap();
+        let fresh_step = fresh.step(&Well).unwrap();
+        assert_eq!(aged_step.status, fresh_step.status);
+        assert_eq!(aged.positions(), fresh.positions());
+        assert_eq!(aged.iteration(), fresh.iteration());
     }
 }
