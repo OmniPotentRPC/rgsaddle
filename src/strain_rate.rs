@@ -1461,31 +1461,14 @@ impl Default for VineyardConfig {
     }
 }
 
+with_setters!(VineyardConfig {
+    with_step => step: val f64,
+    with_difference => difference: FiniteDifference,
+    with_positive_tol => positive_tol: val f64,
+    with_negative_tol => negative_tol: val f64,
+});
+
 impl VineyardConfig {
-    /// Set the finite-difference step size.
-    pub fn with_step(mut self, step: f64) -> Self {
-        self.step = step;
-        self
-    }
-
-    /// Set the finite-difference scheme.
-    pub fn with_difference(mut self, difference: FiniteDifference) -> Self {
-        self.difference = difference;
-        self
-    }
-
-    /// Set the positive vibrational eigenvalue threshold in eV/(u Å²).
-    pub fn with_positive_tol(mut self, positive_tol: f64) -> Self {
-        self.positive_tol = positive_tol;
-        self
-    }
-
-    /// Set the negative curvature threshold magnitude in eV/(u Å²).
-    pub fn with_negative_tol(mut self, negative_tol: f64) -> Self {
-        self.negative_tol = negative_tol;
-        self
-    }
-
     /// Validate configuration parameters.
     pub fn validate(&self) -> Result<(), SaddleError> {
         if !self.step.is_finite() || self.step <= 0.0 {
@@ -1509,6 +1492,7 @@ impl VineyardConfig {
 
 /// Summary of a mass-weighted harmonic Vineyard prefactor evaluation.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct VineyardReport {
     /// Attempt frequency prefactor in Hz.
     pub prefactor_hz: f64,

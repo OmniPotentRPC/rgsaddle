@@ -381,7 +381,7 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 | =rgsaddle.ase.SingleCalculatorNEB= | ASE's deprecated shared-calculator band. Constructing it warns with ASE's =FutureWarning= and is ~NEB(allow_shared_calculator=True)~ |
 | =rgsaddle.ase.DyNEB= | ASE 3.29 dynamic NEB. =dynamic_relaxation= (default true) leaves an image in place once its per-atom force is below =fmax=. =scale_fmax= scales that test by the distance from the highest-energy image. =dynamic_relaxation= false is the ordinary band |
 | =rgsaddle.idpp_path= | Image-dependent pair-potential path, endpoints included, shape =(n_images, 3N)=. =cell= is the 3x3 row-major lattice |
-| =rgsaddle.atomic_mass= | Standard atomic mass in amu by atomic number (=1..=118=) or IUPAC element symbol |
+| =rgsaddle.atomic_mass= | Standard atomic mass in amu by atomic number (~1..=118~) or IUPAC element symbol |
 | =rgsaddle.vineyard_prefactor_fd= | Mass-weighted finite-difference Vineyard prefactor on a callback surface at =x_min= and =x_saddle=, returning =VineyardReport= (=prefactor_hz=, =nu0_thz=, =unstable_eigenvalue=, =n_min_modes=, =n_saddle_modes=, =evaluations=) |
 | =rgsaddle.ase.DimerControl=, =MinModeAtoms=, =MinModeTranslate= | ASE's dimer. The mode and curvature come from =MinMode=. The trial step and conjugate gradient are ASE's. =order= other than 1 and a gauss displacement raise =NotImplementedError= |
 
