@@ -1,0 +1,1 @@
+DOI checker unit tests build sample handles at runtime so the repository scan does not treat them as bibliography fields.
