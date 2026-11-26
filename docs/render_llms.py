@@ -74,7 +74,15 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("explanation/one-stencil.org", "Householder reflection shared by climbing-image NEB and minimum-mode searches"),
             ("explanation/hyperplane-methods.org", "PAFI, OH-TST, and constrained-ensemble samplers on one geometric footing"),
             ("explanation/symmetry-regions.org", "Crystal symmetry operations, path multiplicity, and hard Voronoi regions"),
+            (
+                "explanation/cyclic-block.org",
+                "Rotation fallback, singular criterion, symmetric part, and residual norm of the cyclic block factor",
+            ),
             ("reference/architecture.org", "Crate architecture and module boundaries"),
+            (
+                "reference/block-cyclic.org",
+                "Cyclic block-tridiagonal factor, inertia, and the solve residual",
+            ),
             ("reference/lammps-hyperplane.org", "LAMMPS hyperplane sampler contract and C ABI hooks"),
             ("reference/bibliography.org", "Literature bibliography"),
             ("reference/c-symbols.org", "Complete C ABI symbol index for include/rgsaddle.h"),

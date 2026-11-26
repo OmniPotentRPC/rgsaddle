@@ -105,12 +105,14 @@ while report.status != BandStatus::Converged {
    explanation/symmetry-regions
    explanation/pafi-ohtst
    explanation/elastic-dipole
+   explanation/cyclic-block
    reference/architecture
    reference/lammps-hyperplane
    reference/bibliography
    reference/c-symbols
    reference/pafi
    reference/ohtst
+   reference/block-cyclic
    contributing/index
    changelog
 #+end_export

@@ -1,0 +1,2 @@
+~reference/block-cyclic~ lists ~block_cyclic~, ~BlockInertia~, ~CyclicFactor~, ~SolveReport~, ~factor_cyclic~, ~logdet_cyclic_blocks~, ~logdet_cyclic_strict~, and ~SOLVE_REFINE_TOLERANCE~.
+~explanation/cyclic-block~ describes the rotation fallback, the singular criterion, the symmetric part, and the residual norm.
