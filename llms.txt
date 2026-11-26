@@ -53,6 +53,7 @@ rgsaddle is system-agnostic and unit-agnostic: surfaces supply energies, gradien
 - [Move a search from ASE or eOn](https://omnipotentrpc.github.io/rgsaddle/howto/migrate.html): Migrating NEB, dimer, and Sella workflows from ASE or eOn (`docs/orgmode/howto/migrate.org`)
 - [Step a point stencil](https://omnipotentrpc.github.io/rgsaddle/howto/stencil.html): Unified point stencil builder across Rust, C, C++, and Python (`docs/orgmode/howto/stencil.org`)
 - [Formal stencil](https://omnipotentrpc.github.io/rgsaddle/howto/formal.html): Lean 4 formal proofs and MPFR differential verification (`docs/orgmode/howto/formal.org`)
+- [Run the CI gate locally](https://omnipotentrpc.github.io/rgsaddle/howto/ci-gate.html): Run the reproducible build and test gate locally and check its generated files (`docs/orgmode/howto/ci-gate.org`)
 
 ## Explanation and reference
 
@@ -65,4 +66,5 @@ rgsaddle is system-agnostic and unit-agnostic: surfaces supply energies, gradien
 - [LAMMPS hyperplane API](https://omnipotentrpc.github.io/rgsaddle/reference/lammps-hyperplane.html): LAMMPS hyperplane sampler contract and C ABI hooks (`docs/orgmode/reference/lammps-hyperplane.org`)
 - [Bibliography](https://omnipotentrpc.github.io/rgsaddle/reference/bibliography.html): Literature bibliography (`docs/orgmode/reference/bibliography.org`)
 - [C function index](https://omnipotentrpc.github.io/rgsaddle/reference/c-symbols.html): Complete C ABI symbol index for include/rgsaddle.h (`docs/orgmode/reference/c-symbols.org`)
+- [CI gate report](https://omnipotentrpc.github.io/rgsaddle/reference/ci-gate.html): CI gate report header, status rows, checks, test counts, and artefacts (`docs/orgmode/reference/ci-gate.org`)
 - [Contributing](https://omnipotentrpc.github.io/rgsaddle/contributing/index.html): Build, test, MSRV, Python stub, documentation, and release workflow (`docs/orgmode/contributing/index.org`)

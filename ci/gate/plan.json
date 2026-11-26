@@ -1,0 +1,182 @@
+{
+  "eessi": {
+    "compiler": "GCCcore/15.2.0",
+    "rust_modules": {
+      "aarch64": "Rust/1.94.1-GCCcore-15.2.0",
+      "x86_64": "Rust/1.94.1-GCCcore-15.2.0"
+    },
+    "stack_version": "2026.06"
+  },
+  "legs": {
+    "eessi": {
+      "commands": [
+        {
+          "argv": [
+            "cargo",
+            "build",
+            "--locked",
+            "--features",
+            "capi"
+          ],
+          "kind": "build",
+          "name": "Cargo build (C ABI)"
+        },
+        {
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "--features",
+            "capi"
+          ],
+          "kind": "test",
+          "name": "Cargo test (full C ABI suite)"
+        }
+      ]
+    },
+    "pixi": {
+      "commands": [
+        {
+          "argv": [
+            "pixi",
+            "run",
+            "--locked",
+            "gate-cargo-build"
+          ],
+          "kind": "build",
+          "name": "Cargo build (all features)"
+        },
+        {
+          "argv": [
+            "pixi",
+            "run",
+            "--locked",
+            "gate-cargo-test"
+          ],
+          "kind": "test",
+          "name": "Cargo test (all features)"
+        },
+        {
+          "argv": [
+            "pixi",
+            "run",
+            "--locked",
+            "gate-clippy"
+          ],
+          "kind": "lint",
+          "name": "Clippy"
+        },
+        {
+          "argv": [
+            "pixi",
+            "run",
+            "--locked",
+            "gate-rustfmt"
+          ],
+          "kind": "lint",
+          "name": "Rustfmt"
+        },
+        {
+          "argv": [
+            "pixi",
+            "run",
+            "--locked",
+            "gate-capi-build"
+          ],
+          "kind": "build",
+          "name": "C ABI build"
+        },
+        {
+          "argv": [
+            "pixi",
+            "run",
+            "--locked",
+            "gate-capi-test"
+          ],
+          "kind": "test",
+          "name": "C ABI tests"
+        },
+        {
+          "argv": [
+            "pixi",
+            "run",
+            "--locked",
+            "gate-capi-subproject"
+          ],
+          "kind": "test",
+          "name": "C ABI Meson subproject"
+        },
+        {
+          "argv": [
+            "pixi",
+            "run",
+            "--locked",
+            "gate-capi-pkgconfig"
+          ],
+          "kind": "test",
+          "name": "C ABI pkg-config consumer"
+        },
+        {
+          "argv": [
+            "pixi",
+            "run",
+            "--locked",
+            "-e",
+            "python",
+            "gate-python-build"
+          ],
+          "kind": "build",
+          "name": "Python extension build"
+        },
+        {
+          "argv": [
+            "pixi",
+            "run",
+            "--locked",
+            "-e",
+            "python",
+            "gate-python-test"
+          ],
+          "kind": "test",
+          "name": "Python tests"
+        },
+        {
+          "argv": [
+            "pixi",
+            "run",
+            "--locked",
+            "-e",
+            "python",
+            "gate-selftest"
+          ],
+          "kind": "test",
+          "name": "Gate self tests"
+        }
+      ]
+    }
+  },
+  "matrix": [
+    {
+      "arch": "x86_64",
+      "leg": "eessi",
+      "runner": "ubuntu-24.04"
+    },
+    {
+      "arch": "aarch64",
+      "leg": "eessi",
+      "runner": "ubuntu-24.04-arm"
+    },
+    {
+      "arch": "x86_64",
+      "leg": "pixi",
+      "runner": "ubuntu-24.04"
+    },
+    {
+      "arch": "aarch64",
+      "leg": "pixi",
+      "runner": "ubuntu-24.04-arm"
+    }
+  ],
+  "max_cpus": 8,
+  "schema": 1
+}

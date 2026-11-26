@@ -135,6 +135,9 @@ Quasi-Newton history taken on one surface epoch must not survive onto the next.
 
 > Task index for bands, minimum-mode searches, C ABI, and rates
 
+## Run the CI gate locally
+`howto/ci-gate` generates the committed workflow and plan, runs the pixi and EESSI legs, and writes the same report as GitHub Actions.
+
 ## Step a band from C
 Enable `capi`. The header is `rgsaddle.h`. ABI major 1. Every wire struct opens with `rgsaddle_version_t`. The host:
 
@@ -244,6 +247,9 @@ Call `reset` after any model update. That is the documented boundary. A host tha
 # Reference (`docs/orgmode/reference.org`)
 
 > Exhaustive inventory of Rust modules, types, functions, configs, C ABI, and Python bindings
+
+## CI gate report
+`reference/ci-gate` defines the report header, status rows, checks, and artefacts.
 
 ## Public Rust types
 The hosted [Rust API reference](https://docs.rs/rgsaddle) includes the default solver, C ABI, OH-TST, and readcon interfaces.
@@ -4462,6 +4468,47 @@ That test asserts only the dot-product bound in Higham, Accuracy and Stability o
 
 The two-dimensional reflected Hessian `diag(-a, b)` has eigenvalues of positive real part exactly when the mode's first component exceeds `1/sqrt(2)`. The same threshold in dimension 3 and higher is open. `validation/stencil/fortyfive.py` records the search.
 
+# Run the CI gate locally (`docs/orgmode/howto/ci-gate.org`)
+
+> Run the reproducible build and test gate locally and check its generated files
+
+Install pixi, then generate and check the committed gate files:
+
+```sh
+pixi run --locked gen-gate
+pixi run --locked check-gate
+```
+
+`gen-gate` writes `.github/workflows/gate.yml` and `ci/gate/plan.json` from `ci/gate/plan.ncl`. `check-gate` exports the source to a temporary directory and compares it with the committed files without rewriting them. It exits 1 and prints a diff when either side changed alone, so edit `plan.ncl` rather than the workflow. `--locked` refuses to solve again when `pixi.lock` is stale.
+
+The python environment installs this checkout as an editable path dependency with the `test` extra. ASE, Hypothesis, numpy, pytest-run-parallel, nanobind, and scikit-build-core are conda dependencies of that environment, so the solve pins them in `pixi.lock`. The build task imports `rgsaddle`. No task installs from the network.
+
+The Actions cache stores all of `.pixi`. Its key is a prefix plus a hash of `pixi.lock`, and the prefix hashes `Cargo.lock`, every `Cargo.toml`, `src/`, the headers and `bind/` sources compiled into the editable extension, and the build scripts (`build.rs`, `CMakeLists.txt`, and `pyproject.toml`). A commit that changes those files misses the cache, and the install builds the extension again.
+
+The all-features cargo tasks set =CARGO_BUILD_JOBS=2=. Four jobs peaked near 19 GiB, above a 16 GiB runner. The same cap belongs on every all-features build the workflows run.
+
+Run the gate's own tests:
+
+```sh
+pixi run --locked -e python gate-selftest
+```
+
+Run the portable leg. The report path is relative to the checkout:
+
+```sh
+python3 ci/gate/run.py --leg pixi --report gate.md
+```
+
+Run both legs when EESSI 2026.06 is mounted and `eb-local` is on `PATH`:
+
+```sh
+python3 ci/gate/run.py --leg all --report gate.md
+```
+
+Without CVMFS or `eb-local`, the report says `EESSI not available`. That result is not a pass. The pixi leg still runs to completion.
+
+Add `--gist` to create a secret gist when `GH_TOKEN` is set. Without the token, the command only writes the report.
+
 # Mass-weighted reaction paths (`docs/orgmode/explanation/mep.org`)
 
 > Mass-weighted intrinsic reaction coordinates and unweighted minimum energy paths
@@ -5900,6 +5947,33 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `RGSADDLE_FREE_END_LAST`. Purpose: Enumerator of `rgsaddle_free_end_side_t`.
 - `RGSADDLE_REFINE_NONE`. Purpose: Enumerator of `rgsaddle_refine_method_t`.
 - `RGSADDLE_REFINE_LBFGS`. Purpose: Enumerator of `rgsaddle_refine_method_t`.
+
+# CI gate report (`docs/orgmode/reference/ci-gate.org`)
+
+> CI gate report header, status rows, checks, test counts, and artefacts
+
+The gate report starts with:
+
+- `Instance / host`: the Actions runner name or `local`, and the host name.
+- `Repository`: the checkout's `origin` URL.
+- `Building on`: the operating system and the gate's eight-CPU ceiling.
+- `Building for arch`: the machine architecture.
+- `Job dir`: the checkout used for every command.
+- `Commit SHA`: the tested commit.
+
+The status table records submission, start, finish, and the final reason. The finished row lists every command's exit status, the output scan for `error|FAILED|panicked`, and test counts. A test command passes only when it exits 0, its output is clean, a summary was found, and that summary has no failures.
+
+Each test count has four totals: passed, failed, ignored, and skipped.
+
+| Tool   | Failed                               | Ignored         | Skipped                    |
+| --- | --- | --- | --- |
+| cargo  | `failed`                             | `ignored`       | `filtered out`             |
+| pytest | `failed` and `errors`                | `xfailed`       | `skipped` and `deselected` |
+| Meson  | `Fail`, `Unexpected Pass`, `Timeout` | `Expected Fail` | `Skipped`                  |
+
+Cargo sums every libtest summary in the output. Pytest and Meson use the last summary. Pytest's `xpassed` counts as passed.
+
+Artefacts record pixi, Rust, Cargo, Python, the EESSI stack and compiler, loaded modules, and test summaries when they apply. `EESSI not available` means the EESSI leg did not run; it is never reported as success.
 
 # Contributing (`docs/orgmode/contributing/index.org`)
 

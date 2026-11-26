@@ -67,6 +67,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("howto/migrate.org", "Migrating NEB, dimer, and Sella workflows from ASE or eOn"),
             ("howto/stencil.org", "Unified point stencil builder across Rust, C, C++, and Python"),
             ("howto/formal.org", "Lean 4 formal proofs and MPFR differential verification"),
+            ("howto/ci-gate.org", "Run the reproducible build and test gate locally and check its generated files"),
         ],
     ),
     (
@@ -81,6 +82,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("reference/lammps-hyperplane.org", "LAMMPS hyperplane sampler contract and C ABI hooks"),
             ("reference/bibliography.org", "Literature bibliography"),
             ("reference/c-symbols.org", "Complete C ABI symbol index for include/rgsaddle.h"),
+            ("reference/ci-gate.org", "CI gate report header, status rows, checks, test counts, and artefacts"),
             ("contributing/index.org", "Build, test, MSRV, Python stub, documentation, and release workflow"),
         ],
     ),

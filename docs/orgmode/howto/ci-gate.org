@@ -1,0 +1,39 @@
+#+title: Run the CI gate locally
+#+options: toc:nil num:nil
+
+Install pixi, then generate and check the committed gate files:
+
+#+begin_src sh
+pixi run --locked gen-gate
+pixi run --locked check-gate
+#+end_src
+
+=gen-gate= writes =.github/workflows/gate.yml= and =ci/gate/plan.json= from =ci/gate/plan.ncl=. =check-gate= exports the source to a temporary directory and compares it with the committed files without rewriting them. It exits 1 and prints a diff when either side changed alone, so edit =plan.ncl= rather than the workflow. =--locked= refuses to solve again when =pixi.lock= is stale.
+
+The python environment installs this checkout as an editable path dependency with the =test= extra. ASE, Hypothesis, numpy, pytest-run-parallel, nanobind, and scikit-build-core are conda dependencies of that environment, so the solve pins them in =pixi.lock=. The build task imports =rgsaddle=. No task installs from the network.
+
+The Actions cache stores all of =.pixi=. Its key is a prefix plus a hash of =pixi.lock=, and the prefix hashes =Cargo.lock=, every =Cargo.toml=, =src/=, the headers and =bind/= sources compiled into the editable extension, and the build scripts (=build.rs=, =CMakeLists.txt=, and =pyproject.toml=). A commit that changes those files misses the cache, and the install builds the extension again.
+
+The all-features cargo tasks set =CARGO_BUILD_JOBS=2=. Four jobs peaked near 19 GiB, above a 16 GiB runner. The same cap belongs on every all-features build the workflows run.
+
+Run the gate's own tests:
+
+#+begin_src sh
+pixi run --locked -e python gate-selftest
+#+end_src
+
+Run the portable leg. The report path is relative to the checkout:
+
+#+begin_src sh
+python3 ci/gate/run.py --leg pixi --report gate.md
+#+end_src
+
+Run both legs when EESSI 2026.06 is mounted and =eb-local= is on =PATH=:
+
+#+begin_src sh
+python3 ci/gate/run.py --leg all --report gate.md
+#+end_src
+
+Without CVMFS or =eb-local=, the report says =EESSI not available=. That result is not a pass. The pixi leg still runs to completion.
+
+Add =--gist= to create a secret gist when =GH_TOKEN= is set. Without the token, the command only writes the report.
