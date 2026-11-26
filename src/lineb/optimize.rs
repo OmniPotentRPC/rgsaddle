@@ -23,9 +23,13 @@ use crate::minmode::PointSurface;
 /// Controls for a fixed-energy optimal tunneling path.
 ///
 /// The spring `k` and the endpoint scale are the values of appendix A
-/// of doi:10.1021/acs.jctc.5c00673, which states them as the products
-/// `k Δt² = 0.1` and `κ |∇V| Δt² = 0.2` at a unit time step. The
-/// endpoint force is `κ (V − E) f̂` with `κ = endpoint_scale / |f|`.
+/// of Zhang, Nimmrich, Johnson, Schenter, Khalil, and Govind, J. Chem.
+/// Theory Comput. 21, 7517 (2025), doi:10.1021/acs.jctc.5c00673,
+/// "Accelerating Instanton Theory with the Line Integral Nudged Elastic
+/// Band Method and Gaussian Process Regression", which states them as
+/// the products `k Δt² = 0.1` and `κ |∇V| Δt² = 0.2` at a unit time
+/// step. The endpoint force is `κ (V − E) f̂` with
+/// `κ = endpoint_scale / |f|`.
 ///
 /// `opt_tol` and `perp_tol` are required. They are a force scale of the
 /// surface being searched (its gradient, its curvature, or the noise in

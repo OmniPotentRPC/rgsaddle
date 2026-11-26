@@ -6,7 +6,7 @@
 //! about the last accepted point (Sella IRCTrustRegion), and
 //! [`IrcKind::Gs2`] about the Gonzalez and Schlegel pivot half a step
 //! ahead. [`IrcSession::new`] weights atomistic Cartesian coordinates by
-//! the atom masses; [`IrcSession::new_euclidean`] selects unit weights
+//! the atom masses through [`crate::MassMetric`]; [`IrcSession::new_euclidean`] selects unit weights
 //! for a generic-dimensional surface. Each sphere increment is Sella's
 //! QuasiNewtonIRC step, rgmin `qn_irc_get_s` at the level shift that
 //! puts it on the sphere.
@@ -29,11 +29,10 @@
 //! [`mod@crate::saddle_index`].
 
 use ndarray::{Array1, Array2, ArrayView1};
-use rgmin::vecops::{Vector, axpy, dot, nrm2, nrminf};
-use rgmin::{
-    ApplyHessian, BfgsModel, EigenParams, EigensolverKind, IrcTrust, mw_pair, qn_irc_get_s,
-    sqrt_masses_3n, to_mw,
-};
+use rgmin::vecops::{axpy, dot, nrm2, nrminf};
+use rgmin::{ApplyHessian, BfgsModel, EigenParams, EigensolverKind, IrcTrust, qn_irc_get_s};
+
+use crate::mass_metric::MassMetric;
 
 use std::cell::RefCell;
 
@@ -239,6 +238,9 @@ pub struct IrcSession {
     config: IrcConfig,
     x: Array1<f64>,
     x_saddle: Array1<f64>,
+    metric: MassMetric,
+    /// Square-root masses handed to rgmin's trust region. The session maps
+    /// go through [`MassMetric`]; this copy is the vector that region stores.
     sqrtm: Array1<f64>,
     d1: Array1<f64>,
     mode: Array1<f64>,
@@ -267,6 +269,8 @@ impl IrcSession {
     ///
     /// [`SaddleError::Shape`] when `saddle` is empty or not a multiple of 3, or when
     /// `masses` (`N`) or `mode` (`3N`) do not match it.
+    /// [`SaddleError::NonFinite`] when a mass is not finite, and
+    /// [`SaddleError::Invalid`] when a mass is not positive.
     pub fn new(
         config: IrcConfig,
         saddle: Array1<f64>,
@@ -285,13 +289,8 @@ impl IrcSession {
                 "masses (N) and mode (3N) must match the saddle".into(),
             ));
         }
-        Self::with_coordinate_metric(
-            config,
-            saddle,
-            sqrt_masses_3n(masses.as_slice().unwrap_or(&[])),
-            mode,
-            direction,
-        )
+        let metric = MassMetric::atoms(masses.view(), n3)?;
+        Self::with_coordinate_metric(config, saddle, metric, mode, direction)
     }
 
     /// Build an IRC over an arbitrary-dimensional Euclidean surface.
@@ -323,27 +322,30 @@ impl IrcSession {
                 "mode must match the saddle dimension".into(),
             ));
         }
-        Self::with_coordinate_metric(config, saddle, Array1::ones(dimension), mode, direction)
+        let metric = MassMetric::unit(dimension)?;
+        Self::with_coordinate_metric(config, saddle, metric, mode, direction)
     }
 
     fn with_coordinate_metric(
         config: IrcConfig,
         saddle: Array1<f64>,
-        sqrtm: Array1<f64>,
+        metric: MassMetric,
         mode: Array1<f64>,
         direction: IrcDirection,
     ) -> Result<Self, SaddleError> {
         let dimension = saddle.len();
-        if sqrtm.len() != dimension || mode.len() != dimension {
+        if metric.len() != dimension || mode.len() != dimension {
             return Err(SaddleError::Shape(
                 "coordinate weights and mode must match the saddle".into(),
             ));
         }
+        let sqrtm = metric.sqrt_vector();
         let mut session = Self {
             dx_target: config.dx,
             config,
             x: saddle.clone(),
             x_saddle: saddle,
+            metric,
             sqrtm,
             d1: Array1::zeros(dimension),
             mode,
@@ -360,12 +362,8 @@ impl IrcSession {
     }
 
     fn seed_ts_mode(&mut self) {
-        let n = self.mode.len().min(self.sqrtm.len());
-        let mut u = Array1::zeros(self.mode.len());
-        for i in 0..n {
-            u[i] = self.mode[i] * self.sqrtm[i];
-        }
-        self.hess.seed_mode(&u, -1.0);
+        let weighted = self.metric.multiply_sqrt(self.mode.view());
+        self.hess.seed_mode(&weighted, -1.0);
     }
 
     /// Launch along the lowest eigenvector of the mass-weighted Hessian
@@ -398,6 +396,7 @@ impl IrcSession {
                 "masses (N) and seed (3N) must match a nonzero saddle".into(),
             ));
         }
+        let metric = MassMetric::atoms(masses.view(), n3)?;
         let (_, g0) = surface.eval(saddle.view())?;
         let params = EigenParams::default()
             .with_kind(config.eigen_kind)
@@ -406,12 +405,12 @@ impl IrcSession {
             surface,
             saddle.view(),
             g0.view(),
-            &sqrt_masses_3n(masses.as_slice().unwrap_or(&[])),
+            &metric,
             seed,
             config.dr,
             params,
         )?;
-        Self::new(config, saddle, masses, mode, direction)
+        Self::with_coordinate_metric(config, saddle, metric, mode, direction)
     }
 
     /// Current Cartesian coordinates, length `3N` (the session dimension for
@@ -446,18 +445,13 @@ impl IrcSession {
     }
 
     fn kick_vector(&self, direction: IrcDirection) -> Array1<f64> {
-        let mut mw = Vector::from_host(self.mode.clone());
-        for i in 0..mw.host_view().len() {
-            mw.host_mut()[i] *= self.sqrtm[i].max(1e-16);
-        }
-        let n = nrm2(mw.host_view());
+        let mw = self.metric.multiply_sqrt(self.mode.view());
+        let n = nrm2(mw.view());
         if n <= 1e-16 {
             return Array1::zeros(self.mode.len());
         }
-        let mut v0ts = Array1::zeros(self.mode.len());
-        for i in 0..self.mode.len() {
-            v0ts[i] = self.config.dx * (mw.host_view()[i] / n) / self.sqrtm[i].max(1e-16);
-        }
+        let scaled = mw.mapv(|component| self.config.dx * (component / n));
+        let mut v0ts = self.metric.divide_sqrt(scaled.view());
         // Sella: first nonzero of v0ts is positive, then reverse is -v0ts.
         if let Some(&v) = v0ts.iter().find(|v| v.abs() > 1e-16)
             && v < 0.0
@@ -485,17 +479,18 @@ impl IrcSession {
     /// `x_k` less the [`IrcKind::Gs2`] pivot, `(dx / 2) g / |g|` in the
     /// session metric, as a coordinate displacement.
     fn pivot_offset(&self, g: &Array1<f64>) -> Array1<f64> {
-        let g_mw = to_mw(g, &self.sqrtm, true);
+        let g_mw = self.metric.divide_sqrt(g.view());
         let norm = nrm2(g_mw.view());
         if norm <= 1e-16 {
             return Array1::zeros(g.len());
         }
-        to_mw(&(g_mw * (self.radius() / norm)), &self.sqrtm, true)
+        let scaled = g_mw.mapv(|component| component * (self.radius() / norm));
+        self.metric.divide_sqrt(scaled.view())
     }
 
     /// Sella: project `g` orthogonal to the path in the MW metric.
     fn path_force(&self, g: &Array1<f64>) -> Array1<f64> {
-        path_projected_force(g, &self.d1, &self.sqrtm)
+        path_projected_force(g, &self.d1, &self.metric)
     }
 
     /// One eigendecomposition of the mass-weighted quasi-Newton model,
@@ -549,7 +544,7 @@ impl IrcSession {
         } else {
             Inside::Radial
         };
-        sphere_increment(&self.trust(), spectrum, g, inside)
+        sphere_increment(&self.trust(), &self.metric, spectrum, g, inside)
     }
 
     /// A minimum on a sphere branch: past the kick, the force at or below
@@ -685,7 +680,8 @@ impl IrcSession {
             }
             energy = ev.0;
             let y = &ev.1 - &g;
-            let (s_mw, y_mw) = mw_pair(&s, &y, &self.sqrtm);
+            let s_mw = self.metric.multiply_sqrt(s.view());
+            let y_mw = self.metric.divide_sqrt(y.view());
             self.update_model(&s_mw, &y_mw);
             g = ev.1;
             max_force = self.config.force_gate.value(g.view());
@@ -704,7 +700,7 @@ impl IrcSession {
         self.d1.fill(0.0);
         self.last_step = None;
         self.arc += match self.config.kind {
-            IrcKind::Gs2 => nrm2(to_mw(&(&self.x - &x_from), &self.sqrtm, false).view()),
+            IrcKind::Gs2 => nrm2(self.metric.multiply_sqrt((&self.x - &x_from).view()).view()),
             _ => self.config.dx,
         };
         if !rejected {
@@ -775,7 +771,7 @@ impl IrcSession {
             }
         }
 
-        let g_mw = to_mw(&g0, &self.sqrtm, true);
+        let g_mw = self.metric.divide_sqrt(g0.view());
         let gn = nrm2(g_mw.view());
         if gn <= 1e-16 {
             return Ok(IrcReport {
@@ -788,15 +784,17 @@ impl IrcSession {
         }
 
         let h = self.config.dx;
+        let predictor = g_mw.mapv(|component| -h * component / gn);
         let mut x_pred = self.x.clone();
-        for i in 0..x_pred.len().min(self.sqrtm.len()) {
-            x_pred[i] += (-h * g_mw[i] / gn) / self.sqrtm[i].max(1e-16);
+        let predictor_step = self.metric.divide_sqrt(predictor.view());
+        for (coordinate, step) in x_pred.iter_mut().zip(predictor_step.iter()) {
+            *coordinate += step;
         }
         let ev_pred = surface.eval(x_pred.view())?;
         if !ev_pred.1.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("irc gradient"));
         }
-        let g_pred_mw = to_mw(&ev_pred.1, &self.sqrtm, true);
+        let g_pred_mw = self.metric.divide_sqrt(ev_pred.1.view());
         let mut g_avg = g_mw;
         axpy(1.0, g_pred_mw.view(), &mut g_avg);
         g_avg.mapv_inplace(|v| 0.5 * v);
@@ -811,13 +809,14 @@ impl IrcSession {
             });
         }
 
-        let mut s = Array1::zeros(self.x.len());
         let mut dx_mw_n2 = 0.0;
-        for i in 0..s.len().min(self.sqrtm.len()) {
-            let dmw = -h * g_avg[i] / ga;
+        let mut weighted_step = Array1::zeros(g_avg.len());
+        for (slot, &component) in weighted_step.iter_mut().zip(g_avg.iter()) {
+            let dmw = -h * component / ga;
             dx_mw_n2 += dmw * dmw;
-            s[i] = dmw / self.sqrtm[i].max(1e-16);
+            *slot = dmw;
         }
+        let s = self.metric.divide_sqrt(weighted_step.view());
         if let Some(prev) = &self.last_outer
             && self.arc > 8.0 * h
             && dot(prev.view(), s.view()) < 0.0
@@ -884,22 +883,23 @@ impl IrcSession {
 /// projection of that step is not the minimum of the model on the sphere.
 fn sphere_increment(
     trust: &IrcTrust,
+    metric: &MassMetric,
     spectrum: &ModelSpectrum,
     g: &Array1<f64>,
     inside: Inside,
 ) -> Array1<f64> {
-    let g_mw = to_mw(g, &trust.sqrtm, true);
-    let d1_mw = to_mw(&trust.d1, &trust.sqrtm, false);
+    let g_mw = metric.divide_sqrt(g.view());
+    let d1_mw = metric.multiply_sqrt(trust.d1.view());
     let step_at = |alpha: f64| {
         let (s_mw, _) = qn_irc_get_s(&spectrum.evals, &spectrum.evecs, &g_mw, &d1_mw, alpha);
-        to_mw(&s_mw, &trust.sqrtm, true)
+        metric.divide_sqrt(s_mw.view())
     };
     let s0 = step_at(0.0);
     if trust.cons(&s0) <= trust.dx + 1e-14 {
         return match inside {
             Inside::Keep => s0,
             Inside::Radial => trust.project(&s0),
-            Inside::Chord => chord_exit(&d1_mw, &s0, trust),
+            Inside::Chord => chord_exit(&d1_mw, &s0, trust, metric),
         };
     }
     let curvature = spectrum.evals.mapv(f64::abs);
@@ -930,8 +930,13 @@ fn sphere_increment(
 /// `s` scaled to `tau s / |s|` in MW coordinates, the root `tau >= 0` of
 /// `|d1 + tau s / |s|| = dx`: past a model minimum inside the sphere to the
 /// far side.
-fn chord_exit(d1_mw: &Array1<f64>, s: &Array1<f64>, trust: &IrcTrust) -> Array1<f64> {
-    let s_mw = to_mw(s, &trust.sqrtm, false);
+fn chord_exit(
+    d1_mw: &Array1<f64>,
+    s: &Array1<f64>,
+    trust: &IrcTrust,
+    metric: &MassMetric,
+) -> Array1<f64> {
+    let s_mw = metric.multiply_sqrt(s.view());
     let len = nrm2(s_mw.view());
     if len <= 1e-16 {
         return trust.project(s);
@@ -943,22 +948,18 @@ fn chord_exit(d1_mw: &Array1<f64>, s: &Array1<f64>, trust: &IrcTrust) -> Array1<
 }
 
 /// Mass-weighted path-orthogonal force. Algebra is `rgmin::vecops`.
-fn path_projected_force(g: &Array1<f64>, d1: &Array1<f64>, sqrtm: &Array1<f64>) -> Array1<f64> {
-    let n = g.len().min(d1.len()).min(sqrtm.len());
-    let mut d1m = Array1::zeros(n);
-    let mut gm = Array1::zeros(n);
-    for i in 0..n {
-        d1m[i] = d1[i] * sqrtm[i];
-        gm[i] = g[i] / sqrtm[i].max(1e-16);
-    }
+fn path_projected_force(g: &Array1<f64>, d1: &Array1<f64>, metric: &MassMetric) -> Array1<f64> {
+    let d1m = metric.multiply_sqrt(d1.view());
+    let mut gm = metric.divide_sqrt(g.view());
     let dn = nrm2(d1m.view());
     if dn > 1e-16 {
         let proj = dot(d1m.view(), gm.view()) / dn;
         axpy(-proj / dn, d1m.view(), &mut gm);
     }
+    let n = g.len().min(d1.len()).min(metric.len()).min(gm.len());
     let mut force = Array1::zeros(g.len());
     for i in 0..n {
-        force[i] = -gm[i] * sqrtm[i];
+        force[i] = -gm[i] * metric.sqrt_at(i);
     }
     force
 }
@@ -989,7 +990,7 @@ fn hessian_action<S: PointSurface>(
 struct FdHvp<'a, S: PointSurface> {
     surface: &'a S,
     g0: Array1<f64>,
-    sqrtm: &'a Array1<f64>,
+    metric: &'a MassMetric,
     dr: f64,
     fail: RefCell<Option<SaddleError>>,
     space: Complement,
@@ -997,9 +998,13 @@ struct FdHvp<'a, S: PointSurface> {
 
 impl<S: PointSurface> ApplyHessian for FdHvp<'_, S> {
     fn apply_hessian(&self, x: ArrayView1<f64>, v: ArrayView1<f64>) -> Array1<f64> {
-        let cartesian = self.space.lift(v) / self.sqrtm;
+        let lifted = self.space.lift(v);
+        let cartesian = self.metric.divide_sqrt(lifted.view());
         match hessian_action(self.surface, x, self.g0.view(), cartesian.view(), self.dr) {
-            Ok(hv) => self.space.reduce((hv / self.sqrtm).view()),
+            Ok(hv) => {
+                let weighted = self.metric.divide_sqrt(hv.view());
+                self.space.reduce(weighted.view())
+            }
             Err(e) => {
                 self.fail.replace(Some(e));
                 Array1::zeros(v.len())
@@ -1015,7 +1020,7 @@ fn lowest_via_fd<S: PointSurface>(
     surface: &S,
     x: ArrayView1<f64>,
     g0: ArrayView1<f64>,
-    sqrtm: &Array1<f64>,
+    metric: &MassMetric,
     seed: Array1<f64>,
     dr: f64,
     params: EigenParams,
@@ -1028,12 +1033,12 @@ fn lowest_via_fd<S: PointSurface>(
     }
     let mut space = Complement::new(x.len());
     for direction in excluded.rows() {
-        space.exclude((&direction * sqrtm).view());
+        space.exclude(metric.multiply_sqrt(direction).view());
     }
     if space.dimension() == 0 {
         return Err(SaddleError::Shape("minimum-mode space is empty".into()));
     }
-    let mut reduced_seed = space.reduce((seed * sqrtm).view());
+    let mut reduced_seed = space.reduce(metric.multiply_sqrt(seed.view()).view());
     if reduced_seed.dot(&reduced_seed).sqrt() <= 64.0 * f64::EPSILON {
         reduced_seed = Array1::from_iter(
             (0..space.dimension()).map(|i| ((i + 1) as f64 * 1.618033988749895).sin()),
@@ -1042,7 +1047,7 @@ fn lowest_via_fd<S: PointSurface>(
     let h = FdHvp {
         surface,
         g0: g0.to_owned(),
-        sqrtm,
+        metric,
         dr,
         fail: RefCell::new(None),
         space,
@@ -1062,13 +1067,15 @@ fn lowest_via_fd<S: PointSurface>(
     if !out.vector.iter().all(|v| v.is_finite()) || !out.value.is_finite() {
         return Err(SaddleError::NonFinite("lowest-mode eigenpair"));
     }
-    let mode = h.space.lift(out.vector.view()) / sqrtm;
+    let lifted = h.space.lift(out.vector.view());
+    let mode = metric.divide_sqrt(lifted.view());
     Ok((mode, out.value, out.actions))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MassMetric;
 
     struct Well;
 
@@ -1253,7 +1260,7 @@ mod tests {
     #[test]
     fn gs2_arc_adds_the_mw_chord_of_each_step() {
         let masses = Array1::from(vec![1.0, 4.0]);
-        let sqrtm = sqrt_masses_3n(masses.as_slice().unwrap());
+        let metric = MassMetric::atoms(masses.view(), 6).unwrap();
         let saddle = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
         let mut mode = Array1::zeros(6);
         mode[0] = 1.0;
@@ -1274,7 +1281,7 @@ mod tests {
         for _ in 0..4 {
             let report = irc.step(&Well).unwrap();
             let x = irc.position().to_owned();
-            arc += nrm2(to_mw(&(&x - &last), &sqrtm, false).view());
+            arc += nrm2(metric.multiply_sqrt((&x - &last).view()).view());
             assert_eq!(report.arc, arc);
             last = x;
         }
@@ -1283,21 +1290,28 @@ mod tests {
     #[test]
     fn interior_gs2_step_runs_on_where_the_radial_one_stays() {
         let dx = 0.2;
-        let sqrtm = sqrt_masses_3n(&[1.0, 4.0]);
+        let metric = MassMetric::atoms(Array1::from(vec![1.0, 4.0]).view(), 6).unwrap();
+        let sqrtm = metric.sqrt_vector();
         let mut d1_mw = Array1::zeros(6);
         d1_mw[3] = dx;
-        let trust = IrcTrust::new(to_mw(&d1_mw, &sqrtm, true), sqrtm.clone(), dx);
-        let toward_centre = to_mw(&(&d1_mw * -0.3), &sqrtm, true);
-        let radial = to_mw(&trust.project(&toward_centre), &sqrtm, false);
+        let trust = IrcTrust::new(metric.divide_sqrt(d1_mw.view()), sqrtm.clone(), dx);
+        let toward_centre = metric.divide_sqrt((&d1_mw * -0.3).view());
+        let radial = metric.multiply_sqrt(trust.project(&toward_centre).view());
         assert!(nrm2(radial.view()) < 1e-12, "{radial}");
-        let chord = to_mw(&chord_exit(&d1_mw, &toward_centre, &trust), &sqrtm, false);
+        let chord =
+            metric.multiply_sqrt(chord_exit(&d1_mw, &toward_centre, &trust, &metric).view());
         assert!(nrm2((&chord + &d1_mw * 2.0).view()) < 1e-12, "{chord}");
 
         let mut oblique_mw = &d1_mw * -0.3;
         oblique_mw[0] = 0.05;
-        let s = chord_exit(&d1_mw, &to_mw(&oblique_mw, &sqrtm, true), &trust);
+        let s = chord_exit(
+            &d1_mw,
+            &metric.divide_sqrt(oblique_mw.view()),
+            &trust,
+            &metric,
+        );
         assert!((trust.cons(&s) - dx).abs() < 1e-12);
-        let s_mw = to_mw(&s, &sqrtm, false);
+        let s_mw = metric.multiply_sqrt(s.view());
         let cos =
             dot(s_mw.view(), oblique_mw.view()) / (nrm2(s_mw.view()) * nrm2(oblique_mw.view()));
         assert!((cos - 1.0).abs() < 1e-12, "cos {cos}");
@@ -1386,6 +1400,60 @@ mod tests {
             let report = irc.step(&Well).unwrap();
             assert!(!report.at_minimum);
             assert_eq!(irc.config.dx, expected);
+        }
+    }
+
+    #[test]
+    fn mass_weighted_well_path_matches_the_previous_metric() {
+        let dx = 0.15;
+        let masses = Array1::from(vec![1.0, 4.0]);
+        let saddle = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let mut irc = session(dx, masses, saddle);
+        let expected_arc = [
+            0x3fc3_3333_3333_3333,
+            0x3fd3_3333_3333_3333,
+            0x3fdc_cccc_cccc_cccc,
+            0x3fe3_3333_3333_3333,
+        ];
+        let expected_pos = [
+            [0x3fc3_3333_3333_3333, 0, 0, 0x3ff0_0000_0000_0000, 0, 0],
+            [0x3fd3_3333_3333_3333, 0, 0, 0x3ff0_0000_0000_0000, 0, 0],
+            [0x3fdc_cccc_cccc_cccc, 0, 0, 0x3ff0_0000_0000_0000, 0, 0],
+            [0x3fe3_3333_3333_3332, 0, 0, 0x3ff0_0000_0000_0000, 0, 0],
+        ];
+        for (step, (arc_bits, pos_bits)) in expected_arc.into_iter().zip(expected_pos).enumerate() {
+            let report = irc.step(&Well).unwrap();
+            assert_eq!(report.arc.to_bits(), arc_bits, "arc at step {step}");
+            for (coordinate, bit) in irc.position().iter().zip(pos_bits) {
+                assert_eq!(coordinate.to_bits(), bit, "position at step {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn unequal_mass_kick_matches_the_previous_metric() {
+        let dx = 0.2;
+        let masses = Array1::from(vec![1.0, 16.0]);
+        let saddle = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let mut mode = Array1::zeros(6);
+        mode[0] = 1.0;
+        mode[3] = 1.0;
+        let mut irc = IrcSession::new(
+            IrcConfig::default()
+                .with_dx(dx)
+                .with_force_tol(1e-12)
+                .with_max_inner(1),
+            saddle,
+            masses,
+            mode,
+            IrcDirection::Forward,
+        )
+        .unwrap();
+        let report = irc.step(&Flat).unwrap();
+        assert_eq!(report.arc.to_bits(), 0x3fc9_9999_9999_999a);
+        let expected = [0x3fa8_d5ed_070e_f27d, 0, 0, 0x3ff0_c6af_6838_7794, 0, 0];
+        for (coordinate, bit) in irc.position().iter().zip(expected) {
+            assert_eq!(coordinate.to_bits(), bit);
         }
     }
 

@@ -1,0 +1,4 @@
+~MassMetric~ checks per-coordinate or per-atom masses and stores each square root once.
+A ~MetricPoint~ and a ~MetricTangent~ are multiplied by that square root, and a ~MetricCovector~ (a force or a gradient) is divided by it.
+Unit masses copy their input.
+IRC, fixed-energy LI-NEB, the tunneling path, PAFI, OH-TST, and the minimum-mode plane take their mass weights from the metric.

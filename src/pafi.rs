@@ -135,6 +135,7 @@ use rgmin::{Control, Error, Method, Oracle, Solver, Status, StopNorm};
 use crate::Region;
 use crate::band::BandSurface;
 use crate::error::SaddleError;
+use crate::mass_metric::MassMetric;
 use crate::minmode::PointSurface;
 use crate::projector::{
     Hyperplane, HyperplaneEnsemble, HyperplaneObservation, HyperplaneSampleBudget,
@@ -181,8 +182,9 @@ pub enum PafiMeanForce {
 /// configuration on entry: `kT`, the mobility and the step must be finite
 /// and positive, the stride and [`PafiConfig::trajectories`] positive,
 /// [`PafiConfig::blocks`] at least 2, [`PafiConfig::samples`] at least
-/// twice the blocks, and a given `target_error` or `max_jump` finite and
-/// positive.
+/// twice the blocks, [`PafiConfig::retain`] at most
+/// [`PafiConfig::samples`], and a given `target_error` or `max_jump`
+/// finite and positive.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct PafiConfig {
@@ -218,7 +220,12 @@ pub struct PafiConfig {
     /// holds at least two atoms, three entries each; otherwise it is
     /// ignored.
     pub fix_com: bool,
-    /// How many recorded configurations to keep, evenly spaced.
+    /// How many recorded configurations to keep.
+    ///
+    /// The retained indices are deterministic and evenly distributed from
+    /// zero through [`Self::samples`] minus one. Both endpoints are kept
+    /// when this is greater than one. It must not exceed [`Self::samples`].
+    /// Zero keeps nothing.
     pub retain: usize,
     /// Stop early when [`FreeEnergyProfile::barrier_error`] is at or below
     /// this. `None` runs one pass.
@@ -328,6 +335,11 @@ impl PafiConfig {
         {
             return Err(SaddleError::Invalid(
                 "PAFI needs a positive stride and trajectory count, at least two blocks, and two samples per block".into(),
+            ));
+        }
+        if self.retain > self.samples {
+            return Err(SaddleError::Invalid(
+                "PAFI cannot retain more configurations than its first-pass samples".into(),
             ));
         }
         if let Some(target) = self.target_error
@@ -593,7 +605,7 @@ pub struct TrajectoryPoint {
 fn mass_weighted_path(
     positions: &Array2<f64>,
     masses: ArrayView1<f64>,
-) -> Result<(Array2<f64>, Vec<f64>), SaddleError> {
+) -> Result<(Array2<f64>, Vec<f64>, MassMetric), SaddleError> {
     let images = positions.nrows();
     let width = positions.ncols();
     if images < 2 || width == 0 {
@@ -617,14 +629,8 @@ fn mass_weighted_path(
             "fixed-energy path masses must be positive".into(),
         ));
     }
-    let sqrt_mass = masses.mapv(f64::sqrt);
-    let mut coordinate = Array2::zeros((images, width));
-    for image in 0..images {
-        for coordinate_index in 0..width {
-            coordinate[(image, coordinate_index)] =
-                positions[(image, coordinate_index)] * sqrt_mass[coordinate_index];
-        }
-    }
+    let metric = MassMetric::coordinates(masses, width)?;
+    let coordinate = metric.weight_point_rows(positions.view());
     if !coordinate.iter().all(|value| value.is_finite()) {
         return Err(SaddleError::NonFinite("fixed-energy path positions"));
     }
@@ -650,7 +656,7 @@ fn mass_weighted_path(
     for value in &mut knots {
         *value /= total;
     }
-    Ok((coordinate, knots))
+    Ok((coordinate, knots, metric))
 }
 
 /// Mass-weighted path and the parallel force along it.
@@ -688,7 +694,7 @@ impl FixedEnergyTrajectory {
         gradients: &Array2<f64>,
         masses: ArrayView1<f64>,
     ) -> Result<Self, SaddleError> {
-        let (coordinate, knots) = mass_weighted_path(positions, masses)?;
+        let (coordinate, knots, metric) = mass_weighted_path(positions, masses)?;
         let images = positions.nrows();
         let width = positions.ncols();
         if gradients.nrows() != images || gradients.ncols() != width {
@@ -699,7 +705,6 @@ impl FixedEnergyTrajectory {
         if !gradients.iter().all(|value| value.is_finite()) {
             return Err(SaddleError::NonFinite("fixed-energy path gradients"));
         }
-        let sqrt_mass = masses.mapv(f64::sqrt);
         let coordinate_spline = Spline::new(&knots, &coordinate, SplineEnds::Natural)?;
         let mut parallel = Array2::zeros((images, 1));
         for image in 0..images {
@@ -709,8 +714,8 @@ impl FixedEnergyTrajectory {
             for coordinate_index in 0..width {
                 let direction = geometry.tangent[coordinate_index];
                 tangent_norm2 += direction * direction;
-                force +=
-                    -gradients[(image, coordinate_index)] * direction / sqrt_mass[coordinate_index];
+                force += -gradients[(image, coordinate_index)] * direction
+                    / metric.sqrt_at(coordinate_index);
             }
             if !tangent_norm2.is_finite() || !force.is_finite() {
                 return Err(SaddleError::NonFinite("fixed-energy path parallel force"));
@@ -966,7 +971,11 @@ pub struct HyperplaneAverage {
     /// Force evaluations spent on this plane, the quenches of
     /// [`PafiConfig::max_jump`] included, summed over rounds.
     pub evaluations: usize,
-    /// Configurations kept from the production run, on the plane.
+    /// Configurations kept from the recorded series, on the plane.
+    ///
+    /// There are [`PafiConfig::retain`] of them when each selected record
+    /// has a position. The indices run from the first sample through the
+    /// last, and both ends are kept when more than one is kept.
     pub retained: Vec<Array1<f64>>,
     /// Automated equilibration, correlation and split-half drift report.
     pub equilibration: EquilibrationReport,
@@ -1346,6 +1355,19 @@ fn holds_com(config: &PafiConfig, n: usize) -> bool {
     config.fix_com && n >= 6 && n.is_multiple_of(3)
 }
 
+/// Index of retained sample `ordinal` in a series of `samples`.
+///
+/// Zero when `retain` is at most one. Otherwise
+/// `ordinal * (samples - 1) / (retain - 1)`, so the indices run from the
+/// first record through the last and both ends are kept.
+fn retention_index(ordinal: usize, samples: usize, retain: usize) -> usize {
+    if retain <= 1 {
+        0
+    } else {
+        (ordinal as u128 * (samples - 1) as u128 / (retain - 1) as u128) as usize
+    }
+}
+
 fn estimate_pafi(
     ensemble: HyperplaneEnsemble,
     plane: &PathPlane<'_>,
@@ -1393,21 +1415,19 @@ fn estimate_pafi(
     let kept_observations = &ensemble.observations[equilibration.discard..];
     let kept_values = &observations[equilibration.discard..];
     let psi = kept_observations.iter().map(psi_of).sum::<f64>() / kept_observations.len() as f64;
-    let retain_gap = kept_observations
-        .len()
-        .div_ceil(config.retain.max(1))
-        .max(1);
-    let retained = if config.retain == 0 {
-        Vec::new()
-    } else {
-        kept_observations
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| index.is_multiple_of(retain_gap))
-            .filter_map(|(_, sample)| sample.position.clone())
-            .take(config.retain)
-            .collect()
-    };
+    // A gap of `div_ceil(samples, retain)` steps past records whenever
+    // `retain` does not divide the series, so 64 out of 200 kept 50.
+    // These indices hit both ends and stay within one step of even.
+    let retain = config.retain.min(config.samples);
+    let mut retained = Vec::with_capacity(retain);
+    for (recorded, sample) in ensemble.observations.iter().enumerate() {
+        if retained.len() < retain
+            && recorded == retention_index(retained.len(), config.samples, retain)
+            && let Some(position) = sample.position.as_ref()
+        {
+            retained.push(position.clone());
+        }
+    }
     let (gradient, error, _, _) = block_mean(kept_values, config.blocks);
     Ok(HyperplaneAverage {
         gradient,
@@ -2234,6 +2254,55 @@ mod tests {
     }
 
     #[test]
+    fn unequal_mass_path_matches_direct_square_root_products() {
+        let positions = array![[0.2, -0.5, 0.1], [0.7, 0.3, -0.4], [1.1, -0.2, 0.8]];
+        let gradients = array![[0.3, -1.5, 0.25], [-0.4, 0.8, 0.1], [1.2, -0.3, -0.6]];
+        let masses = array![1.0, 4.0, 9.0];
+        let path =
+            FixedEnergyTrajectory::from_gradients(&positions, &gradients, masses.view()).unwrap();
+        let sqrt_mass = masses.mapv(f64::sqrt);
+        let width = positions.ncols();
+        for (image, knot) in path.coordinate().knots().iter().copied().enumerate() {
+            let sample = path.coordinate().sample(knot).unwrap();
+            for coordinate in 0..width {
+                let expected = positions[(image, coordinate)] * sqrt_mass[coordinate];
+                assert_eq!(
+                    sample.value[coordinate].to_bits(),
+                    expected.to_bits(),
+                    "coordinate {coordinate} of image {image}"
+                );
+            }
+            let geometry = PathGeometry::on_spline(path.coordinate(), knot).unwrap();
+            let mut tangent_norm2 = 0.0;
+            let mut force = 0.0;
+            for coordinate in 0..width {
+                let direction = geometry.tangent[coordinate];
+                tangent_norm2 += direction * direction;
+                force += -gradients[(image, coordinate)] * direction / sqrt_mass[coordinate];
+            }
+            let expected = force / tangent_norm2.sqrt();
+            assert_eq!(
+                path.parallel_force().sample(knot).unwrap().value[0].to_bits(),
+                expected.to_bits(),
+                "parallel force of image {image}"
+            );
+        }
+
+        let unit = array![1.0, 1.0, 1.0];
+        let unit_path =
+            FixedEnergyTrajectory::from_gradients(&positions, &gradients, unit.view()).unwrap();
+        for (image, knot) in unit_path.coordinate().knots().iter().copied().enumerate() {
+            let sample = unit_path.coordinate().sample(knot).unwrap();
+            for coordinate in 0..width {
+                assert_eq!(
+                    sample.value[coordinate].to_bits(),
+                    positions[(image, coordinate)].to_bits()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn from_images_checks_positions_and_masses_before_the_surface() {
         let surface = CountingSurface::new();
         let good = array![[0.0, 0.0], [1.0, 0.0], [2.0, 0.5]];
@@ -2349,5 +2418,38 @@ mod estimator_tests {
         )
         .expect_err("zero paper psi violates locality");
         assert!(error.to_string().contains("locality condition"));
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::{PafiConfig, SaddleError, retention_index};
+
+    fn indices(samples: usize, retain: usize) -> Vec<usize> {
+        (0..retain)
+            .map(|ordinal| retention_index(ordinal, samples, retain))
+            .collect()
+    }
+
+    #[test]
+    fn retained_indices_cover_a_nondivisible_request() {
+        let got = indices(200, 64);
+        assert_eq!(got.len(), 64);
+        assert_eq!(got.first().copied(), Some(0));
+        assert_eq!(got.last().copied(), Some(199));
+        let mut gaps = [0usize; 5];
+        for pair in got.windows(2) {
+            gaps[pair[1] - pair[0]] += 1;
+        }
+        assert_eq!(gaps[3], 53);
+        assert_eq!(gaps[4], 10);
+        assert_eq!(indices(8, 8), (0..8).collect::<Vec<_>>());
+        assert_eq!(indices(8, 1), vec![0]);
+        assert!(matches!(
+            PafiConfig::default().with_retain(201).check(),
+            Err(SaddleError::Invalid(message))
+                if message
+                    == "PAFI cannot retain more configurations than its first-pass samples"
+        ));
     }
 }
