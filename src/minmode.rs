@@ -138,9 +138,12 @@ pub enum MinModeKind {
     /// subspace per compute, one gradient per action. The estimate
     /// stops when the lowest Ritz pair's residual divided by the
     /// absolute Ritz value meets `rotation_tol`, together with the
-    /// relative change of that value. A Ritz value near zero compares
-    /// the residual with `rotation_tol` directly. The torque window
-    /// stops once two vectors leave that same ratio under 1.
+    /// relative change of that value. A Ritz value whose magnitude is
+    /// at most 1e-14 of the curvature scale, the largest Hessian
+    /// action norm the estimate has formed, divides the residual by
+    /// that scale. The torque window stops once two vectors leave
+    /// that same ratio under 1, dividing by the same scale when the
+    /// Ritz value is that small.
     Lanczos,
 }
 
@@ -550,8 +553,9 @@ const STOCK_ROTATION_TOL: f64 = 1e-4;
 /// this is finished (classic dimer, `torque_min` .. `torque_max`,
 /// `rotations_min` = 1). Lanczos reads it as the bound on the
 /// dimensionless residual once it holds two vectors: the Ritz residual
-/// divided by the absolute Ritz value, or the residual itself when that
-/// value is near zero.
+/// divided by the absolute Ritz value, or by the curvature scale, the
+/// largest Hessian action norm the estimate has formed, when the Ritz
+/// value is at most 1e-14 of that scale.
 const TORQUE_MAX: f64 = 1.0;
 
 /// Scale of the step that replaces a capped FIRE move which left the
@@ -1327,11 +1331,11 @@ const LANCZOS_NEAR_ZERO: f64 = 1e-14;
 /// The magnitude that divides a Lanczos residual or Ritz change.
 ///
 /// `scale` is the curvature scale of the estimate: the largest Hessian
-/// action norm `|H q_j|` over its Krylov vectors. It bounds every Ritz
-/// value from above and moves with the Hessian under a change of
-/// energy or length units. A `curvature` within [`LANCZOS_NEAR_ZERO`]
-/// of `scale` is replaced by `scale`. `None` when an input is not
-/// finite or `scale` is negative.
+/// action norm `|H q_j|` over its Krylov vectors. It is a scale for the
+/// relative residual, and it moves with the Hessian under a change of
+/// energy or length units. A curvature whose magnitude is at most
+/// [`LANCZOS_NEAR_ZERO`] times `scale` is replaced by `scale`. `None`
+/// when an input is not finite or `scale` is negative.
 fn lanczos_divisor(curvature: f64, scale: f64) -> Option<f64> {
     if !(curvature.is_finite() && scale.is_finite() && scale >= 0.0) {
         return None;
@@ -1416,10 +1420,13 @@ pub type KrylovBlock = Vec<(Array1<f64>, Array1<f64>)>;
 /// 121, 9776 (2004), doi:10.1063/1.1809574, as eOn implements it: stop
 /// when the relative change in the lowest Ritz value falls under
 /// `rotation_tol`, or when the residual `beta |s|` divided by the
-/// absolute Ritz value does. A seed that is already the mode closes the
+/// absolute Ritz value does. A Ritz value at most 1e-14 of the
+/// curvature scale, the largest Hessian action norm formed so far,
+/// divides by that scale. A seed that is already the mode closes the
 /// Krylov on the first product. Under the torque window the estimate
 /// also stops once it holds two vectors and that ratio is under
-/// [`TORQUE_MAX`]. The dimer window stays an absolute rotational force.
+/// [`TORQUE_MAX`], dividing by the same scale when the Ritz value is
+/// that small. The dimer window stays an absolute rotational force.
 #[allow(clippy::too_many_arguments)]
 fn lanczos_mode<S: PointSurface>(
     surface: &Counted<'_, S>,
@@ -2181,8 +2188,10 @@ impl MinModeSession {
     /// one iteration once the rotational force is under one (eOn
     /// `torque_max`), and a Lanczos estimate stops once two vectors
     /// leave the Ritz residual divided by the absolute Ritz value under
-    /// one. A Ritz value near zero uses the estimate's curvature scale
-    /// as the divisor. `None`, the default, keeps the window on for a
+    /// one. A Ritz value whose magnitude is at most 1e-14 of the
+    /// estimate's curvature scale, the largest Hessian action norm it
+    /// has formed, uses that scale as the divisor. `None`, the default,
+    /// keeps the window on for a
     /// dimer exactly when its angle test is disabled and `rotation_tol`
     /// is at least the stock 1e-4. Lanczos keeps the window only while
     /// no [`MinModeSession::set_lanczos_rel_tol`] is set.

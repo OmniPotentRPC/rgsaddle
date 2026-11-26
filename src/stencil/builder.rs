@@ -404,8 +404,9 @@ impl PointBuilder {
     /// A dimer stops when the rotational force falls under this value,
     /// in the host's curvature units. Lanczos stops when the lowest Ritz
     /// residual divided by the absolute Ritz value falls under it. A
-    /// Ritz value near zero compares the residual with this value
-    /// directly.
+    /// Ritz value whose magnitude is at most 1e-14 of the curvature
+    /// scale, the largest Hessian action norm the estimate has formed,
+    /// divides the residual by that scale.
     pub fn rotation_tol(mut self, rotation_tol: f64) -> Self {
         self.rotation_tol = rotation_tol;
         self

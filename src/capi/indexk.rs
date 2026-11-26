@@ -38,8 +38,9 @@ pub struct RgsaddleIndexKConfig {
     /// eV/Angstrom^2. For Lanczos it is dimensionless: the lowest Ritz
     /// residual divided by the absolute Ritz value, and, with no host
     /// relative tolerance, the relative change of that value. A Ritz
-    /// value near zero compares the residual with this bound directly.
-    /// The core crate's default is 0.0001.
+    /// value whose magnitude is at most 1e-14 of the curvature scale,
+    /// the largest Hessian action norm the estimate has formed, divides
+    /// the residual by that scale. The core crate's default is 0.0001.
     pub rotation_tol: f64,
     /// Cap on dimer rotations, or Lanczos actions, in one step; zero or more.
     pub max_rotations: i64,
