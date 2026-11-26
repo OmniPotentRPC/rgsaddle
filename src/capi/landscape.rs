@@ -627,8 +627,8 @@ mod guard_tests {
             map: Some(map),
         }));
         let mut columns = -1;
-        let unaligned = 1usize as *mut f64;
-        let status = unsafe { rgsaddle_landscape_modes(session, 0, unaligned, &mut columns) };
+        let dangling = std::ptr::dangling_mut();
+        let status = unsafe { rgsaddle_landscape_modes(session, 0, dangling, &mut columns) };
         assert_eq!(status, RGSADDLE_OK);
         assert_eq!(columns, 0);
         unsafe { rgsaddle_landscape_free(session) };

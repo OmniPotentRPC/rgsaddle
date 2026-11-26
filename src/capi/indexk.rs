@@ -767,10 +767,10 @@ mod tests {
 
     #[test]
     fn read_modes_with_a_zero_count_does_not_slice_the_pointer() {
-        let unaligned = 1usize as *const f64;
-        let rows = read_modes(0, 3, unaligned).expect("zero rows");
+        let dangling = std::ptr::dangling();
+        let rows = read_modes(0, 3, dangling).expect("zero rows");
         assert_eq!(rows.expect("empty rows").dim(), (0, 3));
-        let columns = read_modes(4, 0, unaligned).expect("zero columns");
+        let columns = read_modes(4, 0, dangling).expect("zero columns");
         assert_eq!(columns.expect("empty columns").dim(), (4, 0));
         let raw = [1.0, 2.0, 3.0, 4.0];
         let block = read_modes(2, 2, raw.as_ptr())
