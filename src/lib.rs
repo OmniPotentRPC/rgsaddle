@@ -294,9 +294,12 @@ pub use stencil::{
 pub use strain_rate::{
     BOLTZMANN_EV_PER_K, CurvatureBound, ElasticDipole, Estimate, HopVariant, LINEAR_FOLD_EV,
     NEGATIVE_CURVATURE, SaddleSeed, SearchReason, Strain, StrainResponse, TranslationalSplit,
-    Trust, TrustPolicy, activation_volume, angular_scale_rad_s, arrhenius,
-    compliance_from_stiffness, cubic_rotations, double_dot, elastic_dipole, rotation_x,
+    Trust, TrustPolicy, VineyardConfig, VineyardReport, activation_volume, angular_scale_rad_s,
+    arrhenius, compliance_from_stiffness, cubic_rotations, dense_hessian, double_dot,
+    elastic_dipole, mass_weight_atom_hessian, mass_weight_hessian, rotation_x,
     split_translational_modes, symmetrize, transform_tensor, vineyard_prefactor,
+    vineyard_prefactor_dense, vineyard_prefactor_dense_matrices, vineyard_prefactor_from_spectra,
+    vineyard_prefactor_lanczos, vineyard_prefactor_slq, vineyard_prefactor_weighted,
 };
 pub use tangent::TangentKind;
 pub use trics::{
@@ -314,6 +317,7 @@ pub mod field;
 pub mod force;
 pub mod force_match;
 pub mod geom;
+pub mod hessian_free;
 pub mod internal;
 pub mod kappa;
 pub mod linalg;
@@ -339,6 +343,12 @@ pub use eigensolve::{
     EigenDevice, ExpandKind, dense_logabsdet, eigh_on, exact_eigh, exact_eigvalsh, expand,
     faer_eigh, lowest_on, rayleigh_ritz, rayleigh_ritz_iter, relative_zero_tolerance, solve_dense,
     solve_dense_matrix, spd_logdet,
+};
+
+pub use hessian_free::{
+    DeflatedAction, FdHessianAction, HessianAction, LanczosSpectrum, SlqLogDetRatio,
+    fd_hessian_from_forces, fd_hessian_from_surface, lanczos_lowest_modes, orthonormal_basis,
+    slq_logdet_ratio,
 };
 
 pub use force::ForceGate;
@@ -368,7 +378,10 @@ pub use pes_internal::{
     SellaPes, niggli_reduce_cell, niggli_reduce_vectors, place_perp_dummy,
 };
 
-pub use covalent::{atomic_number, covalent_radius, element_symbol};
+pub use covalent::{
+    ATOMIC_MASSES_AMU, atomic_mass, atomic_mass_by_symbol, atomic_number, covalent_radius,
+    element_symbol,
+};
 pub use topology::{
     AtomMap, DummyHost, InternalTopology, LinearBend, PlanarWatch, TopologyCheck, TopologyConfig,
     check_chart,

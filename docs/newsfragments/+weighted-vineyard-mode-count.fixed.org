@@ -1,0 +1,2 @@
+~vineyard_prefactor_weighted~ requires exactly one more positive mode at the minimum than at the saddle.
+The prefactor then stays in Hz.

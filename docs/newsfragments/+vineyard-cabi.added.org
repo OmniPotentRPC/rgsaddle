@@ -1,0 +1,2 @@
+C ABI minor 70 adds standard atomic mass lookup by atomic number or symbol and mass weighted finite difference Vineyard prefactors through ~rgsaddle_atomic_mass~, ~rgsaddle_atomic_mass_by_symbol~, ~rgsaddle_vineyard_config_default~, and ~rgsaddle_vineyard_fd~.
+The new wire structures are ~rgsaddle_vineyard_config_t~ and ~rgsaddle_vineyard_report_t~.

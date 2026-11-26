@@ -283,6 +283,8 @@ The table below lists the main types.
 | `VineyardIndexReport`          | The `IndexReport` of a certified `minimum` and `saddle`, returned by `certify_vineyard_pair`. The function needs each point stationary to a force tolerance, a minimum with no projected negative mode, a saddle with exactly one, and `IndexCheck::lowest` of at least two. Non-exhaustive |
 | `VineyardIndexError`           | Why a pair is not Vineyard-ready: `Evaluation`, `MinimumForce`, `SaddleForce`, `Minimum` or `Saddle`, the last two with the lowest projected spectrum. Non-exhaustive |
 | `StrainResponse`               | One hop. `barrier(ε)` is the lowest symmetry image of `ΔE0 - (P_saddle - P_minimum):ε`, or `NeedsSearch` past the validity bound. `ElasticDipole::from_stress` is `-V (σ_defect - σ_bulk)`. `refine` caches an index-1 solid dimer. `with_prefactor`, `with_variants`, `with_point_group`, `with_policy`, and `with_multipoles` attach options. `to_json` and `from_json` are the event record |
+| `VineyardConfig`               | Mass-weighted Vineyard dense FD settings: `step` (`with_step`, default 1e-2), `difference` (`with_difference`, default `Central`), `positive_tol` (`with_positive_tol`, default 1e-8), and `negative_tol` (`with_negative_tol`, default 1e-4). Non-exhaustive |
+| `VineyardReport`               | A mass weighted Vineyard prefactor and its retained mode counts. For `vineyard_prefactor_slq`, `std_err` measures stochastic probe variance only. It excludes truncation bias from the finite Lanczos quadrature |
 | `defect_pair_rates`            | One relaxed geometry and a hop catalogue. Solid dimer, index check, connectivity, fixed CI-NEB, PAFI `ΔF`, Bennett–Chandler `κ`. `k ` κ ν exp(-ΔF/kT)=. `RateCatalogue` is `rgsaddle.defect_pair_rates` |
 | `npt_lattice`                  | Isotropic Langevin dynamics with a Berendsen barostat on a crystal, with the kinetic pressure in the drive. `NptConfig` is non-exhaustive: start from `Default` and chain the `with_*` setters, including `with_repeats`, `with_maximum_steps`, `with_extension_steps` and `with_block_steps`. `NptReport` carries the mean lattice parameter and pressure with blocking standard errors. `pressure_converged` is an indicative screen, not a proof. See [NPT lattice sampling](howto/npt-lattice.html) |
 | `PairNetwork`                  | States are orbits of (relative vector, orientation) under a caller's integer point group; hop classes are orbits of the unordered configuration pair and saddle director. `sites` takes a per-edge rate closure and returns `VolumeSite` rows and outer hops. `cubic_group` is O_h |
@@ -352,7 +354,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `cell_log` | Types: `CellChart`, `CellState`, `M3`, `PackedHess`. Functions: `expm_3x3`, `expm_frechet`, `logm_3x3`, `m3_det`, `m3_from_row9`, `m3_inv`, `m3_mul`, `m3_to_row9`, `transform_cell_block` |
 | `connect` | Types: `ConnectConfig`, `ConnectProfile`, `ConnectReport`. Functions: `connect` |
 | `constraints` | Types: `Constraints`, `Equality`, `InternalCounts` |
-| `covalent` | Functions: `atomic_number`, `covalent_radius`, `element_symbol`. Constants: `CORDERO_2008_PM`, `LAST_CORDERO_Z` |
+| `covalent` | Functions: `atomic_mass`, `atomic_mass_by_symbol`, `atomic_number`, `covalent_radius`, `element_symbol`. Constants: `ATOMIC_MASSES_AMU`, `CORDERO_2008_PM`, `LAST_CORDERO_Z` |
 | `defect_pair` | Types: `BasinSaddle`, `CaptureRecord`, `CellMode`, `DefectPairConfig`, `DimerSeed`, `DirectionClass`, `FreeMigration`, `HopOutcome`, `HopTemplate`, `MatchedCapture`, `OuterHop`, `PairSetup`, `PeriodicSinkRate`, `PeriodicSinkSurvival`, `RateCatalogue`, `RateEntry`, `RecombinationVolume`, `SiteOutcome`, `SphereLanding`, `VolumePlacement`, `VolumeSite`. Functions: `attempt_frequency`, `capture_is_spontaneous`, `capture_is_spontaneous_within`, `classify_separation`, `debye_hit_probability`, `debye_matched_radius`, `debye_radius`, `debye_resistance`, `defect_pair_rates`, `descend_to_floor`, `effective_capture_radius`, `embed_free_migration`, `embed_sphere_return`, `kinetic_recombination_volume`, `matched_capture_radius`, `mean_absorption_time`, `pair_separation`, `periodic_capture_log_likelihood`, `periodic_sink_rate`, `periodic_sink_survival`, `product_tangent`, `seeded_saddles`, `segment_band`, `shell_pair_factor`, `smoluchowski_rate`, `sphere_hit_probability`, `spherical_return_probability`, `volume_from_frequency`. Constants: `FREE_CRYSTAL`, `SPONTANEOUS_BARRIER_EV` |
 | `direction_cover` | Types: `ArmFailure`, `ArmId`, `ArmOutcome`, `ArmPolicy`, `ArmRecord`, `ArmSuggestion`, `ArmTrial`, `AtomCoverage`, `CoverBudget`, `CoverageReport`, `DirectionCover`, `DirectionCoverConfig`, `ProductState`, `SaddleEntry`. Functions: `covering_radius_s2`, `sphere_cover` |
 | `eigensolve` | Types: `EigenDevice`, `ExpandKind`, `RitzDecomposition`. Functions: `dense_logabsdet`, `eigh_on`, `exact_eigh`, `exact_eigvalsh`, `expand`, `faer_eigh`, `lowest_on`, `rayleigh_ritz`, `rayleigh_ritz_iter`, `relative_zero_tolerance`, `solve_dense`, `solve_dense_matrix`, `spd_logdet` |
@@ -364,6 +366,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `force_match` | Types: `ForceMatchOpts`, `ForceMatchReport`, `ForceMatchedHessian`, `PairKind`. Functions: `bond_hessian`, `covalent_pairs`, `covalent_radius`, `fit_bond_ks`, `force_match`, `force_match_hessian`, `force_match_on`, `project_force_match`, `retract_force_match`, `transport_force_match` |
 | `geom` | Types: `SellaGeom`, `TrustSchedule`. Functions: `trust_update`, `u_t_h_u`, `u_t_vec`, `u_vec`, `update_trust` |
 | `gpu` | Types: `GpuPolicy`. Functions: `clear_oom_floor`, `cuda_available`, `cuda_device`, `fail_next_cuda_claim`, `gpu_eigh`, `gpu_eigh_env`, `gpu_eigh_t`, `gpu_eigh_with`, `gpu_ok`, `gpu_ok_env`, `gpu_project`, `gpu_project_env`, `gpu_project_with`, `gpu_qr`, `gpu_qr_env`, `gpu_qr_with`, `lock_oom_for_test`, `oom_floor`, `record_oom`, `to_gpu`, `to_gpu_matrix`, `to_gpu_view`. Constants: `DEFAULT_MIN_DIM`, `GPU_MIN_DIM` |
+| `hessian_free` | Types: `DeflatedAction`, `FdHessianAction`, `HessianAction`, `LanczosSpectrum`, `SlqLogDetRatio`. Functions: `fd_hessian_from_forces`, `fd_hessian_from_surface`, `lanczos_lowest_modes`, `orthonormal_basis`, `slq_logdet_ratio` |
 | `idpp` | Types: `IdppConfig`, `PathInitializer`, `SidppConfig`, `TricsSeed`, `TricsStartConfig`. Functions: `idpp_path`, `initialize_path`, `linear_path`, `sidpp_path` |
 | `indexk` | Types: `BlockEigenKind`, `HessianProduct`, `IndexKConfig`, `IndexKReport`, `IndexKSession`, `WithHessian`. Functions: `indexk_step`, `reflect_force`, `translated_force` |
 | `internal` | Types: `CartAxis`, `Displacement`, `InternalSlot`, `Rotation`, `Translation`. Functions: `pack_cart`, `seam_nrm2` |
@@ -410,7 +413,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `spring` | Types: `SpringForces`, `SpringKind`. Functions: `energy_weighted_constants`, `onsager_machlup_displacements`. Constants: `OM_RECIP_EPS` |
 | `ssneb` | Types: `SolidImage`, `SolidNeb`. Functions: `joint_coordinate` |
 | `stencil` | Types: `Action`, `ArtControl`, `BandBuilder`, `Chain`, `Climb`, `Controller`, `Coupling`, `CouplingForces`, `Delta`, `Euclidean`, `EvalPool`, `Fixed`, `FromBand`, `FromPoint`, `ImageId`, `Mesh`, `MeshEvent`, `Metric`, `Point`, `PointBuilder`, `Preset`, `Report`, `Role`, `Sides`, `Stencil`, `StencilReport`, `StencilStatus`, `StencilView`, `Surface`, `TangentRule`, `Triad`. Functions: `ascend`, `coupling_forces`, `coupling_forces_into`, `curvature_along`, `perp`, `perp_into`, `reflect`, `reflect_into`, `unit_tangent`, `unit_tangent_into`. Constants: `BAND_PRESET_SEAM`, `EVAL_BLOCK` |
-| `strain_rate` | Types: `CurvatureBound`, `ElasticDipole`, `Estimate`, `HopVariant`, `SaddleSeed`, `SearchReason`, `Strain`, `StrainResponse`, `TranslationalSplit`, `Trust`, `TrustPolicy`. Functions: `activation_volume`, `angular_scale_rad_s`, `arrhenius`, `compliance_from_stiffness`, `cubic_rotations`, `double_dot`, `elastic_dipole`, `from_voigt`, `rotation_x`, `split_translational_modes`, `symmetrize`, `transform_tensor`, `vineyard_prefactor`, `voigt`. Constants: `BOLTZMANN_EV_PER_K`, `LINEAR_FOLD_EV`, `NEGATIVE_CURVATURE`, `VOIGT` |
+| `strain_rate` | Types: `CurvatureBound`, `ElasticDipole`, `Estimate`, `HopVariant`, `SaddleSeed`, `SearchReason`, `Strain`, `StrainResponse`, `TranslationalSplit`, `Trust`, `TrustPolicy`, `VineyardConfig`, `VineyardReport`. Functions: `activation_volume`, `angular_scale_rad_s`, `arrhenius`, `compliance_from_stiffness`, `cubic_rotations`, `dense_hessian`, `double_dot`, `elastic_dipole`, `from_voigt`, `mass_weight_atom_hessian`, `mass_weight_hessian`, `rotation_x`, `split_translational_modes`, `symmetrize`, `transform_tensor`, `vineyard_prefactor`, `vineyard_prefactor_dense`, `vineyard_prefactor_dense_matrices`, `vineyard_prefactor_from_spectra`, `vineyard_prefactor_lanczos`, `vineyard_prefactor_slq`, `vineyard_prefactor_weighted`, `voigt`. Constants: `BOLTZMANN_EV_PER_K`, `LINEAR_FOLD_EV`, `NEGATIVE_CURVATURE`, `VOIGT` |
 | `tangent` | Types: `TangentKind`. Functions: `compute_tangent` |
 | `topology` | Types: `AtomMap`, `DummyHost`, `InternalTopology`, `LinearBend`, `PlanarWatch`, `TopologyCheck`, `TopologyConfig`. Functions: `check_chart`. Constants: `PAPER_SV_TOL` |
 | `trics` | Types: `TricConfig`, `TricInversionConfig`, `TricPrimitive`, `TricSystem`, `TricsConfig`, `TricsReport`, `TricsSegment`. Functions: `diagnostic_matrix`, `interpolate_tric_segment`, `tric_segments`, `tric_systems`, `trics_path`. Constants: `TRICS_SPLICE_TOLERANCE_ANGSTROM` |
@@ -544,9 +547,10 @@ For config minors 5 through 62 this field is read as given, so 0 disables the an
 From minor 63, 0 keeps the Rust default unless flag bit 0, `RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL`, is set; then 0 disables it.
 The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 63 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
-`RGSADDLE_ABI_MINOR` is 68.
+`RGSADDLE_ABI_MINOR` is 70.
 `rgsaddle_band_set_dynamic` (minor 65) sets or clears `DynamicNeb` on a band.
 `rgsaddle_dyneb_mask` (minor 65) applies that mask to a projected band.
+From minor 70, `rgsaddle_atomic_mass`, `rgsaddle_atomic_mass_by_symbol`, `rgsaddle_vineyard_config_default`, and `rgsaddle_vineyard_fd` (with `rgsaddle_vineyard_config_t` and `rgsaddle_vineyard_report_t`) expose standard atomic-mass lookup and mass-weighted finite-difference Vineyard prefactors.
 From minor 24, `rgsaddle_sella_saddle_set_symmetrized_ritz` sets `SellaSaddleConfig::symmetrized_ritz` from 0 or 1.
 It returns `RGSADDLE_INVALID_PARAMETER` for any other value.
 `rgsaddle_sella_saddle_set_small_system_atom_ceiling` (minor 25) sets `SellaSaddleConfig::small_system_atom_ceiling` from 0 or 1.
@@ -636,6 +640,8 @@ The importable package is `rgsaddle`. `rgsaddle._core` is the nanobind extension
 | `rgsaddle.ase.SingleCalculatorNEB` | ASE's deprecated shared-calculator band. Constructing it warns with ASE's `FutureWarning` and is `NEB(allow_shared_calculator=True)` |
 | `rgsaddle.ase.DyNEB` | ASE 3.29 dynamic NEB. `dynamic_relaxation` (default true) leaves an image in place once its per-atom force is below `fmax`. `scale_fmax` scales that test by the distance from the highest-energy image. `dynamic_relaxation` false is the ordinary band |
 | `rgsaddle.idpp_path` | Image-dependent pair-potential path, endpoints included, shape `(n_images, 3N)`. `cell` is the 3x3 row-major lattice |
+| `rgsaddle.atomic_mass` | Standard atomic mass in amu by atomic number (`1..=118`) or IUPAC element symbol |
+| `rgsaddle.vineyard_prefactor_fd` | Mass-weighted finite-difference Vineyard prefactor on a callback surface at `x_min` and `x_saddle`, returning `VineyardReport` (`prefactor_hz`, `nu0_thz`, `unstable_eigenvalue`, `n_min_modes`, `n_saddle_modes`, `evaluations`) |
 | `rgsaddle.ase.DimerControl`, `MinModeAtoms`, `MinModeTranslate` | ASE's dimer. The mode and curvature come from `MinMode`. The trial step and conjugate gradient are ASE's. `order` other than 1 and a gauss displacement raise `NotImplementedError` |
 
 `SurfaceAdapter` keeps =get_forces(apply_constraint=False)= on `raw_forces`. The returned gradient is minus `get_forces()` after constraints. The adapter evaluates the given rows in order on the calling thread. `owners()` and `reentrant()` are what a driver uses to group. A second call while the first holds the adapter raises `RuntimeError`.
@@ -4017,7 +4023,7 @@ CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --locked --features chemfiles
 
 > Stepping bands, minimum-mode sessions, Sella, IRC, and strings from C and C++
 
-`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 68. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
+`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 70. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
 
 A surface callback returns `rgsaddle_status_t` and receives one `rgsaddle_surface_request_t`. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES` report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -4431,7 +4437,7 @@ ART pushes along the seed until the curvature falls under `art_threshold` (defau
 
 `Stencil::band` checks the array and returns `BAND_PRESET_SEAM` (`band presets stay on feat/band-methods-zoom`, kept for compatibility) because band presets are not implemented in the stencil builder. Use `BandSession`, `AutoNeb`, or `OcinebSession` directly for a band search, and `BandConfig::zoom` or `SpringKind::EnergyWeighted` for zoom-NEB and energy-weighted springs. The chain, the mesh (remesh, insert, window), and the point controller are implemented.
 
-From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only; the stencil symbols were added at ABI minor 16 and remain additive under the current ABI minor 68.
+From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only; the stencil symbols were added at ABI minor 16 and remain additive under the current ABI minor 70.
 
 From Python, `rgsaddle.Stencil.point(x, preset`"dimer")= takes a C-contiguous float64 vector. `step(surface)` releases the thread, and the surface callback re-attaches. `rgsaddle.ase.Point(atoms, preset`"dimer").run(fmax, steps)= is an ASE `Optimizer` whose `step` is one stencil step. A second thread that enters the same handle raises `RuntimeError`.
 
@@ -5695,6 +5701,10 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_geodesic_config_default`. Purpose: Fill `out` with the default geodesic controls (step and gradient tolerances 1e-6, max_move 0.5, lower_ratio 0.95, upper_ratio 1.1, 40 sweeps, 40 iterations, memory 8, 10 bound samples, 32 images, seed 0). Parameters: the declaration. Units: the caller's.
 - `rgsaddle_geodesic_path`. Purpose: Minimize the geodesic length of an existing path. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_geodesic_morse`. Purpose: Morse pair geodesic between two geometries. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_atomic_mass`. Purpose: Look up standard atomic mass in amu by atomic number `z` in [1, 118]. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_atomic_mass_by_symbol`. Purpose: Look up standard atomic mass in amu by IUPAC element symbol. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_vineyard_config_default`. Purpose: Fill `out` with default Vineyard finite-difference controls (step 1e-2, central differences, positive_tol 1e-8, negative_tol 1e-4). Parameters: the declaration. Units: the caller's.
+- `rgsaddle_vineyard_fd`. Purpose: Evaluate the harmonic Vineyard prefactor from dense finite-difference Hessians on `surface` at `x_min` and `x_saddle`. Parameters: the declaration. Units: the caller's.
 
 ## Types and callbacks
 
@@ -5771,6 +5781,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_lineb_rate_diagnostics_t`. Purpose: Geometry counts within the rate, and the Cartesian finite-difference displacement used at the path images (NaN for direct or path-only solves).
 - `rgsaddle_refine_method_t`. Purpose: Refine stepper of rgsaddle_band_set_refine, ABI minor 60.
 - `rgsaddle_geodesic_config_t`. Purpose: Geodesic interpolation controls.
+- `rgsaddle_vineyard_config_t`. Purpose: Mass-weighted finite-difference Vineyard prefactor controls.
+- `rgsaddle_vineyard_report_t`. Purpose: Mass-weighted Vineyard prefactor summary report.
 - `rgsaddle_hyperplane_emit_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_sample_hyperplane_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_surface_fn`. Purpose: Callback typedef in include/rgsaddle.h.

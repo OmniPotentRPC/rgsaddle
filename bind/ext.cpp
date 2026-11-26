@@ -1131,6 +1131,85 @@ SaddleIndexPy saddle_index_py(nb::callable fn, Vector x, nb::handle gradient, nb
   return saddle_index_from(raw, std::move(curvatures));
 }
 
+struct VineyardReportPy {
+  double prefactor_hz = 0.0;
+  double nu0_thz = 0.0;
+  double unstable_eigenvalue = 0.0;
+  std::int64_t n_min_modes = 0;
+  std::int64_t n_saddle_modes = 0;
+  std::int64_t evaluations = 0;
+};
+
+double atomic_mass_py(nb::object element) {
+  double out = 0.0;
+  rgsaddle_status_t status = RGSADDLE_INVALID_PARAMETER;
+  if (nb::isinstance<nb::int_>(element) && !nb::isinstance<nb::bool_>(element)) {
+    const auto z = nb::cast<std::int64_t>(element);
+    if (z < 1 || z > 118) {
+      throw nb::value_error("atomic number must be in 1..118");
+    }
+    status = rgsaddle_atomic_mass(static_cast<std::int32_t>(z), &out);
+  } else if (nb::isinstance<nb::str>(element)) {
+    const auto sym = nb::cast<std::string>(element);
+    status = rgsaddle_atomic_mass_by_symbol(sym.c_str(), &out);
+  } else {
+    throw nb::type_error("element must be an int atomic number or str symbol");
+  }
+  if (status != RGSADDLE_OK) {
+    throw nb::value_error("unknown chemical element");
+  }
+  return out;
+}
+
+VineyardReportPy vineyard_prefactor_fd_py(nb::callable fn, Vector x_min, Vector x_saddle,
+                                          Vector atom_masses, double step,
+                                          const std::string &difference, double positive_tol,
+                                          double negative_tol) {
+  if (x_min.shape(0) <= 0 || x_min.shape(0) % 3 != 0) {
+    throw nb::value_error("x_min must hold a positive multiple of three values");
+  }
+  const auto dof = static_cast<std::int64_t>(x_min.shape(0));
+  if (static_cast<std::int64_t>(x_saddle.shape(0)) != dof) {
+    throw nb::value_error("x_saddle length must match x_min");
+  }
+  const auto n_atoms = dof / 3;
+  if (static_cast<std::int64_t>(atom_masses.shape(0)) != n_atoms) {
+    throw nb::value_error("atom_masses length must equal the atom count");
+  }
+  std::int32_t diff_code = 1;
+  if (difference == "forward") {
+    diff_code = RGSADDLE_DIFFERENCE_FORWARD;
+  } else if (difference == "central") {
+    diff_code = RGSADDLE_DIFFERENCE_CENTRAL;
+  } else {
+    throw nb::value_error("difference must be 'forward' or 'central'");
+  }
+  rgsaddle_vineyard_config_t cfg{};
+  rgsaddle_vineyard_config_default(&cfg);
+  cfg.step = step;
+  cfg.difference = diff_code;
+  cfg.positive_tol = positive_tol;
+  cfg.negative_tol = negative_tol;
+
+  rgbind::CallContext ctx;
+  ConnectCallback state{&fn, &ctx};
+  rgsaddle_vineyard_report_t raw{};
+  rgsaddle_status_t status = RGSADDLE_OK;
+  {
+    nb::gil_scoped_release release;
+    status = rgsaddle_vineyard_fd(&cfg, n_atoms, x_min.data(), x_saddle.data(), atom_masses.data(),
+                                  connect_python_surface, &state, &raw);
+  }
+  if (ctx.has_error()) {
+    ctx.rethrow_if_set();
+  }
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+  return VineyardReportPy{raw.prefactor_hz, raw.nu0_thz, raw.unstable_eigenvalue,
+                          raw.n_min_modes, raw.n_saddle_modes, raw.evaluations};
+}
+
 struct PySella {
   RgsaddleSellaSaddle *handle = nullptr;
   std::int64_t n_atoms = 0;
@@ -2404,6 +2483,41 @@ NB_MODULE(_core, m) {
       "Lanczos on forward-difference Hessian actions, each one surface call. surface(x) is one "
       "image shaped (1, 3N). gradient at x saves one call; mode seeds the space; fixed is one "
       "uint8 per atom, 1 for a fixed atom.");
+
+  nb::class_<VineyardReportPy>(m, "VineyardReport")
+      .def_ro("prefactor_hz", &VineyardReportPy::prefactor_hz,
+              "Harmonic transition-state prefactor in s^-1 (Hz).")
+      .def_ro("nu0_thz", &VineyardReportPy::nu0_thz,
+              "Harmonic transition-state prefactor in THz.")
+      .def_ro("unstable_eigenvalue", &VineyardReportPy::unstable_eigenvalue,
+              "Single negative mass-weighted eigenvalue at the saddle in eV/(u A^2).")
+      .def_ro("n_min_modes", &VineyardReportPy::n_min_modes,
+              "Number of positive modes retained at the minimum.")
+      .def_ro("n_saddle_modes", &VineyardReportPy::n_saddle_modes,
+              "Number of positive modes retained at the saddle.")
+      .def_ro("evaluations", &VineyardReportPy::evaluations,
+              "Surface gradient evaluations consumed.");
+
+  m.def(
+      "atomic_mass", &atomic_mass_py, nb::arg("element"),
+      nb::sig("def atomic_mass(element: int | str) -> float"),
+      "Standard atomic mass in amu by atomic number (1..118) or IUPAC element symbol.");
+
+  m.def(
+      "vineyard_prefactor_fd", &vineyard_prefactor_fd_py, nb::arg("surface"),
+      nb::arg("x_min").noconvert(), nb::arg("x_saddle").noconvert(),
+      nb::arg("atom_masses").noconvert(), nb::arg("step") = 1e-2,
+      nb::arg("difference") = "central", nb::arg("positive_tol") = 1e-8,
+      nb::arg("negative_tol") = 1e-4,
+      nb::sig("def vineyard_prefactor_fd(surface: collections.abc.Callable[..., "
+              "tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]], "
+              "x_min: numpy.typing.NDArray[numpy.float64], "
+              "x_saddle: numpy.typing.NDArray[numpy.float64], "
+              "atom_masses: numpy.typing.NDArray[numpy.float64], "
+              "step: float = 0.01, difference: str = 'central', "
+              "positive_tol: float = 1e-08, negative_tol: float = 0.0001) -> VineyardReport"),
+      "Harmonic Vineyard prefactor from mass-weighted finite-difference Hessians on surface at "
+      "x_min and x_saddle.");
 
   m.def(
       "project_band", &project_band, nb::arg("positions").noconvert(), nb::arg("energies").noconvert(),

@@ -44,6 +44,130 @@ const SYMBOLS: [&str; 118] = [
     "Fl", "Mc", "Lv", "Ts", "Og",
 ];
 
+/// Standard atomic weights in unified atomic mass units (`u` / `Da`),
+/// indexed by `Z - 1` for elements 1 through 118, matching ASE's
+/// `ase.data.atomic_masses`.
+pub const ATOMIC_MASSES_AMU: [f64; 118] = [
+    1.008,
+    4.002602,
+    6.94,
+    9.0121831,
+    10.81,
+    12.011,
+    14.007,
+    15.999,
+    18.998403163,
+    20.1797,
+    22.98976928,
+    24.305,
+    26.9815385,
+    28.085,
+    30.973761998,
+    32.06,
+    35.45,
+    39.948,
+    39.0983,
+    40.078,
+    44.955908,
+    47.867,
+    50.9415,
+    51.9961,
+    54.938044,
+    55.845,
+    58.933194,
+    58.6934,
+    63.546,
+    65.38,
+    69.723,
+    72.63,
+    74.921595,
+    78.971,
+    79.904,
+    83.798,
+    85.4678,
+    87.62,
+    88.90584,
+    91.224,
+    92.90637,
+    95.95,
+    97.90721,
+    101.07,
+    102.9055,
+    106.42,
+    107.8682,
+    112.414,
+    114.818,
+    118.71,
+    121.76,
+    127.6,
+    126.90447,
+    131.293,
+    132.90545196,
+    137.327,
+    138.90547,
+    140.116,
+    140.90766,
+    144.242,
+    144.91276,
+    150.36,
+    151.964,
+    157.25,
+    158.92535,
+    162.5,
+    164.93033,
+    167.259,
+    168.93422,
+    173.054,
+    174.9668,
+    178.49,
+    180.94788,
+    183.84,
+    186.207,
+    190.23,
+    192.217,
+    195.084,
+    196.966569,
+    200.592,
+    204.38,
+    207.2,
+    208.9804,
+    208.98243,
+    209.98715,
+    222.01758,
+    223.01974,
+    226.02541,
+    227.02775,
+    232.0377,
+    231.03588,
+    238.02891,
+    237.04817,
+    244.06421,
+    243.06138,
+    247.07035,
+    247.07031,
+    251.07959,
+    252.083,
+    257.09511,
+    258.09843,
+    259.101,
+    262.11,
+    267.122,
+    268.126,
+    271.134,
+    270.133,
+    269.1338,
+    278.156,
+    281.165,
+    281.166,
+    285.177,
+    286.182,
+    289.19,
+    289.194,
+    293.204,
+    293.208,
+    294.214,
+];
+
 /// Covalent radius of element `z` in angstrom, or `None` outside 1..=96.
 pub fn covalent_radius(z: u8) -> Option<f64> {
     if z == 0 || z > LAST_CORDERO_Z {
@@ -68,6 +192,19 @@ pub fn atomic_number(symbol: &str) -> Option<u8> {
         .iter()
         .position(|c| c.eq_ignore_ascii_case(s))
         .map(|i| (i + 1) as u8)
+}
+
+/// Standard atomic mass of element `z` in u (`Da`), or `None` outside `1..=118`.
+pub fn atomic_mass(z: u8) -> Option<f64> {
+    if z == 0 {
+        return None;
+    }
+    ATOMIC_MASSES_AMU.get(usize::from(z) - 1).copied()
+}
+
+/// Standard atomic mass in u (`Da`) for an element symbol, matched case-insensitively.
+pub fn atomic_mass_by_symbol(symbol: &str) -> Option<f64> {
+    atomic_number(symbol).and_then(atomic_mass)
 }
 
 #[cfg(test)]
@@ -112,5 +249,19 @@ mod tests {
         assert!(covalent_radius(0).is_none());
         assert!(covalent_radius(97).is_none());
         assert!(element_symbol(0).is_none());
+    }
+
+    #[test]
+    fn masses_match_reference_spots_and_reject_out_of_range() {
+        assert_eq!(ATOMIC_MASSES_AMU.len(), 118);
+        assert!((atomic_mass(1).unwrap() - 1.008).abs() < 1e-12);
+        assert!((atomic_mass(13).unwrap() - 26.9815385).abs() < 1e-12);
+        assert!((atomic_mass(29).unwrap() - 63.546).abs() < 1e-12);
+        assert!((atomic_mass_by_symbol("Cu").unwrap() - 63.546).abs() < 1e-12);
+        assert!((atomic_mass_by_symbol("cu").unwrap() - 63.546).abs() < 1e-12);
+        assert!((atomic_mass_by_symbol("Pt").unwrap() - 195.084).abs() < 1e-12);
+        assert!(atomic_mass(0).is_none());
+        assert!(atomic_mass(119).is_none());
+        assert!(atomic_mass_by_symbol("Xx").is_none());
     }
 }

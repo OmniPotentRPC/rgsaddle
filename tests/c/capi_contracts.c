@@ -81,6 +81,33 @@ static rgsaddle_status_t idx2_surface(void *user,
   return RGSADDLE_OK;
 }
 
+static rgsaddle_status_t vineyard_surface(void *user,
+                                          rgsaddle_surface_request_t *req) {
+  int *fail_flag = (int *)user;
+  if (fail_flag && *fail_flag) {
+    return RGSADDLE_SURFACE_FAILED;
+  }
+  int64_t rows = (req->flags & RGSADDLE_REQ_ONE_IMAGE) ? 1 : req->n_images;
+  for (int64_t i = 0; i < rows; ++i) {
+    const double *p = req->positions + 3 * i;
+    double *g = req->gradients + 3 * i;
+    if (p[0] > 0.0) {
+      double dx = p[0] - 1.0;
+      req->energies[i] =
+          dx * dx + 1.5 * p[1] * p[1] + 2.0 * p[2] * p[2];
+      g[0] = 2.0 * dx;
+    } else {
+      double dx = p[0] + 1.0;
+      req->energies[i] =
+          -0.5 * dx * dx + 1.5 * p[1] * p[1] + 2.0 * p[2] * p[2];
+      g[0] = -dx;
+    }
+    g[1] = 3.0 * p[1];
+    g[2] = 4.0 * p[2];
+  }
+  return RGSADDLE_OK;
+}
+
 static int idx2_hessian(void *user, int64_t n_dof, const double *v,
                         double *action) {
   int *fail_flag = (int *)user;
@@ -1000,6 +1027,127 @@ static int test_band_minmode_index1_and_sessions_cdylib(void) {
   return 0;
 }
 
+static int test_abi70_vineyard_contracts(void) {
+  double mass = 0.0;
+  CHECK(rgsaddle_atomic_mass(29, &mass) == RGSADDLE_OK,
+        "atomic mass by number");
+  CHECK(fabs(mass - 63.546) < 1e-12, "copper standard atomic mass");
+  CHECK(rgsaddle_atomic_mass(0, &mass) == RGSADDLE_INVALID_PARAMETER,
+        "atomic mass rejects zero");
+  CHECK(rgsaddle_atomic_mass(119, &mass) == RGSADDLE_INVALID_PARAMETER,
+        "atomic mass rejects out of range");
+  CHECK(rgsaddle_atomic_mass(1, NULL) == RGSADDLE_INVALID_PARAMETER,
+        "atomic mass rejects null output");
+
+  CHECK(rgsaddle_atomic_mass_by_symbol("Cu", &mass) == RGSADDLE_OK,
+        "atomic mass by symbol");
+  CHECK(fabs(mass - 63.546) < 1e-12, "copper symbol mass");
+  CHECK(rgsaddle_atomic_mass_by_symbol("Xx", &mass) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "atomic mass rejects unknown symbol");
+  CHECK(rgsaddle_atomic_mass_by_symbol(NULL, &mass) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "atomic mass rejects null symbol");
+  CHECK(rgsaddle_atomic_mass_by_symbol("H", NULL) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "atomic mass symbol rejects null output");
+
+  CHECK(rgsaddle_vineyard_config_default(NULL) == RGSADDLE_INVALID_PARAMETER,
+        "vineyard defaults reject null output");
+  rgsaddle_vineyard_config_t config;
+  CHECK(rgsaddle_vineyard_config_default(&config) == RGSADDLE_OK,
+        "vineyard defaults");
+  CHECK(config.version.major == RGSADDLE_ABI_MAJOR &&
+            config.version.minor == RGSADDLE_ABI_MINOR,
+        "vineyard default version");
+  CHECK(config.flags == 0 && config.reserved == 0 &&
+            config.difference == RGSADDLE_DIFFERENCE_CENTRAL,
+        "vineyard default wire controls");
+  CHECK(config.step == 1e-2 && config.positive_tol == 1e-8 &&
+            config.negative_tol == 1e-4,
+        "vineyard default numeric controls");
+
+  const double x_min[3] = {1.0, 0.0, 0.0};
+  const double x_saddle[3] = {-1.0, 0.0, 0.0};
+  const double masses[1] = {2.0};
+  rgsaddle_vineyard_report_t report;
+  CHECK(rgsaddle_vineyard_fd(&config, 1, x_min, x_saddle, masses,
+                             vineyard_surface, NULL, &report) == RGSADDLE_OK,
+        "vineyard finite difference");
+  double expected = sqrt(1.602176634e-19 /
+                         (1.66053906660e-27 * 1e-20)) /
+                    (2.0 * acos(-1.0));
+  CHECK(fabs(report.prefactor_hz - expected) / expected < 1e-12,
+        "vineyard finite difference value");
+  CHECK(report.version.major == RGSADDLE_ABI_MAJOR &&
+            report.version.minor == RGSADDLE_ABI_MINOR && report.flags == 0,
+        "vineyard report wire header");
+  CHECK(report.nu0_thz == report.prefactor_hz / 1e12 &&
+            report.n_min_modes == 3 && report.n_saddle_modes == 2 &&
+            report.evaluations == 12,
+        "vineyard report fields");
+  CHECK(fabs(report.unstable_eigenvalue + 0.5) < 1e-10,
+        "vineyard unstable eigenvalue");
+
+  CHECK(rgsaddle_vineyard_fd(&config, 1, NULL, x_saddle, masses,
+                             vineyard_surface, NULL, &report) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "vineyard rejects null minimum");
+  CHECK(rgsaddle_vineyard_fd(&config, 1, x_min, NULL, masses,
+                             vineyard_surface, NULL, &report) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "vineyard rejects null saddle");
+  CHECK(rgsaddle_vineyard_fd(&config, 1, x_min, x_saddle, NULL,
+                             vineyard_surface, NULL, &report) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "vineyard rejects null masses");
+  CHECK(rgsaddle_vineyard_fd(&config, 1, x_min, x_saddle, masses,
+                             vineyard_surface, NULL, NULL) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "vineyard rejects null report");
+  CHECK(rgsaddle_vineyard_fd(&config, 0, x_min, x_saddle, masses,
+                             vineyard_surface, NULL, &report) == RGSADDLE_SHAPE,
+        "vineyard rejects zero atoms");
+  CHECK(rgsaddle_vineyard_fd(&config, 9223372036854775807LL, x_min, x_saddle,
+                             masses, vineyard_surface, NULL, &report) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "vineyard rejects an overflowing coordinate count");
+  CHECK(rgsaddle_vineyard_fd(&config, 1, x_min, x_saddle, masses, NULL, NULL,
+                             &report) == RGSADDLE_NULL_SURFACE,
+        "vineyard rejects null surface");
+
+  rgsaddle_vineyard_config_t bad = config;
+  bad.version.major += 1;
+  CHECK(rgsaddle_vineyard_fd(&bad, 1, x_min, x_saddle, masses,
+                             vineyard_surface, NULL, &report) ==
+            RGSADDLE_ABI_MISMATCH,
+        "vineyard rejects ABI major");
+  bad = config;
+  bad.flags = 1;
+  CHECK(rgsaddle_vineyard_fd(&bad, 1, x_min, x_saddle, masses,
+                             vineyard_surface, NULL, &report) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "vineyard rejects flags");
+  bad = config;
+  bad.reserved = 1;
+  CHECK(rgsaddle_vineyard_fd(&bad, 1, x_min, x_saddle, masses,
+                             vineyard_surface, NULL, &report) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "vineyard rejects reserved field");
+  bad = config;
+  bad.difference = 7;
+  CHECK(rgsaddle_vineyard_fd(&bad, 1, x_min, x_saddle, masses,
+                             vineyard_surface, NULL, &report) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "vineyard rejects difference kind");
+  int fail_flag = 1;
+  CHECK(rgsaddle_vineyard_fd(&config, 1, x_min, x_saddle, masses,
+                             vineyard_surface, &fail_flag, &report) ==
+            RGSADDLE_SURFACE_FAILED,
+        "vineyard propagates surface failure");
+  return 0;
+}
+
 static int test_trics_path_runtime(void) {
   double initial[5 * 3];
   double out[5 * 3] = {0};
@@ -1068,6 +1216,9 @@ int main(void) {
     return 1;
   }
   if (test_trics_path_runtime() != 0) {
+    return 1;
+  }
+  if (test_abi70_vineyard_contracts() != 0) {
     return 1;
   }
   printf("RGSADDLE_CAPI_CONTRACTS_OK\n");
