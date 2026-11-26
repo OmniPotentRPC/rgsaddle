@@ -305,6 +305,8 @@ pub use trics::{
     interpolate_tric_segment, tric_segments, tric_systems, trics_path,
 };
 
+#[cfg(feature = "faer")]
+pub mod block_cyclic;
 pub mod cell_log;
 pub mod constraints;
 pub mod covalent;

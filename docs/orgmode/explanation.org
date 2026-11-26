@@ -25,6 +25,11 @@ All three turn a saddle or a dividing surface into a rate; they differ in which 
 
 =nichols_step= is the separate i-PI level shift. A host that already holds a spectrum can call it. =rgsaddle_prfo_step= is the restricted-step partition. =rgsaddle_hessian_powell= and =rgsaddle_hessian_bofill= update the Hessian.
 
+* Cyclic block factorization
+=block_cyclic= factors a cyclic block-tridiagonal matrix whose neighbor coupling is a scalar spring.
+The rotation fallback, the =SaddleError::Singular= criterion, the symmetric part of each diagonal block, and the residual norm are in @@rst::doc:`cyclic block factorization <explanation/cyclic-block>`@@.
+Each public item is in @@rst::doc:`cyclic block factor <reference/block-cyclic>`@@.
+
 * eOn branch structure
 Tangents, springs, projections, and the climbing-image force follow eOn's =NEBTangent= / =NEBSpringForce= / =NEBForceProjection= with the same branches. The climbing image arms when the convergence force falls under =factor * baseline= or under an absolute trigger.
 

@@ -81,6 +81,14 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("reference/lammps-hyperplane.org", "LAMMPS hyperplane sampler contract and C ABI hooks"),
             ("reference/bibliography.org", "Literature bibliography"),
             ("reference/c-symbols.org", "Complete C ABI symbol index for include/rgsaddle.h"),
+            (
+                "explanation/cyclic-block.org",
+                "Rotation fallback, singular criterion, symmetric part, and residual norm of the cyclic block factor",
+            ),
+            (
+                "reference/block-cyclic.org",
+                "Cyclic block-tridiagonal factor, inertia, and the solve residual",
+            ),
             ("contributing/index.org", "Build, test, MSRV, Python stub, documentation, and release workflow"),
         ],
     ),

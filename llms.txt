@@ -65,4 +65,6 @@ rgsaddle is system-agnostic and unit-agnostic: surfaces supply energies, gradien
 - [LAMMPS hyperplane API](https://omnipotentrpc.github.io/rgsaddle/reference/lammps-hyperplane.html): LAMMPS hyperplane sampler contract and C ABI hooks (`docs/orgmode/reference/lammps-hyperplane.org`)
 - [Bibliography](https://omnipotentrpc.github.io/rgsaddle/reference/bibliography.html): Literature bibliography (`docs/orgmode/reference/bibliography.org`)
 - [C function index](https://omnipotentrpc.github.io/rgsaddle/reference/c-symbols.html): Complete C ABI symbol index for include/rgsaddle.h (`docs/orgmode/reference/c-symbols.org`)
+- [Cyclic block factorization](https://omnipotentrpc.github.io/rgsaddle/explanation/cyclic-block.html): Rotation fallback, singular criterion, symmetric part, and residual norm of the cyclic block factor (`docs/orgmode/explanation/cyclic-block.org`)
+- [Cyclic block factor](https://omnipotentrpc.github.io/rgsaddle/reference/block-cyclic.html): Cyclic block-tridiagonal factor, inertia, and the solve residual (`docs/orgmode/reference/block-cyclic.org`)
 - [Contributing](https://omnipotentrpc.github.io/rgsaddle/contributing/index.html): Build, test, MSRV, Python stub, documentation, and release workflow (`docs/orgmode/contributing/index.org`)

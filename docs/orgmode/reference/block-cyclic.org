@@ -1,0 +1,36 @@
+#+title: Cyclic block factor
+#+options: toc:nil num:nil author:nil
+
+=block_cyclic= is the cyclic block-tridiagonal factor.
+It is exported with the default =faer= feature.
+Full API documentation is on [[https://docs.rs/rgsaddle][docs.rs/rgsaddle]], under =rgsaddle::block_cyclic=.
+This page is the inventory of each public item.
+@@rst::doc:`Cyclic block factorization </explanation/cyclic-block>`@@ records the rotation fallback, the singular criterion, the symmetric part, and the residual norm.
+
+* Module
+The matrix is a ring of at least three beads.
+Each diagonal block is an =n= by =n= matrix.
+Every neighbor coupling, including the corner that closes the ring, is =-spring= times the identity.
+The open chain is eliminated by block Thomas.
+The closing bead is the Schur complement of that chain.
+The log absolute determinant and the negative count add across those complements.
+
+* Types
+| Type | Role |
+|------+------|
+| =BlockInertia= | =log_abs_det= is the sum of \(\ln\lvert\lambda\rvert\) over eigenvalues outside the relative zero tolerance. =n_negative= counts eigenvalues below the negative side of that tolerance. A successful call has already refused every eigenvalue inside the tolerance, so both fields cover the spectrum that was kept |
+| =CyclicFactor= | Factor returned by =factor_cyclic=. It holds the open-chain inverses and the closing Schur inverse, or the dense inverse of the assembled matrix when no rotation factors. =CyclicFactor::solve= returns the solution of \(M x = b\). =CyclicFactor::solve_report= returns that solution together with a =SolveReport= |
+| =SolveReport= | =solution= is in the caller's bead order. =residual= is the Euclidean norm of =M x - b= after the optional correction. =corrections= is 1 when that correction ran and 0 otherwise |
+
+* Functions
+| Function | Role |
+|----------+------|
+| =logdet_cyclic_blocks= | =logdet_cyclic_blocks(diag, n, spring)= returns a =BlockInertia=. A pivot inside the relative zero tolerance, or a non-finite pivot, is an error. Substituting a finite value for that pivot would change every later Schur complement. =SaddleError::Invalid= when there are fewer than three blocks, =n= is zero, or a block is asymmetric beyond the tolerance of its largest absolute entry. =SaddleError::Shape= when a block is not =n= by =n=. =SaddleError::NonFinite= when an entry, the spring, or a pivot is non-finite. =SaddleError::Singular= only when the assembled matrix has an eigenvalue inside that tolerance. A zero complement of one rotation is not singular when another rotation, or the assembled spectrum, has full rank. The singular index is the preferred rotation's complement |
+| =logdet_cyclic_strict= | =logdet_cyclic_strict(diag, n, spring)= is the same computation as =logdet_cyclic_blocks=. It refuses a pivot inside the relative zero tolerance and does not substitute a finite value. The errors are the same |
+| =factor_cyclic= | =factor_cyclic(diag, n, spring, tau)= adds =tau= to every diagonal entry after the symmetric part is taken, then returns a =CyclicFactor=. =CyclicFactor::solve= refines one step at =SOLVE_REFINE_TOLERANCE=. =SaddleError::Invalid= below three blocks, for a zero block size, or for an asymmetric block. =SaddleError::Singular= when the assembled spectrum has an eigenvalue inside the relative zero tolerance. =SaddleError::NonFinite= when =spring= or =tau= is non-finite, and the shape and finiteness errors of =logdet_cyclic_blocks= |
+
+* Constant
+=SOLVE_REFINE_TOLERANCE= is =1e-11=.
+=CyclicFactor::solve_report= applies one correction when the residual exceeds this value times the Euclidean norm of the right-hand side.
+A zero right-hand side is corrected when the residual is positive.
+The reported norm is measured again after that single correction.
