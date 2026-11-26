@@ -1,0 +1,1 @@
+The plain text guide index lists the narrative pages that were already under ~docs/orgmode~, including PAFI, OH-TST, geodesic initial paths, the rgpot how-to, and elastic dipoles. ~llms.txt~ and ~llms-full.txt~ are rebuilt from those sources. The changelog stays out of that index. An Org page that the index does not name fails the freshness check.
