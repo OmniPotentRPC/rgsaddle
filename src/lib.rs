@@ -95,6 +95,7 @@ pub mod ocineb;
 pub mod ohtst;
 pub mod pafi;
 pub mod pair_network;
+pub mod placement;
 pub mod prfo;
 pub mod projection;
 pub mod projector;
@@ -256,6 +257,7 @@ pub use pair_network::{
     PairTarget, SensitivityCover, SurrogateCalibration, Vec3i, calibrate_surrogate, cubic_group,
     sensitivity_cover,
 };
+pub use placement::{SitePlacement, push_past, translate_onto_sites};
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
 pub use projector::{

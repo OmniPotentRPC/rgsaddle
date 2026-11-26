@@ -386,6 +386,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `pair_network` | Types: `Mat3i`, `PairConfig`, `PairEdge`, `PairExit`, `PairHop`, `PairMove`, `PairNetwork`, `PairStateClass`, `PairTarget`, `SensitivityCover`, `Vec3i`. Functions: `cubic_group`, `director`, `norm2`, `sensitivity_cover` |
 | `pes` | Types: `CartesianHessian`, `CartesianPes`, `HessUpdate` |
 | `pes_internal` | Types: `CellCartesianPes`, `CellInternalPes`, `HessianCarry`, `InternalPes`, `RebuildReason`, `RebuildReport`, `SellaPes`. Functions: `niggli_reduce_cell`, `niggli_reduce_vectors`, `place_perp_dummy` |
+| `placement` | Types: `SitePlacement`. Functions: `push_past`, `translate_onto_sites` |
 | `prfo` | Types: `PartitionedRationalFunctionOptimization`, `PrfoKind`. Functions: `partitioned_rfo_eigen`, `prfo_get_s`, `prfo_stepper`, `prfo_trust_region`, `restricted_partitioned_rfo`, `restricted_prfo_displacement`. Constants: `SYNONYMS` |
 | `prfo_restricted` | Types: `PrfoKind`. Functions: `partitioned_rfo_eigen`, `restricted_partitioned_rfo`, `restricted_prfo_displacement` |
 | `projection` | Types: `ProjectionKind`. Functions: `climbing_image_force`, `dneb_component`, `force_perp` |
@@ -2752,6 +2753,17 @@ which is `sqrt(5)/2 - 1/2 ≈ 0.618`. `tests/bennett_kramers.rs` compares the pl
 `RateCatalogue::to_json` writes `rgsaddle.defect_pair_rates` version 1. `from_json` reads it back. Each entry is one exit channel. The key is `(shell, direction, hop, temperature, cell_repeats)`. `rate_Hz` is `k(T)` in the caller's frequency unit (Hz when the angular scale is `angular_scale_rad_s`).
 
 amsel is the absorbing-Markov selector for superbasin exit distributions. It does not parse this file itself. A loader groups entries that share a shell, a cell and a temperature, and passes `rate_Hz` to the FPTA or MRM kernel as the first-order exit rate of that channel. `hop` and `direction` are the channel name. `dE0`, `dF`, `dF_error`, `dF_harmonic`, `nu`, `vineyard`, `kappa`, the saddle Cauchy stress and the elastic dipole `P ` -V (σ - σ_bulk)= are stored beside the rate so a later run can see what entered `k(T)`.
+
+## Placements
+`translate_onto_sites` and `push_past` build the starting geometries of a relaxation. `translate_onto_sites` pairs the atoms you name with a list of sites, nearest pair first under the minimum image, and puts each atom on its site by the short displacement. Atoms with no site and sites with no atom are left alone. A tie goes to the earlier atom, then the lower site. Relax the result before using it as a minimum. A vacancy centroid and the atoms of a self-interstitial are one use, and an adatom and a hollow are another.
+
+```rust
+let cell = [[l, 0.0, 0.0], [0.0, l, 0.0], [0.0, 0.0, l]];
+let filled = rgsaddle::translate_onto_sites(atoms.view(), cell, [true; 3], &dumbbell, vacancy.view())?;
+let start = filled.positions;
+```
+
+`push_past` returns `saddle + f (saddle - reactant)` with each atom's displacement folded first. Relax the result to leave a saddle on the product side. `f` of 0 returns the saddle and a negative `f` pulls back toward the reactant. Both functions fold the axes named by the `periodic` mask. An axis that is not periodic still needs a vector that makes the cell invertible, and its length is never used. The fold is the shortest image under whole periodic lattice vectors. In an orthogonal cell it rounds each fraction, and a displacement of exactly half a cell keeps its sign. In a sheared, hexagonal or other skewed cell rounding the fractions can miss the nearest image, so the neighbouring images are searched.
 
 ## Relaxed states
 A placement is a starting geometry, not a state. Whether it is a bound pair or has recombined is a property of the minimum it relaxes to, so that minimum has to be reached. `relax_to_tolerance` minimizes in a fixed cell until the largest per-atom force norm, `max_i |F_i|`, is below `RelaxConfig::force_tol` (`DEFAULT_FORCE_TOL`, 1e-3 in the surface's force unit, eV/Å for eV and Å). `RelaxConfig::max_steps` (`DEFAULT_MAX_STEPS`, 10000) is a guard. Reaching it returns `SaddleError::Solver` with the step count and the force reached, never a geometry. The minimizer is any `rgmin::Method`, FIRE 2.0 by default.
