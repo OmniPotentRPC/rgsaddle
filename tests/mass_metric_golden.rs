@@ -12,9 +12,9 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, array};
 use rgsaddle::{
     AnalyticSurfaceDynamics, ArcPath, BandSurface, FixedEnergySeed, FixedEnergyTrajectory,
     Hyperplane, IrcConfig, IrcDirection, IrcKind, IrcSession, LineNebConfig, LineNebSession,
-    MassWeighted, PafiConfig, PointSurface, SaddleError, TransmissionConfig, arc_at_time,
-    fixed_energy_action, fixed_energy_action_force, fixed_energy_mep_seed,
-    mass_weighted_rigid_translations, transmission_coefficient,
+    MassMetric, MassWeighted, MetricCovector, MetricPoint, MetricTangent, PafiConfig, PointSurface,
+    SaddleError, TransmissionConfig, arc_at_time, fixed_energy_action, fixed_energy_action_force,
+    fixed_energy_mep_seed, mass_weighted_rigid_translations, transmission_coefficient,
 };
 
 const LIGHT: f64 = 1.008;
@@ -448,4 +448,159 @@ fn ohtst_surface_and_plane_maps_match_stored_values() {
 fn ohtst_shooting_matches_stored_values() {
     let stored = stored();
     expect_close(&stored, "shooting", &shooting().expect("shooting"));
+}
+
+/// Cartesian Hessian of two atoms. Only the x coordinates couple:
+/// `H_00 = 4`, `H_03 = H_30 = 2`, `H_33 = 8`.
+fn two_atom_hessian(v: ArrayView1<f64>) -> Array1<f64> {
+    let mut out = Array1::zeros(v.len());
+    out[0] = 4.0 * v[0] + 2.0 * v[3];
+    out[3] = 2.0 * v[0] + 8.0 * v[3];
+    out
+}
+
+struct TwoAtomXCoupling;
+
+impl PointSurface for TwoAtomXCoupling {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        Ok((0.0, two_atom_hessian(x)))
+    }
+
+    fn hessian_vector(
+        &self,
+        _x: ArrayView1<f64>,
+        v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        Ok(Some(two_atom_hessian(v)))
+    }
+}
+
+/// One diagonal entry, `H_33 = 4`, on the middle atom of three.
+fn three_atom_hessian(v: ArrayView1<f64>) -> Array1<f64> {
+    let mut out = Array1::zeros(v.len());
+    out[3] = 4.0 * v[3];
+    out
+}
+
+struct ThreeAtomDiagonal;
+
+impl PointSurface for ThreeAtomDiagonal {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        Ok((0.0, three_atom_hessian(x)))
+    }
+
+    fn hessian_vector(
+        &self,
+        _x: ArrayView1<f64>,
+        v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        Ok(Some(three_atom_hessian(v)))
+    }
+}
+
+fn weighted_column(
+    surface: &MassWeighted<'_, impl PointSurface>,
+    index: usize,
+    n: usize,
+) -> Array1<f64> {
+    let mut basis = Array1::zeros(n);
+    basis[index] = 1.0;
+    surface
+        .hessian_vector(Array1::zeros(n).view(), basis.view())
+        .expect("hessian")
+        .expect("action")
+}
+
+#[test]
+fn hand_derived_mass_weighted_hessian_matches_the_explicit_product() {
+    // Atom masses 4 and 1. Square roots are 2 and 1.
+    // `W_ij = H_ij / (sqrt(m_i) sqrt(m_j))`, so
+    // `W_00 = 4 / 4 = 1`, `W_03 = 2 / 2 = 1`, `W_33 = 8`.
+    let two_atom = TwoAtomXCoupling;
+    let two = MassWeighted::per_atom(&two_atom, &[4.0, 1.0]).unwrap();
+    let column0 = weighted_column(&two, 0, 6);
+    let column3 = weighted_column(&two, 3, 6);
+    assert_eq!(
+        column0.as_slice(),
+        Some(&[1.0, 0.0, 0.0, 1.0, 0.0, 0.0][..])
+    );
+    assert_eq!(
+        column3.as_slice(),
+        Some(&[1.0, 0.0, 0.0, 8.0, 0.0, 0.0][..])
+    );
+    for index in [1, 2, 4, 5] {
+        assert_eq!(
+            weighted_column(&two, index, 6).as_slice(),
+            Some(&[0.0; 6][..])
+        );
+    }
+
+    // Atom masses 1, 4, and 1. The middle x coordinate has square root 2,
+    // so `W_33 = 4 / 4 = 1` and every other entry is zero.
+    let three_atom = ThreeAtomDiagonal;
+    let three = MassWeighted::per_atom(&three_atom, &[1.0, 4.0, 1.0]).unwrap();
+    let mut expected = [0.0; 9];
+    expected[3] = 1.0;
+    assert_eq!(
+        weighted_column(&three, 3, 9).as_slice(),
+        Some(&expected[..])
+    );
+    for index in [0, 1, 2, 4, 5, 6, 7, 8] {
+        assert_eq!(
+            weighted_column(&three, index, 9).as_slice(),
+            Some(&[0.0; 9][..])
+        );
+    }
+}
+
+#[test]
+fn mass_maps_round_trip_and_the_weighted_hessian_is_symmetric() {
+    let metric = MassMetric::atoms(array![4.0, 1.0].view(), 6).unwrap();
+    let point = array![0.5, -1.25, 0.125, 3.0, -0.5, 2.0];
+    let weighted = metric.weight_point(MetricPoint::new(point.view())).unwrap();
+    assert_eq!(
+        weighted.as_slice(),
+        Some(&[1.0, -2.5, 0.25, 3.0, -0.5, 2.0][..])
+    );
+    let back = metric
+        .unweight_point(MetricPoint::new(weighted.view()))
+        .unwrap();
+    assert_eq!(back.as_slice(), point.as_slice());
+
+    let tangent = metric
+        .weight_tangent(MetricTangent::new(point.view()))
+        .unwrap();
+    assert_eq!(tangent.as_slice(), weighted.as_slice());
+    let tangent_back = metric
+        .unweight_tangent(MetricTangent::new(tangent.view()))
+        .unwrap();
+    assert_eq!(tangent_back.as_slice(), point.as_slice());
+
+    let covector = array![2.0, -2.5, 0.25, 3.0, -0.5, 2.0];
+    let weighted_covector = metric
+        .weight_covector(MetricCovector::new(covector.view()))
+        .unwrap();
+    assert_eq!(
+        weighted_covector.as_slice(),
+        Some(&[1.0, -1.25, 0.125, 3.0, -0.5, 2.0][..])
+    );
+    let covector_back = metric
+        .unweight_covector(MetricCovector::new(weighted_covector.view()))
+        .unwrap();
+    assert_eq!(covector_back.as_slice(), covector.as_slice());
+
+    let two_atom = TwoAtomXCoupling;
+    let surface = MassWeighted::per_atom(&two_atom, &[4.0, 1.0]).unwrap();
+    let mut columns = Vec::new();
+    for index in 0..6 {
+        columns.push(weighted_column(&surface, index, 6));
+    }
+    for row in 0..6 {
+        for column in 0..6 {
+            assert_eq!(columns[column][row], columns[row][column]);
+        }
+    }
+    assert_eq!(columns[0][3], columns[3][0]);
+    assert_eq!(columns[0][3], 1.0);
+    assert_eq!(columns[3][3], 8.0);
 }
