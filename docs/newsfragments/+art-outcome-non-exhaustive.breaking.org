@@ -1,0 +1,4 @@
+=ArtOutcome= is now =#[non_exhaustive]= and gains =force_call_count=, the total of the force evaluations of the event, because =force_calls= now holds only the most recent =ArtConfig::force_call_window= entries.
+Code outside the crate can no longer build an =ArtOutcome= with a struct literal or functional update, and a pattern that destructures it must end in =..=.
+Read the fields of the value that =ArtSession::outcome= or =run_events= returns instead.
+Later fields can be added without another break.

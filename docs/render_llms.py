@@ -46,6 +46,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ),
             ("howto/minmode.org", "Dimer, Lanczos, soft-mode seeding, surrogate Hessian actions, saddle index, and ARTn protocol"),
             ("howto/art.org", "Phased Activation-Relaxation Technique nouveau (ArtSession)"),
+            ("howto/direction-cover.org", "Signed per-atom direction cover and arm picker for saddle searches from a minimum (DirectionCover)"),
             ("howto/indexk.org", "Index-k minimum-mode searches with LOBPCG and block Lanczos"),
             ("howto/solid-dimer.org", "Variable-cell solid-state dimer on atoms and strain"),
             ("howto/ssneb.org", "Generalized solid-state NEB on the joint atom-strain chart"),
