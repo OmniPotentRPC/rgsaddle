@@ -1944,6 +1944,7 @@ pub struct MinModeSession {
     /// Smallest force and energy seen since they last fell. Counts
     /// steps that improved neither, so a stiff FIRE limit cycle can
     /// be left without treating a slow descent as a stall.
+    /// [`MinModeSession::reset`] clears the latch with the search.
     fire_stall_force: f64,
     fire_stall_energy: f64,
     fire_stall_count: u32,
@@ -2370,9 +2371,9 @@ impl MinModeSession {
     }
 
     /// Drop optimizer history, dimer rotation history, carried
-    /// curvature, and the cached centre gradient at a surface-epoch
-    /// boundary. The mode stays as the next seed. The saddle-index
-    /// certificate and the escape count go too.
+    /// curvature, the FIRE stall latch, and the cached centre gradient
+    /// at a surface-epoch boundary. The mode stays as the next seed.
+    /// The saddle-index certificate and the escape count go too.
     pub fn reset(&mut self) {
         self.forget_search();
         self.saddle.certified = None;
@@ -2389,6 +2390,9 @@ impl MinModeSession {
         self.clear_cg();
         self.lbfgs_shadow.clear();
         self.curvature = f64::NAN;
+        self.fire_stall_force = f64::NAN;
+        self.fire_stall_energy = f64::NAN;
+        self.fire_stall_count = 0;
         self.capped_fire = None;
         self.solver_stepped = false;
         self.lbfgs_seeded = false;
@@ -4542,6 +4546,38 @@ mod tests {
                 .unwrap();
             assert_eq!(probe.is_some(), probes, "curvature {curvature}");
         }
+    }
+
+    #[test]
+    fn reset_then_step_matches_a_fresh_session_after_a_fire_stall() {
+        // V = -5 x^2 + 40 y^2 + z^2. A stall latch left at the probe
+        // threshold takes the curvature step; a new session does not.
+        let surface = DiagonalQuadratic(array![-10.0, 80.0, 2.0]);
+        let start = array![0.002, 0.15, 0.0];
+        let mode = array![1.0, 0.0, 0.0];
+        let config = MinModeConfig::default().with_saddle_check(None);
+        let mut stalled = MinModeSession::new(config.clone(), start.clone(), mode.clone()).unwrap();
+        stalled.fire_stall_count = super::FIRE_STALL_STEPS;
+        stalled.fire_stall_force = 1.0;
+        stalled.fire_stall_energy = -1.0;
+        stalled.reset();
+        let mut fresh = MinModeSession::new(config, start, mode).unwrap();
+        assert_eq!(stalled.fire_stall_count, fresh.fire_stall_count);
+        assert_eq!(
+            stalled.fire_stall_force.is_nan(),
+            fresh.fire_stall_force.is_nan()
+        );
+        assert_eq!(
+            stalled.fire_stall_energy.is_nan(),
+            fresh.fire_stall_energy.is_nan()
+        );
+        let stalled_report = stalled.step(&surface).unwrap();
+        let fresh_report = fresh.step(&surface).unwrap();
+        assert_eq!(stalled_report.status, fresh_report.status);
+        assert_eq!(stalled.position(), fresh.position());
+        assert_eq!(stalled.mode(), fresh.mode());
+        assert_abs_diff_eq!(stalled.curvature(), fresh.curvature(), epsilon = 0.0);
+        assert_eq!(stalled.fire_stall_count, fresh.fire_stall_count);
     }
 
     #[test]
