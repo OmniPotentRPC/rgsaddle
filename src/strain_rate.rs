@@ -1463,7 +1463,7 @@ impl Default for VineyardConfig {
 
 with_setters!(VineyardConfig {
     with_step => step: val f64,
-    with_difference => difference: FiniteDifference,
+    with_difference => difference: val FiniteDifference,
     with_positive_tol => positive_tol: val f64,
     with_negative_tol => negative_tol: val f64,
 });
