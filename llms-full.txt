@@ -538,10 +538,9 @@ For config minors 5 through 62 this field is read as given, so 0 disables the an
 From minor 63, 0 keeps the Rust default unless flag bit 0, `RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL`, is set; then 0 disables it.
 The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 63 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
-`RGSADDLE_ABI_MINOR` is 66.
+`RGSADDLE_ABI_MINOR` is 67.
 `rgsaddle_band_set_dynamic` (minor 65) sets or clears `DynamicNeb` on a band.
 `rgsaddle_dyneb_mask` (minor 65) applies that mask to a projected band.
-From minor 66, `rgsaddle_atomic_mass`, `rgsaddle_atomic_mass_by_symbol`, `rgsaddle_vineyard_config_default`, and `rgsaddle_vineyard_fd` (with `rgsaddle_vineyard_config_t` and `rgsaddle_vineyard_report_t`) expose standard atomic-mass lookup and mass-weighted finite-difference Vineyard prefactors.
 From minor 24, `rgsaddle_sella_saddle_set_symmetrized_ritz` sets `SellaSaddleConfig::symmetrized_ritz` from 0 or 1.
 It returns `RGSADDLE_INVALID_PARAMETER` for any other value.
 `rgsaddle_sella_saddle_set_small_system_atom_ceiling` (minor 25) sets `SellaSaddleConfig::small_system_atom_ceiling` from 0 or 1.
@@ -576,6 +575,7 @@ Their `image` is then the climbing image's band index.
 It takes a row-major cell or NULL.
 From minor 64, `rgsaddle_geodesic_config_default`, `rgsaddle_geodesic_path`, and `rgsaddle_geodesic_morse` interpolate a path in a redundant coordinate chart (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303). `rgsaddle_geodesic_path` takes a host chart. `rgsaddle_geodesic_morse` uses Eq. (7) with alpha 1.7 and beta 0.01. A NULL config selects the defaults, including an image cap of 32, so it requires `n_images` of at least 32. A supplied cap above `n_images` is `RGSADDLE_INVALID_PARAMETER`.
 From minor 66, `rgsaddle_trics_path` refines an image-major unwrapped Cartesian path in translation-rotation internal coordinates with splicing and writes the refined path to `out` (which may alias `initial` for in-place refinement). Its length controls are in angstrom and `length_per_angstrom` converts the caller's coordinates.
+From minor 67, `rgsaddle_atomic_mass`, `rgsaddle_atomic_mass_by_symbol`, `rgsaddle_vineyard_config_default`, and `rgsaddle_vineyard_fd` (with `rgsaddle_vineyard_config_t` and `rgsaddle_vineyard_report_t`) expose standard atomic-mass lookup and mass-weighted finite-difference Vineyard prefactors.
 `rgsaddle_ocineb_step` reports the hand-off phase (band, tangent alignment, or minimum-mode translation).
 `rgsaddle_connect` runs the double-ended search of `connect` to completion on two endpoint arrays and a host surface.
 The surface writes energy and the Cartesian gradient for one image.
@@ -3874,7 +3874,7 @@ CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --locked --features chemfiles
 
 > Stepping bands, minimum-mode sessions, Sella, IRC, and strings from C and C++
 
-`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 66. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
+`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 67. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
 
 A surface callback returns `rgsaddle_status_t` and receives one `rgsaddle_surface_request_t`. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES` report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -4285,7 +4285,7 @@ ART pushes along the seed until the curvature falls under `art_threshold` (defau
 
 `Stencil::band` checks the array and returns `BAND_PRESET_SEAM` (`band presets stay on feat/band-methods-zoom`, kept for compatibility) because band presets are not implemented in the stencil builder. Use `BandSession`, `AutoNeb`, or `OcinebSession` directly for a band search, and `BandConfig::zoom` or `SpringKind::EnergyWeighted` for zoom-NEB and energy-weighted springs. The chain, the mesh (remesh, insert, window), and the point controller are implemented.
 
-From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only; the stencil symbols were added at ABI minor 16 and remain additive under the current ABI minor 66.
+From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only; the stencil symbols were added at ABI minor 16 and remain additive under the current ABI minor 67.
 
 From Python, `rgsaddle.Stencil.point(x, preset`"dimer")= takes a C-contiguous float64 vector. `step(surface)` releases the thread, and the surface callback re-attaches. `rgsaddle.ase.Point(atoms, preset`"dimer").run(fmax, steps)= is an ASE `Optimizer` whose `step` is one stencil step. A second thread that enters the same handle raises `RuntimeError`.
 
@@ -5551,9 +5551,9 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_geodesic_config_default`. Purpose: Fill `out` with the default geodesic controls (step and gradient tolerances 1e-6, max_move 0.5, lower_ratio 0.95, upper_ratio 1.1, 40 sweeps, 40 iterations, memory 8, 10 bound samples, 32 images, seed 0). Parameters: the declaration. Units: the caller's.
 - `rgsaddle_geodesic_path`. Purpose: Minimize the geodesic length of an existing path. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_geodesic_morse`. Purpose: Morse pair geodesic between two geometries. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_atomic_mass`. Purpose: Look up standard atomic mass in amu by atomic number `z` in [1, 118]. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_atomic_mass_by_symbol`. Purpose: Look up standard atomic mass in amu by IUPAC element symbol. Parameters: the declaration. Units: the caller's.
-- `rgsaddle_vineyard_config_default`. Purpose: Fill `out` with default Vineyard finite-difference controls (step 1e-2, central differences, positive_tol 1e-8, negative_tol 1e-4). Parameters: the declaration. Units: the caller's.
+- `rgsaddle_atomic_mass`. Purpose: Look up standard atomic mass in amu by atomic number `z` in [1, 118], ABI minor 67. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_atomic_mass_by_symbol`. Purpose: Look up standard atomic mass in amu by IUPAC element symbol, ABI minor 67. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_vineyard_config_default`. Purpose: Fill `out` with default Vineyard finite-difference controls (step 1e-2, central differences, positive_tol 1e-8, negative_tol 1e-4), ABI minor 67. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_vineyard_fd`. Purpose: Evaluate the harmonic Vineyard prefactor from dense finite-difference Hessians on `surface` at `x_min` and `x_saddle`. Parameters: the declaration. Units: the caller's.
 
 ## Types and callbacks
@@ -5629,8 +5629,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_lineb_rate_diagnostics_t`. Purpose: Geometry counts within the rate, and the Cartesian finite-difference displacement used at the path images (NaN for direct or path-only solves).
 - `rgsaddle_refine_method_t`. Purpose: Refine stepper of rgsaddle_band_set_refine, ABI minor 60.
 - `rgsaddle_geodesic_config_t`. Purpose: Geodesic interpolation controls.
-- `rgsaddle_vineyard_config_t`. Purpose: Mass-weighted finite-difference Vineyard prefactor controls.
-- `rgsaddle_vineyard_report_t`. Purpose: Mass-weighted Vineyard prefactor summary report.
+- `rgsaddle_vineyard_config_t`. Purpose: Mass-weighted finite-difference Vineyard prefactor controls, ABI minor 67.
+- `rgsaddle_vineyard_report_t`. Purpose: Mass-weighted Vineyard prefactor summary report, ABI minor 67.
 - `rgsaddle_hyperplane_emit_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_sample_hyperplane_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_surface_fn`. Purpose: Callback typedef in include/rgsaddle.h.
