@@ -339,7 +339,7 @@ fn factor_open_logged(
     n_neg += neg0;
     inv_f.push(inv0);
     for index in 1..diag.len() {
-        let coupled = scale(&inv_f[index - 1], spring * spring);
+        let coupled = scale_by_spring_square(&inv_f[index - 1], spring);
         let fi = sub(&diag[index], &coupled);
         let (inv, log_i, neg_i) =
             inverse_and_inertia(&fi, n).map_err(|err| renumber(err, index))?;
@@ -363,7 +363,7 @@ fn closing_schur(
     add_block(&mut mix, &y0[p_open - 1]);
     add_block(&mut mix, &y_last[0]);
     add_block(&mut mix, &y_last[p_open - 1]);
-    let schur = sub(&diag[p_open], &scale(&mix, spring * spring));
+    let schur = sub(&diag[p_open], &scale_by_spring_square(&mix, spring));
     if schur.iter().any(|v| !v.is_finite()) {
         return Err(SaddleError::NonFinite("cyclic Schur complement"));
     }
@@ -507,6 +507,12 @@ fn matvec(matrix: &[f64], vector: &[f64], n: usize) -> Vec<f64> {
 
 fn scale(matrix: &[f64], factor: f64) -> Vec<f64> {
     matrix.iter().map(|value| value * factor).collect()
+}
+
+// `spring * spring` overflows for a large finite spring. Scaling twice keeps
+// a well-conditioned complement finite.
+fn scale_by_spring_square(matrix: &[f64], spring: f64) -> Vec<f64> {
+    scale(&scale(matrix, spring), spring)
 }
 
 fn sub(left: &[f64], right: &[f64]) -> Vec<f64> {
@@ -933,5 +939,76 @@ mod tests {
         for (got, want) in report.solution.iter().zip(&x_true) {
             assert!((got - want).abs() < 1e-8, "{got} vs {want}");
         }
+    }
+
+    #[test]
+    fn large_finite_springs_match_the_inertia_and_log_pivot() {
+        // Three scalar beads with diagonal `4|k|`. A positive spring has
+        // complements `4k`, `15k/4`, and `10k/3`, so the pivot sum is
+        // `ln(50) + 3 ln(k)` and every pivot is positive. The product
+        // `spring * spring` is non-finite on this range.
+        let positive = |spring: f64| vec![vec![4.0 * spring]; 3];
+        for spring in [1.0e160_f64, 1.0e180, 1.0e200] {
+            assert!(!(spring * spring).is_finite(), "{spring}");
+            let want = (50.0_f64).ln() + 3.0 * spring.ln();
+            let got = logdet_cyclic_blocks(&positive(spring), 1, spring).expect("positive");
+            assert!(
+                (got.log_abs_det - want).abs() < 1e-6,
+                "{spring}: {} vs {want}",
+                got.log_abs_det
+            );
+            assert_eq!(got.n_negative, 0, "{spring}");
+        }
+
+        let unit = positive(1.0);
+        let unit_got = logdet_cyclic_blocks(&unit, 1, 1.0).expect("unit");
+        let dense = dense_inertia(&dense_cyclic(&unit, 1, 1.0));
+        assert!((unit_got.log_abs_det - (50.0_f64).ln()).abs() < 1e-8);
+        assert!((dense.0 - unit_got.log_abs_det).abs() < 1e-8);
+        assert_eq!((unit_got.n_negative, dense.1), (0, 0));
+
+        // The closing pivot is `-14k/3`. The open chain stays positive, so
+        // the inertia is one negative eigenvalue and `ln|det| = ln(70) + 3 ln(k)`.
+        let spring = 1.0e200_f64;
+        let indefinite = vec![vec![4.0 * spring], vec![4.0 * spring], vec![-4.0 * spring]];
+        let want = (70.0_f64).ln() + 3.0 * spring.ln();
+        let got = logdet_cyclic_blocks(&indefinite, 1, spring).expect("indefinite");
+        assert!(
+            (got.log_abs_det - want).abs() < 1e-6,
+            "{} vs {want}",
+            got.log_abs_det
+        );
+        assert_eq!(got.n_negative, 1);
+        let indefinite_unit = vec![vec![4.0], vec![4.0], vec![-4.0]];
+        let unit_indef = logdet_cyclic_blocks(&indefinite_unit, 1, 1.0).expect("unit indef");
+        let dense_indef = dense_inertia(&dense_cyclic(&indefinite_unit, 1, 1.0));
+        assert!((unit_indef.log_abs_det - (70.0_f64).ln()).abs() < 1e-8);
+        assert_eq!((unit_indef.n_negative, dense_indef.1), (1, 1));
+
+        // A negative spring flips the off-diagonal sign. The complements are
+        // `4k`, `15k/4`, and `18k/5`, so `ln|det| = ln(54) + 3 ln(k)`.
+        let neg = -1.0e200_f64;
+        assert!(!(neg * neg).is_finite());
+        let neg_diag = vec![vec![4.0 * neg.abs()]; 3];
+        let want_neg = (54.0_f64).ln() + 3.0 * neg.abs().ln();
+        let got_neg = logdet_cyclic_blocks(&neg_diag, 1, neg).expect("negative spring");
+        assert!(
+            (got_neg.log_abs_det - want_neg).abs() < 1e-6,
+            "{} vs {want_neg}",
+            got_neg.log_abs_det
+        );
+        assert_eq!(got_neg.n_negative, 0);
+
+        // Two decoupled copies in `2 × 2` blocks double the scalar pivot sum.
+        let k = 1.0e160_f64;
+        let blocks = vec![vec![4.0 * k, 0.0, 0.0, 4.0 * k]; 3];
+        let want_block = 2.0 * (50.0_f64).ln() + 6.0 * k.ln();
+        let got_block = logdet_cyclic_blocks(&blocks, 2, k).expect("block");
+        assert!(
+            (got_block.log_abs_det - want_block).abs() < 1e-6,
+            "{} vs {want_block}",
+            got_block.log_abs_det
+        );
+        assert_eq!(got_block.n_negative, 0);
     }
 }
