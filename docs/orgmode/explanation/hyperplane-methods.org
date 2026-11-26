@@ -124,9 +124,9 @@ P_x=M^{-1/2}P_qM^{1/2}
 
 Forces are covectors, so their Cartesian map is \(P_x^T\), not \(P_x\).
 The code therefore performs all OH-TST geometry in \(q\).  PAFI without
-explicit masses is the unit-mass case.  =MassWeighted= and
-=Hyperplane::from_cartesian= perform the two coordinate maps rather than
-hiding a metric in a dot product.
+explicit masses is the unit-mass case.  =MassWeighted=,
+=Hyperplane::from_cartesian=, and the fixed-energy path take those maps
+from =MassMetric= rather than hiding a metric in a dot product.
 
 The affine level set is a flat embedded manifold.  Its retraction is exact:
 
@@ -581,14 +581,11 @@ a reproducible test.
    Lanczos translation, and band perpendicular splitting through paired
    =project=/=reflect= functions while retaining each call site's current
    arithmetic and golden hashes.
-4. *Mass metric as an explicit type.* Replace repeated square-root mass
-   vectors in PAFI/OH-TST/IRC with a checked metric object that maps points,
-   tangent vectors, and covectors distinctly.
-5. *Additional production engine adapters.* Implement OpenMM and GROMACS
+4. *Additional production engine adapters.* Implement OpenMM and GROMACS
    against =HyperplaneSampler= and the C ABI contract above.
-6. *Production callback bindings.* Complete callback-owned C and Python
+5. *Production callback bindings.* Complete callback-owned C and Python
    engine adapters for optimization, work, TI, and shooting without exposing
    an engine pointer to Rust.
-7. *Paper reproduction suite.* Implement the eight pinned inputs above and
+6. *Paper reproduction suite.* Implement the eight pinned inputs above and
    compare paper observables only after independent quadrature references
    pass.

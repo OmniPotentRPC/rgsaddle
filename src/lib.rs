@@ -75,6 +75,7 @@ pub mod capi;
 pub mod capi_hyperplane;
 pub mod connect;
 pub mod defect_pair;
+pub mod direction_cover;
 pub mod elastic_dipole;
 pub mod error;
 pub mod geodesic;
@@ -84,6 +85,7 @@ pub mod indexk;
 pub mod lammps;
 pub mod line_neb;
 pub mod lineb;
+pub mod mass_metric;
 pub mod minmode;
 pub mod nichols;
 pub mod npt;
@@ -107,6 +109,7 @@ pub mod ssneb;
 pub mod stencil;
 pub mod strain_rate;
 pub mod tangent;
+pub mod trics;
 
 // `translated_gradient` is crate-private, so the golden-bit test lives in
 // this module under `cfg(test)`. The Kani harnesses are the same module
@@ -156,6 +159,11 @@ pub use defect_pair::{
     seeded_saddles, segment_band, shell_pair_factor, smoluchowski_rate, sphere_hit_probability,
     spherical_return_probability, volume_from_frequency,
 };
+pub use direction_cover::{
+    ArmFailure, ArmId, ArmOutcome, ArmPolicy, ArmRecord, ArmSuggestion, ArmTrial, AtomCoverage,
+    CoverBudget, CoverageReport, DirectionCover, DirectionCoverConfig, ProductState, SaddleEntry,
+    covering_radius_s2, sphere_cover,
+};
 pub use elastic::{
     ElasticMultipole, LocalField, Octupole, Quadrupole, StrainGradient, quadrupole_energy,
 };
@@ -170,7 +178,10 @@ pub use geodesic::{
     GeodesicChart, GeodesicConfig, GeodesicLengths, GeodesicReport, MORSE_ALPHA, MORSE_BETA,
     MorsePairChart, geodesic_interpolate, geodesic_lengths, geodesic_path,
 };
-pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
+pub use idpp::{
+    IdppConfig, PathInitializer, SidppConfig, TricsSeed, TricsStartConfig, idpp_path,
+    initialize_path, linear_path, sidpp_path,
+};
 pub use indexk::{
     BlockEigenKind, HessianProduct, IndexKConfig, IndexKReport, IndexKSession, WithHessian,
     indexk_step, reflect_force, translated_force,
@@ -196,6 +207,7 @@ pub use lineb::{
     cartesian_image_hessian, hqtst_rate_from_image_hessians, hqtst_rate_interpolated_hessian,
     hqtst_rate_interpolated_hessian_observed, hqtst_rate_interpolated_hessian_with_step,
 };
+pub use mass_metric::{MassMetric, MetricCovector, MetricPoint, MetricTangent};
 pub use minmode::{
     ArtNConfig, FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession,
     MinModeStatus, ModeEstimate, PointSurface, RaisedStep, halve_raised_energy,
@@ -285,6 +297,11 @@ pub use strain_rate::{
     split_translational_modes, symmetrize, transform_tensor, vineyard_prefactor,
 };
 pub use tangent::TangentKind;
+pub use trics::{
+    TRICS_SPLICE_TOLERANCE_ANGSTROM, TricConfig, TricInversionConfig, TricPrimitive, TricSystem,
+    TricsConfig, TricsReport, TricsSegment, diagnostic_matrix as tric_diagnostic_matrix,
+    interpolate_tric_segment, tric_segments, tric_systems, trics_path,
+};
 
 pub mod cell_log;
 pub mod constraints;

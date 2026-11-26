@@ -23,6 +23,10 @@ The top-level =meson.build= provides the headers as the dependency =rgsaddle-hea
 * Fixed-energy tunnelling path (LI-NEB)
 =howto/line-neb= is =LineNebSession=: the optimal JWKB tunnelling path at a fixed energy below the barrier, found by the line-integral extension of the nudged elastic band of Ásgeirsson, Arnaldsson, and Jónsson (2018). The action is the trapezoid over every image, and an endpoint below the fixed energy is refused. A running session defaults to the restrained endpoint update. =EndpointBelowEnergy::Strict= stops with =SaddleError::Invalid= and =LineNebEndpointViolation=, and the error enum is unchanged. =fixed_energy_mep_seed= builds the starting band from a saddle and its mode. =Converged= needs the transverse action force, the interior spring force, and the endpoint force within tolerance. =FixedEnergyTrajectory= integrates the motion along the converged path.
 
+* Choose linear, IDPP, or TRICS initialization
+=howto/path-initialization= compares the generic =PathInitializer= choices,
+shows how TRICS refines a linear or IDPP seed, and gives the C entry point.
+
 * Pick tangents, springs, projections
 | Kind             | Variants                                                             |
 |------------------+----------------------------------------------------------------------|
@@ -41,6 +45,9 @@ trigger factor is 0.
 
 * Leave a minimum with ART nouveau
 =howto/art= is the phased search: a host seed and mask, perpendicular relaxation, Lanczos, a lowest-mode climb, an index-1 certificate, a push both ways off the saddle, and the two quenches. =ArtStatus::Reverted= is not a completed exit.
+
+* Choose search directions from a minimum
+=howto/direction-cover= is =DirectionCover=: a signed cover of unit vectors on every active atom's sphere, an optional Gaussian kick on its neighbours, and a picker that orders the arms by angular gap or by expected improvement of the barrier. Each arm is one =ArtSession=. The coverage readout has the covering radius per atom, a record per arm, and the distinct saddles against draws.
 
 * Step one point with a stencil
 =howto/stencil= builds =Stencil::point= for a minimiser, the dimer, Lanczos, ART, or eigen following. =Stencil::band= validates its array but band presets are not implemented. The C names are =rgsaddle_stencil_*= and =rgsaddle_last_error=. Python is =rgsaddle.Stencil.point= and =rgsaddle.ase.Point=.

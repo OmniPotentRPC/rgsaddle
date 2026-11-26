@@ -495,6 +495,10 @@ impl PeriodicElastic {
     }
 
     /// Correct barriers and harmonic rates for a rate catalogue.
+    ///
+    /// A corrected barrier or rate that is not finite, such as the overflow
+    /// of a strongly negative barrier at low temperature, returns
+    /// [`SaddleError::NonFinite`] instead of an infinite `rate_hz`.
     pub fn correct_rate_catalogue(
         &self,
         cell: &linkcell::Cell,
@@ -517,8 +521,14 @@ impl PeriodicElastic {
                 let saddle = self.correct_energy(cell, rate.saddle)?;
                 let raw_barrier = rate.saddle.energy - rate.reactant.energy;
                 let infinite_barrier = saddle.infinite - reactant.infinite;
+                if !infinite_barrier.is_finite() {
+                    return Err(SaddleError::NonFinite("infinite-cell barrier"));
+                }
                 let rate_hz = rate.prefactor_hz
                     * (-infinite_barrier / (BOLTZMANN_EV_PER_K * rate.temperature_k)).exp();
+                if !rate_hz.is_finite() {
+                    return Err(SaddleError::NonFinite("corrected harmonic rate"));
+                }
                 Ok(CorrectedRate {
                     raw_barrier,
                     infinite_barrier,
@@ -703,6 +713,12 @@ fn acoustic(constants: Tensor4, direction: [f64; 3]) -> [[f64; 3]; 3] {
     matrix
 }
 
+/// Invert a symmetric acoustic tensor after Sylvester's criterion.
+///
+/// A positive determinant alone admits two negative eigenvalues.  Every
+/// leading minor must clear the same relative floor; for a positive
+/// definite matrix the Hadamard and Fischer inequalities make the two
+/// lower floors implied by the determinant floor.
 fn invert3(matrix: [[f64; 3]; 3]) -> Result<[[f64; 3]; 3], SaddleError> {
     let det = matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
         - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
@@ -711,10 +727,23 @@ fn invert3(matrix: [[f64; 3]; 3]) -> Result<[[f64; 3]; 3], SaddleError> {
         .iter()
         .flatten()
         .fold(0.0_f64, |largest, value| largest.max(value.abs()));
-    let determinant_floor = f64::EPSILON.sqrt() * scale * scale * scale;
+    let floor = f64::EPSILON.sqrt();
+    let first_minor = matrix[0][0];
+    let second_minor = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
+    if !(first_minor.is_finite()
+        && second_minor.is_finite()
+        && first_minor > floor * scale
+        && second_minor > floor * scale * scale)
+    {
+        return Err(SaddleError::Invalid(
+            "elastic acoustic tensor is not positive definite: a leading minor is not positive"
+                .into(),
+        ));
+    }
+    let determinant_floor = floor * scale * scale * scale;
     if !(det.is_finite() && det > determinant_floor) {
         return Err(SaddleError::Invalid(
-            "elastic acoustic tensor is not positive and invertible".into(),
+            "elastic acoustic tensor is not positive definite: its determinant is not positive or is too small to invert".into(),
         ));
     }
     let inverse_det = 1.0 / det;
@@ -800,4 +829,31 @@ fn contract_kernel_abs(left: [[f64; 3]; 3], kernel: Tensor4, right: [[f64; 3]; 3
         }
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invert3;
+
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn invert3_requires_positive_leading_minors() {
+        for matrix in [
+            [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+            [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]],
+            [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]],
+            [[1.0, 2.0, 0.0], [2.0, 1.0, 0.0], [0.0, 0.0, -1.0]],
+        ] {
+            assert!(invert3(matrix).is_err(), "{matrix:?} is indefinite");
+        }
+        let matrix = [[4.0, 1.0, 0.5], [1.0, 3.0, 0.25], [0.5, 0.25, 2.0]];
+        let inverse = invert3(matrix).expect("positive definite");
+        for i in 0..3 {
+            for j in 0..3 {
+                let product: f64 = (0..3).map(|k| matrix[i][k] * inverse[k][j]).sum();
+                let identity = if i == j { 1.0 } else { 0.0 };
+                assert!((product - identity).abs() <= 8.0 * f64::EPSILON);
+            }
+        }
+    }
 }

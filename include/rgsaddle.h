@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 65u
+#define RGSADDLE_ABI_MINOR 68u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1256,6 +1256,105 @@ rgsaddle_status_t rgsaddle_idpp_path(int64_t n_images, int64_t n_atoms,
                                      const double *product, const double *cell,
                                      int64_t max_iterations, double grad_tol,
                                      double max_move, double *out);
+
+/**
+ * AutoNEB flag bit 0, ABI minor 68. The climb stage reflects the
+ * climbing image. Clear to stop after the insertions.
+ */
+#define RGSADDLE_AUTONEB_CLIMB (1ull << 0)
+/**
+ * AutoNEB flag bit 1, ABI minor 68. New images are relaxed on the
+ * image-dependent pair potential. Clear for a straight minimum-image
+ * midpoint.
+ */
+#define RGSADDLE_AUTONEB_IDPP (1ull << 1)
+/**
+ * AutoNEB flag bit 2, ABI minor 68. The window keeps the mean
+ * Cartesian force. Clear removes it, as the band does by default.
+ */
+#define RGSADDLE_AUTONEB_KEEP_TRANSLATION (1ull << 2)
+
+/**
+ * Run-to-completion AutoNEB, ABI minor 68.
+ *
+ * Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016).
+ * The host supplies the endpoints and any intermediate guesses in
+ * `positions` (`n_init` rows of `3 * n_atoms`). The search grows the
+ * band to `n_max` images, endpoints included, relaxing a window of
+ * `n_simul + 2` images between insertions. `out_positions` holds
+ * `n_max` rows; the report's `n_images` says how many were written.
+ * `cell` is a row-major 3x3 lattice or NULL. `fixed` is NULL or
+ * `n_atoms` bytes, 1 for a fixed atom. The surface is the band
+ * callback: one call may carry several images. Threads stay at one,
+ * so the callback is not entered concurrently.
+ */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int32_t projection; /**< rgsaddle_projection_t */
+  int32_t tangent;    /**< rgsaddle_tangent_t */
+  int64_t n_simul;
+  int64_t n_max;
+  int64_t local_max_steps;
+  int64_t climb_max_steps;
+  double k;
+  double force_tol;
+  double local_force_tol;
+  double max_move;
+  double space_energy_ratio;
+} rgsaddle_autoneb_config_t;
+
+/** Result of rgsaddle_autoneb_run. The session stamps version and flags. */
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int32_t status; /**< 1 when the last stage converged, otherwise 0. */
+  int32_t reserved;
+  double max_force;
+  int64_t ci_index; /**< Climbing image, or -1. */
+  int64_t surface_rows;
+  int64_t n_images;
+  int64_t iteration; /**< Steps of the last stage alone. */
+} rgsaddle_autoneb_report_t;
+
+rgsaddle_status_t rgsaddle_autoneb_run(const rgsaddle_autoneb_config_t *config,
+                                       int64_t n_init, int64_t n_atoms,
+                                       const double *positions,
+                                       const double *cell, const uint8_t *fixed,
+                                       double *out_positions,
+                                       rgsaddle_autoneb_report_t *report,
+                                       rgsaddle_surface_fn surface, void *user);
+
+/**
+ * Translation rotation internal coordinates with splicing, ABI minor 66.
+ *
+ * `initial` and `out` must be non-null buffers owned by the caller, each
+ * holding `n_images * 3 * n_atoms` doubles in image-major order. `initial`
+ * and `out` may be identical for in-place refinement or disjoint; partially
+ * overlapping buffers return `RGSADDLE_INVALID_PARAMETER`. `n_images < 2`,
+ * `n_atoms < 1`, or dimension overflow returns `RGSADDLE_SHAPE`. The initial
+ * path may come from linear or IDPP interpolation. One TRIC system is built
+ * per image, low diagnostic segments are interpolated in their internal
+ * metrics, and overlapping endpoints are spliced to `splice_tolerance`. The
+ * published tolerance is 0.0018 Angstrom. `inversion_tolerance`, `max_move`,
+ * and `splice_tolerance` are in angstrom whatever the caller's length unit,
+ * and `length_per_angstrom` is the length of one angstrom in the caller's
+ * coordinates (1.0 for angstrom, 0.1 for nanometres); `out` is in the
+ * caller's coordinates and keeps the first and last image of `initial`
+ * exactly. A non-positive or non-finite `length_per_angstrom` returns
+ * `RGSADDLE_INVALID_PARAMETER`. A two-image path (which has no interior
+ * image), a multi-segment split whose segments have no interior image, a
+ * diagnostic maze with no stable route, a coordinate singularity that damped
+ * inversion cannot pass, or an inversion or splice that does not
+ * converge returns `RGSADDLE_SOLVER`. Invalid controls return
+ * `RGSADDLE_INVALID_PARAMETER`; non-finite input or derived geometry returns
+ * `RGSADDLE_NON_FINITE`.
+ */
+rgsaddle_status_t rgsaddle_trics_path(
+    int64_t n_images, int64_t n_atoms, const double *initial,
+    int64_t max_inversion_iterations, double inversion_tolerance,
+    double max_move, int32_t diagnostic_threshold, double splice_tolerance,
+    int64_t max_splice_iterations, double length_per_angstrom, double *out);
 
 typedef struct RgsaddleOcineb RgsaddleOcineb;
 

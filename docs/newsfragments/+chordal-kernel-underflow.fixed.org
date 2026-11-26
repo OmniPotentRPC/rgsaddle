@@ -1,0 +1,1 @@
+The direction-cover chordal Gaussian stays finite when a positive length scale squares to zero: the value is one on a repeated direction and zero on a positive chord, instead of the =0/0= NaN.

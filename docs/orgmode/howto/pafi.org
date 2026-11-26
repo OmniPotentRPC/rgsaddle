@@ -85,7 +85,7 @@ A polyline cannot be used. Its tangent is the chord, which jumps at every image,
 | =mean_force=  | =ReferenceCode=     | =PafiMeanForce::PublishedEquation8= adds the Jacobian term of the paper's Eq. (8)        |
 | =seed=        | 1                   | seed of the noise; trajectory =i= takes =seed + i=                                       |
 | =fix_com=     | =true=              | hold the center of mass, when the vector has at least two atoms                          |
-| =retain=      | 16                  | configurations kept per plane, evenly spaced                                             |
+| =retain=      | 16                  | configurations kept per plane, evenly spaced from sample 0 through =samples= minus one; both ends are kept when this is above 1, and it must not exceed =samples= |
 | =target_error=| =None=              | stop when the barrier error is at or below this; =None= runs one pass                    |
 | =max_rounds=  | 4                   | most passes, the first included, to reach =target_error=                                 |
 | =region=      | =None=              | hard region the walk must stay in, set with =with_region=; =None= leaves the plane unrestricted |
@@ -94,12 +94,12 @@ A polyline cannot be used. Its tangent is the chord, which jumps at every image,
 
 By default the step is the one of Leimkuhler and Matthews, Appl. Math. Res. Express 2013, 34 (2013), doi:10.1093/amrx/abs010, Eq. (3), the high-friction limit of BAOAB: the noise of a step is the sum of two consecutive draws. Averages are second order in =time_step=, and on a harmonic plane at =μ k dt = 1.2= the tests find =⟨y²⟩= within four errors of its exact value. =μ dt ∇E= is a length, so =μ dt= is length² per energy. The step must be small against the stiffest mode of the plane. =tests/pafi_analytic.rs= runs a harmonic plane at =μ k dt = 1.2=, where an Euler-Maruyama step samples =⟨y²⟩= 2.5 times too wide. Set =integrator= to =PafiIntegrator::EulerMaruyama= to take that step anyway.
 
-A configuration is checked on entry. =thermal=, =mobility= and =time_step= must be finite and positive, =stride= and =trajectories= positive, =blocks= at least 2, =samples= at least =2 * blocks=, and a given =max_jump= finite and positive. A bad value is =SaddleError::Invalid=.
+A configuration is checked on entry. =thermal=, =mobility= and =time_step= must be finite and positive, =stride= and =trajectories= positive, =blocks= at least 2, =samples= at least =2 * blocks=, =retain= at most =samples=, and a given =max_jump= finite and positive. A bad value is =SaddleError::Invalid=.
 
 =max_jump= keeps the walk in the basin of the path. The production run is cut into =blocks= stretches. The thermalized configuration and the end of every stretch are quenched within the plane and compared with the minimum of the plane quenched from the path. If one atom is farther than =max_jump=, the configuration has left the basin. A stretch that left it is dropped and sampled again from the end of the last kept one, and a thermalization is sampled again from the path. The reference code drops such a trajectory the same way, at 0.4 Å. More dropped stretches than =blocks= is an error, because walks keep leaving the basin on that plane. =HyperplaneAverage::rejected= counts them.
 
 * Thermalization and equilibration
-Each plane starts at =X(s)= on the path. It runs =thermalize= steps (default 200) and then records =samples= values, one every =stride= steps. =thermalize= is a minimum warm-up floor, not a statement that equilibrium has been reached. The recorded series is then passed to the automated equilibration test of Chodera, J. Chem. Theory Comput. 12, 1799 (2016). It discards the head of the series that maximizes the number of independent samples of what remains, =N_eff = (N - t₀) / max(1, 2 τ)=, and keeps the tail. A second guard splits the tail in half and requires the means to agree within four block standard errors. The gradient, its error, =psi=, =tau=, =n_eff= and =retained= come from the tail only. When =target_error= asks for more passes, each added pass starts again from the path point, thermalizes for =thermalize / 2= steps, and records more samples.
+Each plane starts at =X(s)= on the path. It runs =thermalize= steps (default 200) and then records =samples= values, one every =stride= steps. =thermalize= is a minimum warm-up floor, not a statement that equilibrium has been reached. The recorded series is then passed to the automated equilibration test of Chodera, J. Chem. Theory Comput. 12, 1799 (2016). It discards the head of the series that maximizes the number of independent samples of what remains, =N_eff = (N - t₀) / max(1, 2 τ)=, and keeps the tail. A second guard splits the tail in half and requires the means to agree within four block standard errors. The gradient, its error, =psi=, =tau= and =n_eff= come from the tail only. =retained= is a separate even subset of the full recorded series, from the first sample through the last. Both ends are kept when =retain= is greater than one. When =target_error= asks for more passes, each added pass starts again from the path point, thermalizes for =thermalize / 2= steps, and records more samples.
 
 The test can refuse a plane. =SaddleError::InsufficientEffectiveSamples= means the tail has fewer than =blocks= independent samples, so raise =samples= or =stride=. =SaddleError::NotEquilibrated= means the two halves of the tail disagree beyond four standard errors, so raise =thermalize= and =samples=. No gradient is returned for a plane that fails either.
 
@@ -183,7 +183,7 @@ One entry per plane.
 | =n_eff=       | =(samples - discard) / max(1, 2 τ)=                                                       |
 | =equilibration= | the =EquilibrationReport= of the series: discard, drift test and its outcome             |
 | =evaluations= | force evaluations on this plane, the quenches of =max_jump= included, summed over passes   |
-| =retained=    | up to =retain= configurations on the plane, evenly spaced through the retained tail         |
+| =retained=    | =retain= configurations from the recorded series, evenly spaced from the first sample through the last |
 | =rejected=    | thermalizations and stretches sampled again for leaving the basin, summed over passes      |
 
 *** How the standard error is computed

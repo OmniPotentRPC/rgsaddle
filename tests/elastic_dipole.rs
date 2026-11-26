@@ -2,7 +2,7 @@
 
 use rgsaddle::{
     AnisotropicGreen, AnisotropicGreenConfig, DefectDipole, ElasticConstants, ElasticDipole,
-    ElasticPairState, Kelvin, PeriodicElastic, PeriodicElasticConfig,
+    ElasticPairState, ElasticRate, Kelvin, PeriodicElastic, PeriodicElasticConfig, SaddleError,
 };
 
 fn shear_dipole(value: f64) -> ElasticDipole {
@@ -268,4 +268,59 @@ fn homogeneous_strain_and_residual_stress_routes_agree() {
             (from_stress - from_strain).abs() <= 8.0 * f64::EPSILON * from_stress.abs().max(1.0)
         );
     }
+}
+
+#[test]
+fn indefinite_acoustic_tensor_with_positive_determinant_is_rejected() {
+    // C44 < 0 makes every sampled acoustic tensor indefinite.  Along [100]
+    // it is diag(C11, C44, C44), [110] and [111] carry two negative
+    // eigenvalues as well, so each determinant is positive.
+    let error = ElasticConstants::cubic(2.0, 6.0, -1.0)
+        .expect_err("an indefinite acoustic tensor must not be inverted");
+    assert!(
+        matches!(&error, SaddleError::Invalid(message) if message.contains("positive definite")),
+        "unexpected error {error}"
+    );
+    ElasticConstants::cubic(2.0, 0.5, 1.0).expect("a stable cubic tensor still passes");
+}
+
+#[test]
+fn rate_catalogue_rejects_a_rate_that_overflows() {
+    let corrector = PeriodicElastic::new(
+        cubic_constants(),
+        PeriodicElasticConfig::default()
+            .with_green(AnisotropicGreenConfig::default().with_angular_points(32))
+            .with_image_shells(2),
+    )
+    .expect("periodic corrector");
+    let cell = linkcell::Cell::ortho(12.0, 12.0, 12.0).expect("cubic cell");
+    let state = |energy| ElasticPairState {
+        energy,
+        first: DefectDipole {
+            position: [0.0, 0.0, 0.0],
+            dipole: shear_dipole(1.2),
+        },
+        second: DefectDipole {
+            position: [3.0, 1.0, 0.5],
+            dipole: shear_dipole(-0.9),
+        },
+    };
+    let rate = |saddle_energy| ElasticRate {
+        reactant: state(0.0),
+        saddle: state(saddle_energy),
+        prefactor_hz: 1.0e13,
+        temperature_k: 1.0,
+    };
+    let finite = corrector
+        .correct_rate_catalogue(&cell, &[rate(0.5)])
+        .expect("a finite rate");
+    assert!(finite[0].rate_hz.is_finite(), "{finite:?}");
+    // exp(100 / (k_B * 1 K)) overflows f64.
+    let error = corrector
+        .correct_rate_catalogue(&cell, &[rate(0.5), rate(-100.0)])
+        .expect_err("an infinite rate must be reported");
+    assert!(
+        matches!(error, SaddleError::NonFinite(what) if what.contains("rate")),
+        "unexpected error {error}"
+    );
 }

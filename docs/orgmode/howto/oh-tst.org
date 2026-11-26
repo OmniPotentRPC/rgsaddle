@@ -8,7 +8,7 @@ OH-TST takes the dividing surface to be a hyperplane and moves it to the maximum
 :cite:`johannessonOptimizationHyperplanar2001,bligaardOptimizationHyperplanar2005,leimkuhlerRationalConstruction2013,assarafZeroVariance1999,miraZeroVariance2013,absilTrustRegion2007,byrdSampleSize2012,bennettEfficientEstimation1976,swinburneUnsupervisedCalculation2018,jarzynskiTargetedFree2002,olkinDistanceTwo1982,rizziTargetedFree2021,jamesEstimationQuadratic1961,shirtsStatisticallyOptimal2008,klimovichGuidelinesAnalysis2015,bennettMolecularDynamics1977,chandlerStatisticalMechanics1978,vanErpNovelPath2003,andersonStatisticalTheories1973,goswamiAdaptivePruning2026,kramersBrownianMotion1940`
 #+end_export
 
-The module =rgsaddle::ohtst= takes any =PointSurface=. It does not know what a vacancy or a molecule is. Coordinates are mass-weighted, =q = M^{1/2} x=; =MassWeighted= wraps a Cartesian surface with its masses. A plane is a point =p= and a unit normal =ν= pointing from the reactant to the product, and its free energy is
+The module =rgsaddle::ohtst= takes any =PointSurface=. It does not know what a vacancy or a molecule is. Coordinates are mass-weighted, =q = M^{1/2} x=; =MassWeighted= wraps a Cartesian surface with a checked =MassMetric=. A plane is a point =p= and a unit normal =ν= pointing from the reactant to the product, and its free energy is
 
 : A(p, ν) = -kT ln ∫ δ(ν · (q - p)) exp(-V(q) / kT) dq
 

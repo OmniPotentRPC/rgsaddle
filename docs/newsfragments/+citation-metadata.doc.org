@@ -1,0 +1,1 @@
+The repository now carries citation metadata for rgsaddle in ~CITATION.cff~, ~codemeta.json~ and ~.zenodo.json~, with the author ORCID and the Zenodo concept DOI for all versions. ~tests/package_version.rs~ holds their version fields equal to ~Cargo.toml~, and the release steps in the contributing guide list the three files.

@@ -10,10 +10,11 @@
 //!
 //! with `T = ∂q/∂λ`. This is the constrained dynamics in appendix B of
 //! Zhang, Nimmrich, Johnson, Schenter, Khalil, and Govind, J. Chem.
-//! Theory Comput. 21, 7517 (2025), doi:10.1021/acs.jctc.5c00673, which
-//! Ásgeirsson, Arnaldsson and Jónsson, J. Chem. Phys. 148, 102334
-//! (2018), use to read the temperature of an optimal tunneling path.
-//! The closed orbit
+//! Theory Comput. 21, 7517 (2025), doi:10.1021/acs.jctc.5c00673,
+//! "Accelerating Instanton Theory with the Line Integral Nudged Elastic
+//! Band Method and Gaussian Process Regression", which Ásgeirsson,
+//! Arnaldsson and Jónsson, J. Chem. Phys. 148, 102334 (2018), use to
+//! read the temperature of an optimal tunneling path. The closed orbit
 //! has period `τ = 2` half periods and temperature `ℏ / (k_B τ)`.
 
 use std::collections::HashMap;
