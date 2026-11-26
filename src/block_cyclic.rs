@@ -52,45 +52,40 @@ pub struct CyclicFactor {
     blocks: Vec<Vec<f64>>,
 }
 
-#[derive(Clone, Copy)]
-enum PivotMode {
-    /// Any zero-tolerance pivot is an error.
-    Strict,
-    /// A zero-tolerance pivot is replaced by `±1` in the inverse.
-    Regularize,
-    /// Same replacement, except an entirely zero complement is an error.
-    Factor,
-}
-
-/// Log-absolute-determinant and inertia, allowing a regularized zero pivot.
+/// Log-absolute-determinant and inertia of one cyclic block-tridiagonal matrix.
+///
+/// A pivot inside the relative zero tolerance, or a non-finite pivot, is an
+/// error. Substituting a finite value for that pivot would change every later
+/// Schur complement.
 ///
 /// # Errors
 ///
-/// [`SaddleError::Invalid`] when there are fewer than three blocks,
-/// [`SaddleError::Shape`] when a block is not `n × n`, and
-/// [`SaddleError::NonFinite`] when an entry or a factorization is non-finite.
+/// [`SaddleError::Invalid`] when there are fewer than three blocks or `n` is
+/// zero, [`SaddleError::Shape`] when a block is not `n × n`,
+/// [`SaddleError::NonFinite`] when an entry or a pivot is non-finite, and
+/// [`SaddleError::Singular`] when a complement pivot lies inside the relative
+/// zero tolerance. The singular index is the rotated block.
 pub fn logdet_cyclic_blocks(
     diag: &[Vec<f64>],
     n: usize,
     spring: f64,
 ) -> Result<BlockInertia, SaddleError> {
-    logdet_mode(diag, n, spring, PivotMode::Regularize)
+    logdet_mode(diag, n, spring)
 }
 
 /// Log-absolute-determinant and inertia that refuses a zero-tolerance pivot.
 ///
-/// Replacing that pivot by `±1` would change every later Schur complement.
+/// This is the same computation as [`logdet_cyclic_blocks`].
 ///
 /// # Errors
 ///
-/// Same as [`logdet_cyclic_blocks`], plus [`SaddleError::Singular`] when a
-/// complement has a zero-tolerance pivot. The index is the rotated block.
+/// Same as [`logdet_cyclic_blocks`].
 pub fn logdet_cyclic_strict(
     diag: &[Vec<f64>],
     n: usize,
     spring: f64,
 ) -> Result<BlockInertia, SaddleError> {
-    logdet_mode(diag, n, spring, PivotMode::Strict)
+    logdet_mode(diag, n, spring)
 }
 
 /// Factor `diag` after adding `tau` to every diagonal entry.
@@ -101,8 +96,8 @@ pub fn logdet_cyclic_strict(
 /// # Errors
 ///
 /// [`SaddleError::Invalid`] below three blocks or for `n == 0`,
-/// [`SaddleError::Singular`] when a complement is entirely inside the zero
-/// tolerance, and the shape and finiteness errors of [`logdet_cyclic_blocks`].
+/// [`SaddleError::Singular`] when a complement pivot lies inside the relative
+/// zero tolerance, and the shape and finiteness errors of [`logdet_cyclic_blocks`].
 pub fn factor_cyclic(
     diag: &[Vec<f64>],
     n: usize,
@@ -132,10 +127,9 @@ pub fn factor_cyclic(
     }
     let start = best_pivot_index(&blocks, n)?;
     let rotated = rotate(&blocks, start);
-    let inv_f = factor_open(&rotated[..p - 1], n, spring, PivotMode::Factor)?;
+    let inv_f = factor_open(&rotated[..p - 1], n, spring)?;
     let schur = closing_schur(&rotated, &inv_f, n, spring)?;
-    let (inv_s, _, _, _) =
-        inverse_and_inertia(&schur, n, PivotMode::Factor).map_err(|err| renumber(err, p - 1))?;
+    let (inv_s, _, _) = inverse_and_inertia(&schur, n).map_err(|err| renumber(err, p - 1))?;
     Ok(CyclicFactor {
         inv_f,
         inv_s,
@@ -229,12 +223,7 @@ impl CyclicFactor {
     }
 }
 
-fn logdet_mode(
-    diag: &[Vec<f64>],
-    n: usize,
-    spring: f64,
-    mode: PivotMode,
-) -> Result<BlockInertia, SaddleError> {
+fn logdet_mode(diag: &[Vec<f64>], n: usize, spring: f64) -> Result<BlockInertia, SaddleError> {
     if !spring.is_finite() {
         return Err(SaddleError::NonFinite("cyclic logdet spring"));
     }
@@ -249,10 +238,10 @@ fn logdet_mode(
     }
     let start = best_pivot_index(diag, n)?;
     let rotated = rotate(diag, start);
-    let (inv_f, mut log_abs, mut n_neg) = factor_open_logged(&rotated[..p - 1], n, spring, mode)?;
+    let (inv_f, mut log_abs, mut n_neg) = factor_open_logged(&rotated[..p - 1], n, spring)?;
     let schur = closing_schur(&rotated, &inv_f, n, spring)?;
-    let (_inv, log_s, neg_s, _) =
-        inverse_and_inertia(&schur, n, mode).map_err(|err| renumber(err, p - 1))?;
+    let (_inv, log_s, neg_s) =
+        inverse_and_inertia(&schur, n).map_err(|err| renumber(err, p - 1))?;
     log_abs += log_s;
     n_neg += neg_s;
     if !log_abs.is_finite() {
@@ -333,34 +322,27 @@ fn rotate(diag: &[Vec<f64>], start: usize) -> Vec<Vec<f64>> {
     out
 }
 
-fn factor_open(
-    diag: &[Vec<f64>],
-    n: usize,
-    spring: f64,
-    mode: PivotMode,
-) -> Result<Vec<Vec<f64>>, SaddleError> {
-    Ok(factor_open_logged(diag, n, spring, mode)?.0)
+fn factor_open(diag: &[Vec<f64>], n: usize, spring: f64) -> Result<Vec<Vec<f64>>, SaddleError> {
+    Ok(factor_open_logged(diag, n, spring)?.0)
 }
 
 fn factor_open_logged(
     diag: &[Vec<f64>],
     n: usize,
     spring: f64,
-    mode: PivotMode,
 ) -> Result<(Vec<Vec<f64>>, f64, usize), SaddleError> {
     let mut inv_f = Vec::with_capacity(diag.len());
     let mut log_abs = 0.0;
     let mut n_neg = 0usize;
-    let (inv0, log0, neg0, _) =
-        inverse_and_inertia(&diag[0], n, mode).map_err(|err| renumber(err, 0))?;
+    let (inv0, log0, neg0) = inverse_and_inertia(&diag[0], n).map_err(|err| renumber(err, 0))?;
     log_abs += log0;
     n_neg += neg0;
     inv_f.push(inv0);
     for index in 1..diag.len() {
         let coupled = scale(&inv_f[index - 1], spring * spring);
         let fi = sub(&diag[index], &coupled);
-        let (inv, log_i, neg_i, _) =
-            inverse_and_inertia(&fi, n, mode).map_err(|err| renumber(err, index))?;
+        let (inv, log_i, neg_i) =
+            inverse_and_inertia(&fi, n).map_err(|err| renumber(err, index))?;
         log_abs += log_i;
         n_neg += neg_i;
         inv_f.push(inv);
@@ -388,14 +370,13 @@ fn closing_schur(
     Ok(schur)
 }
 
-fn inverse_and_inertia(
-    block: &[f64],
-    n: usize,
-    mode: PivotMode,
-) -> Result<(Vec<f64>, f64, usize, usize), SaddleError> {
+fn inverse_and_inertia(block: &[f64], n: usize) -> Result<(Vec<f64>, f64, usize), SaddleError> {
     let arr = Array2::from_shape_vec((n, n), block.to_vec())
         .map_err(|_| SaddleError::Shape(format!("inertia block is not {n} by {n}")))?;
     let (evals, vectors) = faer_eigh(&arr)?;
+    if evals.iter().any(|lam| !lam.is_finite()) {
+        return Err(SaddleError::NonFinite("cyclic pivot"));
+    }
     let mut scale = 0.0_f64;
     for lam in evals.iter().copied() {
         if lam.abs() > scale {
@@ -405,28 +386,19 @@ fn inverse_and_inertia(
     let floor = relative_zero_tolerance(scale, n);
     let mut log_abs = 0.0;
     let mut n_neg = 0usize;
-    let mut n_zero = 0usize;
     let mut inv_lam = vec![0.0; n];
     for (col, lam) in evals.iter().copied().enumerate() {
         if lam.abs() <= floor {
-            n_zero += 1;
-            inv_lam[col] = 1.0_f64.copysign(lam);
-        } else {
-            log_abs += lam.abs().ln();
-            if lam < -floor {
-                n_neg += 1;
-            }
-            inv_lam[col] = 1.0 / lam;
+            return Err(SaddleError::Singular(0));
         }
-    }
-    if n_zero > 0 && matches!(mode, PivotMode::Strict) {
-        return Err(SaddleError::Singular(0));
-    }
-    if n_zero == n && matches!(mode, PivotMode::Factor) {
-        return Err(SaddleError::Singular(0));
+        log_abs += lam.abs().ln();
+        if lam < -floor {
+            n_neg += 1;
+        }
+        inv_lam[col] = 1.0 / lam;
     }
     let inv = gemm_symmetric_inverse(&vectors, &inv_lam)?;
-    Ok((inv, log_abs, n_neg, n_zero))
+    Ok((inv, log_abs, n_neg))
 }
 
 fn gemm_symmetric_inverse(vectors: &Array2<f64>, inv_lam: &[f64]) -> Result<Vec<f64>, SaddleError> {
@@ -680,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn regularized_logdet_matches_the_same_spectrum_on_a_shifted_indefinite_block() {
+    fn block_logdet_matches_the_same_spectrum_on_a_shifted_indefinite_block() {
         let (mut diag, spring) = sample_blocks(3, 5);
         diag[2][0] = -1.5;
         let got = logdet_cyclic_blocks(&diag, 3, spring).expect("blocks");
@@ -703,15 +675,56 @@ mod tests {
         }
         let err = logdet_cyclic_strict(&diag, n, spring).expect_err("zero mode");
         assert!(matches!(err, SaddleError::Singular(_)), "{err}");
-        let regularized = logdet_cyclic_blocks(&diag, n, spring).expect("one zero is kept");
-        assert!(regularized.log_abs_det.is_finite());
-        let factored =
-            factor_cyclic(&diag, n, spring, 0.0).expect("one zero is not the whole block");
-        let rhs = vec![1.0; p * n];
-        assert!(factored.solve(&rhs).is_ok());
+        let err = logdet_cyclic_blocks(&diag, n, spring).expect_err("zero mode");
+        assert!(matches!(err, SaddleError::Singular(_)), "{err}");
+        let err = factor_cyclic(&diag, n, spring, 0.0).expect_err("zero mode");
+        assert!(matches!(err, SaddleError::Singular(_)), "{err}");
         let zeros = vec![vec![0.0; n * n]; p];
         let err = factor_cyclic(&zeros, n, 0.0, 0.0).expect_err("empty complement");
         assert!(matches!(err, SaddleError::Singular(_)), "{err}");
+    }
+
+    #[test]
+    fn three_scalar_zero_blocks_with_spring_one_are_ln2_or_singular() {
+        let diag = vec![vec![0.0]; 3];
+        let spring = 1.0;
+        match logdet_cyclic_blocks(&diag, 1, spring) {
+            Ok(inertia) => {
+                let want = 2.0_f64.ln();
+                assert!(
+                    (inertia.log_abs_det - want).abs() < 1e-8,
+                    "log|det| {} is not ln 2",
+                    inertia.log_abs_det
+                );
+                assert_eq!(inertia.n_negative, 1);
+            }
+            Err(err) => assert!(matches!(err, SaddleError::Singular(_)), "{err}"),
+        }
+    }
+
+    #[test]
+    fn inconsistent_singular_cycle_is_not_a_successful_solve() {
+        let n = 2usize;
+        let p = 6usize;
+        let spring = 1.0;
+        let mut diag = Vec::new();
+        for _ in 0..p {
+            let mut block = vec![0.0; n * n];
+            block[0] = 2.0 * spring;
+            block[3] = 4.0 + 2.0 * spring;
+            diag.push(block);
+        }
+        let rhs = vec![1.0; p * n];
+        match factor_cyclic(&diag, n, spring, 0.0) {
+            Ok(factor) => {
+                let err = factor.solve(&rhs).expect_err("inconsistent singular solve");
+                assert!(
+                    matches!(err, SaddleError::Singular(_) | SaddleError::Solver(_)),
+                    "{err}"
+                );
+            }
+            Err(err) => assert!(matches!(err, SaddleError::Singular(_)), "{err}"),
+        }
     }
 
     #[test]
