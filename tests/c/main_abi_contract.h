@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-#define RGSADDLE_EXPECTED_ABI_MINOR 69u
+#define RGSADDLE_EXPECTED_ABI_MINOR 70u
 _Static_assert(RGSADDLE_ABI_MINOR == RGSADDLE_EXPECTED_ABI_MINOR, "ABI minor");
 _Static_assert(RGSADDLE_LINEB_LINEAR_SEED == (1u << 0), "lineb flag bit 0");
 _Static_assert(RGSADDLE_LINEB_ENDPOINT_CONVERGENCE == (1u << 1), "lineb flag bit 1");
@@ -842,5 +842,9 @@ typedef rgsaddle_status_t (*abi65_signature_rgsaddle_dyneb_mask)(
     int64_t n_images, int64_t n_atoms, const double *positions, const double *energies,
     double *forces, double fmax, double scale_fmax, uint8_t *frozen);
 _Static_assert(_Generic(&rgsaddle_dyneb_mask, abi65_signature_rgsaddle_dyneb_mask: 1, default: 0), "rgsaddle_dyneb_mask signature");
+
+typedef rgsaddle_status_t (*abi70_signature_rgsaddle_spline_resample)(
+    int64_t n_images, int64_t n_atoms, double *positions, const double *cell);
+_Static_assert(_Generic(&rgsaddle_spline_resample, abi70_signature_rgsaddle_spline_resample: 1, default: 0), "rgsaddle_spline_resample signature");
 
 #endif

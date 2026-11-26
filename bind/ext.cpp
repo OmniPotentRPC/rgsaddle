@@ -1311,9 +1311,14 @@ nb::tuple project_band(Matrix positions, Vector energies, Matrix gradients, doub
   if (projection == "string") {
     config.flags |= RGSADDLE_BAND_STRING;
   }
-  config.tangent = tangent == "simple" ? 0 : 1;
-  if (tangent != "simple" && tangent != "improved" && tangent != "improvedtangent") {
-    throw nb::value_error("tangent must be improved, improvedtangent, or simple");
+  if (tangent == "simple") {
+    config.tangent = RGSADDLE_TANGENT_SIMPLE;
+  } else if (tangent == "spline") {
+    config.tangent = RGSADDLE_TANGENT_SPLINE;
+  } else if (tangent == "improved" || tangent == "improvedtangent") {
+    config.tangent = RGSADDLE_TANGENT_IMPROVED;
+  } else {
+    throw nb::value_error("tangent must be improved, improvedtangent, simple, or spline");
   }
   config.spring = 0;
   config.projection = projection_code(projection);
@@ -1421,6 +1426,34 @@ nb::ndarray<nb::numpy, double> idpp_path_py(Vector reactant, Vector product, std
   const auto status = rgsaddle_idpp_path(n_images, n_atoms, reactant.data(), product.data(),
                                           box.empty() ? nullptr : box.data(), max_iterations, grad_tol, max_move,
                                           out.data());
+  if (status != RGSADDLE_OK) {
+    status_error(status);
+  }
+  auto *raw = new double[rows * dof];
+  std::memcpy(raw, out.data(), rows * dof * sizeof(double));
+  nb::capsule owner(raw, [](void *ptr) noexcept { delete[] static_cast<double *>(ptr); });
+  const std::size_t shape[2] = {rows, dof};
+  return nb::ndarray<nb::numpy, double>(raw, 2, shape, owner);
+}
+
+nb::ndarray<nb::numpy, double> spline_resample_py(Matrix positions, nb::handle cell) {
+  if (positions.shape(0) < 3 || positions.shape(1) <= 0 || positions.shape(1) % 3 != 0) {
+    throw nb::value_error("positions must be (images >= 3, 3N)");
+  }
+  const std::size_t rows = static_cast<std::size_t>(positions.shape(0));
+  const std::size_t dof = static_cast<std::size_t>(positions.shape(1));
+  std::vector<double> box;
+  if (!cell.is_none()) {
+    auto view = nb::cast<Matrix>(cell);
+    if (view.shape(0) != 3 || view.shape(1) != 3) {
+      throw nb::value_error("cell must be 3x3");
+    }
+    box.assign(view.data(), view.data() + 9);
+  }
+  std::vector<double> out(positions.data(), positions.data() + rows * dof);
+  const auto status = rgsaddle_spline_resample(static_cast<std::int64_t>(rows),
+                                               static_cast<std::int64_t>(dof / 3), out.data(),
+                                               box.empty() ? nullptr : box.data());
   if (status != RGSADDLE_OK) {
     status_error(status);
   }
@@ -2645,7 +2678,10 @@ NB_MODULE(_core, m) {
       "row-major lattice; a zero row is not wrapped. fixed is one uint8 per atom, "
       "1 for a fixed atom (ABI minor 39): its force rows are zero, tangents and "
       "springs use the free atoms, and the mean force stays. The endpoints must "
-      "agree on every fixed atom.");
+      "agree on every fixed atom. tangent 'spline' (ABI minor 70) uses the "
+      "not-a-knot cubic through the images: the unit dx/ds and the curvature "
+      "spring 0.5 (k_prev + k_next) / n_images^2 * (d2x/ds2 . t) t. The chord "
+      "projection is not applied.");
 
   m.def(
       "dyneb_mask", &dyneb_mask_py, nb::arg("positions").noconvert(), nb::arg("energies").noconvert(),
@@ -2683,6 +2719,18 @@ NB_MODULE(_core, m) {
       "not-a-knot cubic spline through the images in their arc length (E, Ren and "
       "Vanden-Eijnden 2007). The first and last rows, and an interior anchor, do not move. "
       "cell is the 3x3 row-major cell; the chords are then minimum images. No surface is evaluated.");
+
+  m.def(
+      "spline_resample", &spline_resample_py, nb::arg("positions").noconvert(),
+      nb::arg("cell") = nb::none(),
+      nb::sig("def spline_resample(positions: numpy.typing.NDArray[numpy.float64], "
+              "cell: numpy.typing.NDArray[numpy.float64] | None = None) -> "
+              "numpy.typing.NDArray[numpy.float64]"),
+      "Place interior images at equal steps of the normalized cumulative chord length "
+      "and return the new band (ABI minor 70). The curve is the not-a-knot cubic through "
+      "the Cartesian images, the redistribution of ASE NEB method 'string' with the "
+      "identity preconditioner. The first and last rows do not move. cell is the 3x3 "
+      "row-major cell; the chords are then minimum images. No surface is evaluated.");
 
   m.def(
       "halve_raised_energy", &halve_raised_energy_py, nb::arg("previous"), nb::arg("trial"),

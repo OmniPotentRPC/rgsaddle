@@ -51,7 +51,7 @@ use crate::ocineb::{
     backoff_threshold, initial_threshold, mode_alignment, should_trigger, success_threshold,
     walk_helped,
 };
-use crate::tangent::compute_tangent;
+use crate::tangent::{TangentKind, compute_tangent};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -892,6 +892,11 @@ impl BandSession {
         image: usize,
         energies: &Array1<f64>,
     ) -> Result<Array1<f64>, SaddleError> {
+        if self.config.tangent == TangentKind::Spline {
+            let frame =
+                crate::tangent::spline_tangents(self.positions.view(), self.config.cell.as_ref())?;
+            return Ok(frame.tangents.row(image).to_owned());
+        }
         let pos = self.positions.row(image);
         let mut next = &self.positions.row(image + 1) - &pos;
         let mut prev = &pos - &self.positions.row(image - 1);

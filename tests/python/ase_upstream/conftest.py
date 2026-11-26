@@ -213,6 +213,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             if "test_neb_methods" in node:
                 item.add_marker(
                     pytest.mark.skip(
-                        reason="spline, string, and preconditioned NEB have no rgsaddle force"
+                        reason="NEBOptimizer and the Exp preconditioner are not the identity spline or string force"
                     )
                 )
