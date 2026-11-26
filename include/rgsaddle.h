@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 65u
+#define RGSADDLE_ABI_MINOR 66u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1256,6 +1256,37 @@ rgsaddle_status_t rgsaddle_idpp_path(int64_t n_images, int64_t n_atoms,
                                      const double *product, const double *cell,
                                      int64_t max_iterations, double grad_tol,
                                      double max_move, double *out);
+
+/**
+ * Translation rotation internal coordinates with splicing, ABI minor 66.
+ *
+ * `initial` and `out` must be non-null buffers owned by the caller, each
+ * holding `n_images * 3 * n_atoms` doubles in image-major order. `initial`
+ * and `out` may be identical for in-place refinement or disjoint; partially
+ * overlapping buffers return `RGSADDLE_INVALID_PARAMETER`. `n_images < 2`,
+ * `n_atoms < 1`, or dimension overflow returns `RGSADDLE_SHAPE`. The initial
+ * path may come from linear or IDPP interpolation. One TRIC system is built
+ * per image, low diagnostic segments are interpolated in their internal
+ * metrics, and overlapping endpoints are spliced to `splice_tolerance`. The
+ * published tolerance is 0.0018 Angstrom. `inversion_tolerance`, `max_move`,
+ * and `splice_tolerance` are in angstrom whatever the caller's length unit,
+ * and `length_per_angstrom` is the length of one angstrom in the caller's
+ * coordinates (1.0 for angstrom, 0.1 for nanometres); `out` is in the
+ * caller's coordinates and keeps the first and last image of `initial`
+ * exactly. A non-positive or non-finite `length_per_angstrom` returns
+ * `RGSADDLE_INVALID_PARAMETER`. A two-image path (which has no interior
+ * image), a multi-segment split whose segments have no interior image, a
+ * diagnostic maze with no stable route, a coordinate singularity that damped
+ * inversion cannot pass, or an inversion or splice that does not
+ * converge returns `RGSADDLE_SOLVER`. Invalid controls return
+ * `RGSADDLE_INVALID_PARAMETER`; non-finite input or derived geometry returns
+ * `RGSADDLE_NON_FINITE`.
+ */
+rgsaddle_status_t rgsaddle_trics_path(
+    int64_t n_images, int64_t n_atoms, const double *initial,
+    int64_t max_inversion_iterations, double inversion_tolerance,
+    double max_move, int32_t diagnostic_threshold, double splice_tolerance,
+    int64_t max_splice_iterations, double length_per_angstrom, double *out);
 
 typedef struct RgsaddleOcineb RgsaddleOcineb;
 

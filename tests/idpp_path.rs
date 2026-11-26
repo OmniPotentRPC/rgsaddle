@@ -490,6 +490,221 @@ fn c_abi_idpp_path_copies_the_endpoints() {
 }
 
 #[test]
+#[cfg(feature = "capi")]
+fn c_abi_trics_path_refines_a_supplied_path() {
+    use rgsaddle::capi::{
+        RGSADDLE_INVALID_PARAMETER, RGSADDLE_OK, RGSADDLE_SHAPE, rgsaddle_trics_path,
+    };
+
+    let reactant = array![0.0, 0.0, 0.0, 0.96, 0.0, 0.0, -0.24, 0.93, 0.0];
+    let product = array![0.2, 0.0, 0.0, 1.18, 0.1, 0.0, -0.1, 1.0, 0.1];
+    let initial = linear_path(reactant.view(), product.view(), 5, None).unwrap();
+    let mut out = vec![0.0; initial.len()];
+    let rc = unsafe {
+        rgsaddle_trics_path(
+            5,
+            3,
+            initial.as_ptr(),
+            50,
+            0.000_000_01,
+            0.1,
+            1,
+            0.001_8,
+            1000,
+            1.0,
+            out.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc, RGSADDLE_OK);
+    assert_eq!(&out[..reactant.len()], reactant.as_slice().unwrap());
+    assert_eq!(
+        &out[out.len() - product.len()..],
+        product.as_slice().unwrap()
+    );
+    assert!(out.iter().all(|value| value.is_finite()));
+
+    let mut in_place = initial.iter().copied().collect::<Vec<_>>();
+    let rc_alias = unsafe {
+        rgsaddle_trics_path(
+            5,
+            3,
+            in_place.as_ptr(),
+            50,
+            0.000_000_01,
+            0.1,
+            1,
+            0.001_8,
+            1000,
+            1.0,
+            in_place.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc_alias, RGSADDLE_OK);
+    assert_eq!(in_place, out);
+
+    let mut overlap = vec![0.0; initial.len() + 1];
+    overlap[..initial.len()].copy_from_slice(initial.as_slice().unwrap());
+    let rc_overlap = unsafe {
+        rgsaddle_trics_path(
+            5,
+            3,
+            overlap.as_ptr(),
+            50,
+            0.000_000_01,
+            0.1,
+            1,
+            0.001_8,
+            1000,
+            1.0,
+            overlap.as_mut_ptr().add(1),
+        )
+    };
+    assert_eq!(rc_overlap, RGSADDLE_INVALID_PARAMETER);
+
+    let rc_overflow_atoms = unsafe {
+        rgsaddle_trics_path(
+            5,
+            i64::MAX,
+            initial.as_ptr(),
+            50,
+            0.000_000_01,
+            0.1,
+            1,
+            0.001_8,
+            1000,
+            1.0,
+            out.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc_overflow_atoms, RGSADDLE_SHAPE);
+
+    let rc_overflow_total = unsafe {
+        rgsaddle_trics_path(
+            i64::MAX,
+            2,
+            initial.as_ptr(),
+            50,
+            0.000_000_01,
+            0.1,
+            1,
+            0.001_8,
+            1000,
+            1.0,
+            out.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc_overflow_total, RGSADDLE_SHAPE);
+
+    for (max_inv, diag, max_splice) in [(0, 1, 1000), (50, -1, 1000), (50, 7, 1000), (50, 1, 0)] {
+        let rc_param = unsafe {
+            rgsaddle_trics_path(
+                5,
+                3,
+                initial.as_ptr(),
+                max_inv,
+                0.000_000_01,
+                0.1,
+                diag,
+                0.001_8,
+                max_splice,
+                1.0,
+                out.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc_param, RGSADDLE_INVALID_PARAMETER);
+    }
+}
+
+#[test]
+#[cfg(feature = "capi")]
+fn c_abi_trics_path_reports_solver_failures_and_crosses_a_linear_angle() {
+    use rgsaddle::capi::{RGSADDLE_OK, RGSADDLE_SOLVER, rgsaddle_trics_path};
+
+    let bend_path = |angles: &[f64], tail: bool| {
+        let mut path = Vec::new();
+        for degrees in angles {
+            let (sine, cosine) = degrees.to_radians().sin_cos();
+            path.extend([-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, cosine, sine, 0.0]);
+            if tail {
+                path.extend([cosine + 0.4, sine + 0.7, 0.6]);
+            }
+        }
+        path
+    };
+    let run = |path: &[f64], n_images: i64, n_atoms: i64, threshold: i32, iterations: i64| {
+        let mut out = vec![0.0; path.len()];
+        let rc = unsafe {
+            rgsaddle_trics_path(
+                n_images,
+                n_atoms,
+                path.as_ptr(),
+                iterations,
+                0.000_000_01,
+                0.1,
+                threshold,
+                0.001_8,
+                1000,
+                1.0,
+                out.as_mut_ptr(),
+            )
+        };
+        (rc, out)
+    };
+
+    let blocked_maze = bend_path(&[60.0, 0.0, -60.0], false);
+    assert_eq!(run(&blocked_maze, 3, 3, 0, 50).0, RGSADDLE_SOLVER);
+
+    let singular_endpoint = bend_path(&[60.0, 40.0, 20.0, 0.0], true);
+    assert_eq!(run(&singular_endpoint, 4, 4, 3, 3).0, RGSADDLE_SOLVER);
+
+    let through_linear = bend_path(&[40.0, 10.0, 0.0, -10.0, -40.0], true);
+    let (rc, out) = run(&through_linear, 5, 4, 1, 50);
+    assert_eq!(rc, RGSADDLE_OK);
+    assert_eq!(&out[..12], &through_linear[..12]);
+    assert_eq!(&out[48..], &through_linear[48..]);
+    assert!(out.iter().all(|value| value.is_finite()));
+
+    let two_images = bend_path(&[40.0, -40.0], true);
+    let mut two_out = vec![-1.0; two_images.len()];
+    let rc_two = unsafe {
+        rgsaddle_trics_path(
+            2,
+            4,
+            two_images.as_ptr(),
+            50,
+            0.000_000_01,
+            0.1,
+            1,
+            0.001_8,
+            1000,
+            1.0,
+            two_out.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc_two, RGSADDLE_SOLVER);
+    assert!(two_out.iter().all(|&value| value == -1.0));
+
+    let mut non_finite = two_images.clone();
+    non_finite[0] = f64::NAN;
+    let rc_non_finite = unsafe {
+        rgsaddle_trics_path(
+            2,
+            4,
+            non_finite.as_ptr(),
+            50,
+            0.000_000_01,
+            0.1,
+            1,
+            0.001_8,
+            1000,
+            1.0,
+            two_out.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc_non_finite, rgsaddle::capi::RGSADDLE_NON_FINITE);
+}
+
+#[test]
 fn rejects_a_short_path_and_a_bad_stop() {
     let reactant = array![0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
     let product = array![0.0, 1.0, 0.0, 1.0, 1.0, 0.0];
@@ -536,3 +751,48 @@ fn rejects_a_short_path_and_a_bad_stop() {
 /// ratio of 3.284, and the IDPP exchange start 178 rows.
 const GOLDEN_ROTOR: [f64; 3] = [1.096481, 1.003693, 0.008818];
 const GOLDEN_EXCHANGE_ROWS: usize = 158;
+
+#[test]
+#[cfg(feature = "capi")]
+fn c_abi_trics_path_honours_the_length_unit() {
+    use rgsaddle::capi::{RGSADDLE_INVALID_PARAMETER, RGSADDLE_OK, rgsaddle_trics_path};
+
+    let reactant = array![0.0, 0.0, 0.0, 0.96, 0.0, 0.0, -0.24, 0.93, 0.0];
+    let product = array![0.2, 0.0, 0.0, 1.18, 0.1, 0.0, -0.1, 1.0, 0.1];
+    let angstrom = linear_path(reactant.view(), product.view(), 5, None).unwrap();
+    let run = |path: &[f64], unit: f64| {
+        let mut out = vec![0.0; path.len()];
+        let rc = unsafe {
+            rgsaddle_trics_path(
+                5,
+                3,
+                path.as_ptr(),
+                50,
+                0.000_000_01,
+                0.1,
+                1,
+                0.001_8,
+                1000,
+                unit,
+                out.as_mut_ptr(),
+            )
+        };
+        (rc, out)
+    };
+    let (rc, reference) = run(angstrom.as_slice().unwrap(), 1.0);
+    assert_eq!(rc, RGSADDLE_OK);
+    for unit in [0.1, 1.889_726_124_565_062] {
+        let scaled: Vec<f64> = angstrom.iter().map(|value| value * unit).collect();
+        let (rc, out) = run(&scaled, unit);
+        assert_eq!(rc, RGSADDLE_OK);
+        assert_eq!(&out[..9], &scaled[..9]);
+        assert_eq!(&out[36..], &scaled[36..]);
+        for (got, want) in out.iter().zip(&reference) {
+            assert!((got - want * unit).abs() <= 1e-9 * unit, "unit {unit}");
+        }
+    }
+    for unit in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let (rc, _) = run(angstrom.as_slice().unwrap(), unit);
+        assert_eq!(rc, RGSADDLE_INVALID_PARAMETER, "unit {unit}");
+    }
+}

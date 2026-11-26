@@ -107,6 +107,7 @@ pub mod ssneb;
 pub mod stencil;
 pub mod strain_rate;
 pub mod tangent;
+pub mod trics;
 
 // `translated_gradient` is crate-private, so the golden-bit test lives in
 // this module under `cfg(test)`. The Kani harnesses are the same module
@@ -170,7 +171,10 @@ pub use geodesic::{
     GeodesicChart, GeodesicConfig, GeodesicLengths, GeodesicReport, MORSE_ALPHA, MORSE_BETA,
     MorsePairChart, geodesic_interpolate, geodesic_lengths, geodesic_path,
 };
-pub use idpp::{IdppConfig, SidppConfig, idpp_path, linear_path, sidpp_path};
+pub use idpp::{
+    IdppConfig, PathInitializer, SidppConfig, TricsSeed, TricsStartConfig, idpp_path,
+    initialize_path, linear_path, sidpp_path,
+};
 pub use indexk::{
     BlockEigenKind, HessianProduct, IndexKConfig, IndexKReport, IndexKSession, WithHessian,
     indexk_step, reflect_force, translated_force,
@@ -285,6 +289,11 @@ pub use strain_rate::{
     split_translational_modes, symmetrize, transform_tensor, vineyard_prefactor,
 };
 pub use tangent::TangentKind;
+pub use trics::{
+    TRICS_SPLICE_TOLERANCE_ANGSTROM, TricConfig, TricInversionConfig, TricPrimitive, TricSystem,
+    TricsConfig, TricsReport, TricsSegment, diagnostic_matrix as tric_diagnostic_matrix,
+    interpolate_tric_segment, tric_segments, tric_systems, trics_path,
+};
 
 pub mod cell_log;
 pub mod constraints;

@@ -1,7 +1,7 @@
 #+TITLE: Use the C and C++ interfaces
 #+OPTIONS: toc:nil num:nil
 
-~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 65. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session. A meson project takes the headers from the top-level ~meson.build~; see @@rst::doc:`the meson how-to <meson>`@@.
+~include/rgsaddle.h~ declares the C application binary interface (ABI), major 1, minor 66. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check ~rgsaddle_abi_stamp~ before constructing a session. A meson project takes the headers from the top-level ~meson.build~; see @@rst::doc:`the meson how-to <meson>`@@.
 
 A surface callback returns ~rgsaddle_status_t~ and receives one ~rgsaddle_surface_request_t~. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, ~RGSADDLE_NOT_EQUILIBRATED~ and ~RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES~ report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -17,6 +17,24 @@ Band and minimum-mode force norms are selected by ~rgsaddle_band_set_force_gate~
 ~rgsaddle_ocineb_create~ (ABI minor 20) builds the climbing-image band that hands the climbing image to a minimum-mode search. ~rgsaddle_ocineb_step~ is one band move, one alignment of the band tangent with the lowest mode, or one minimum-mode translation, and ~rgsaddle_ocineb_report_t~ names that phase. ~n_images~ is at least 3. The alignment tolerance must be at least 1/sqrt(2). A solid-state band is refused. ~rgsaddle_ocineb_positions~ copies the band, ~rgsaddle_ocineb_reset~ drops the hand-off state, and ~rgsaddle_ocineb_free~ releases the session. From minor 21 the hand-off is the band's own refinement with these controls: the trigger is on the climbing image's largest per-atom force, ~rgsaddle_minmode_config_t~ supplies only the mode estimate, including the same version-gated ~rotation_angle_tol~ interpretation as ~rgsaddle_minmode_create~, and a ~RGSADDLE_OCINEB_MINMODE~ step is one P-RFO climb step. ~RGSADDLE_BAND_NO_MIN_MODE~ is not read here. The climbing image's requests reach the point surface as one geometry with ~image = -1~ and without ~RGSADDLE_REQ_CLIMBING_IMAGE~.
 
 ~rgsaddle_idpp_path~ (ABI minor 19) writes an initial path. ~n_images~ counts the endpoints and must be at least 3. ~reactant~ and ~product~ each hold ~3 * n_atoms~ doubles. ~out~ holds ~n_images * 3 * n_atoms~ doubles, image-major. ~cell~ is a row-major 3x3 lattice, or NULL in free space. A singular cell returns ~RGSADDLE_INVALID_PARAMETER~. Interior images are relaxed toward interpolated minimum-image pair distances. ~max_iterations~, ~grad_tol~, and ~max_move~ are the per-image L-BFGS stop. The call does not evaluate a surface.
+
+~rgsaddle_trics_path~ (ABI minor 66) refines an initial free-space path.
+~initial~ and ~out~ each hold ~n_images * 3 * n_atoms~ doubles.
+The inversion, diagnostic, and splice arguments correspond to
+=TricsConfig=, and every length among them is in angstrom.
+~length_per_angstrom~ is the length of one angstrom in the caller's
+coordinates, 1.0 for angstrom and 0.1 for nanometres; a path in other units
+is converted before the work and back before it is written.  A non-positive
+or non-finite value returns ~RGSADDLE_INVALID_PARAMETER~.  The call does not
+evaluate a surface.  ~n_images < 2~, ~n_atoms < 1~, or dimension overflow
+returns ~RGSADDLE_SHAPE~.  A two-image path (no interior image), a
+multi-segment split whose segments contain no interior image, a diagnostic
+maze with no stable route, a coordinate singularity that damped inversion
+cannot pass, or an inversion or splice that does not converge returns
+~RGSADDLE_SOLVER~.  Non-finite input or derived geometry returns
+~RGSADDLE_NON_FINITE~.  See
+=howto/path-initialization= for the Rust selector and the published splice
+tolerance.
 
 ~rgsaddle_connect~ (ABI minor 18) is the run-to-completion double-ended search. Stamp ~rgsaddle_connect_config_t~ with the ABI version. ~max_calls~ is a positive iteration cap and ~force_tol~ is the Euclidean stop. A nonzero ~quench_nodes~ minimizes a node created by a split before the next segment. ~left~ and ~right~ each hold ~3 * n_atoms~ positions, and ~position~ receives the returned geometry. The surface is called with one image and writes the energy and the Cartesian gradient. ~rgsaddle_connect_report_t~ carries the energy, the Euclidean gradient norm, the kind (~s~, ~u~, or ~f~), the Hessian index, and the evaluation count. The count includes finite differences that decide a step or an index. The Lanczos acceptance estimates the next curvature with two actions and does not build a dense Hessian. The COMPASS fallback does, and that Hessian is counted.
 
