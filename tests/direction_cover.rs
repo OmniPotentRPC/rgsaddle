@@ -877,7 +877,7 @@ fn scaling_with_cluster_size() {
 }
 
 /// Quick linear-cost sanity comparison used by `NOTES.md`.
-/// `cargo test +1.88.0 --release --test direction_cover quick_direction_cover_sanity -- --ignored --nocapture`
+/// `cargo +1.88.0 test --release --test direction_cover quick_direction_cover_sanity -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn quick_direction_cover_sanity() {

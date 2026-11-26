@@ -1,0 +1,1 @@
+Exhausted ART curvature recovery now returns =SaddleError::ArtIndexOneLost= when the rejected curvature is not finite, including positive infinity and NaN, and still finishes as =ArtStatus::LostCurvature= when that curvature is finite and non-negative.
