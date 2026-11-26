@@ -57,7 +57,7 @@ k_{\rm total}=m_{\rm path}m_{\rm plane}k_{\rm unique}.
 \]
 
 Each symmetry orbit belongs in exactly one factor.  The twelve fcc
-nearest-neighbour vacancy-hop directions are =m_path=12.  They are not the
+nearest-neighbour vacancy-hop directions are ~m_path=12~.  They are not the
 degeneracy of one hop's dividing plane.  That factor is the order of the
 subgroup that fixes both the reactant and the chosen saddle, the in-plane
 symmetry of that plane.  Jóhannesson and Jónsson, Secs. II D and III D,
@@ -579,7 +579,7 @@ a reproducible test.
    swallowing shape or restoration errors.
 3. *Shared Householder functions.* Express climbing image, dimer translation,
    Lanczos translation, and band perpendicular splitting through paired
-   =project=/=reflect= functions while retaining each call site's current
+   ~project/reflect~ functions while retaining each call site's current
    arithmetic and golden hashes.
 4. *Additional production engine adapters.* Implement OpenMM and GROMACS
    against =HyperplaneSampler= and the C ABI contract above.

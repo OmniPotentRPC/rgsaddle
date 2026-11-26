@@ -27,7 +27,7 @@ Each step evaluates the surface twice, once at the start for the first half step
 | =target_pressure_ev_a3= | =with_target_pressure_ev_a3= | 0 |
 | =seed= | =with_seed= | 11 |
 
-The call needs at least two blocks of =block_steps= in the production part of =steps=, finite positive controls (the target pressure only has to be finite, and may be negative), and =steps <= maximum_steps=; otherwise it returns =SaddleError::Invalid=. =block_steps= sets =NptReport::blocks=, the number of complete blocks, and that floor. It does not set the standard errors.
+The call needs at least two blocks of =block_steps= in the production part of =steps=, finite positive controls (the target pressure only has to be finite, and may be negative), and ~steps <= maximum_steps~; otherwise it returns =SaddleError::Invalid=. =block_steps= sets =NptReport::blocks=, the number of complete blocks, and that floor. It does not set the standard errors.
 
 * What the call refuses
 Every refusal happens before the first evaluation, and leaves =positions= and =cell= as they were.

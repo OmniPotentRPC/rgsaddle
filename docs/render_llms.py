@@ -413,7 +413,15 @@ def main() -> int:
         action="store_true",
         help="Verify that llms.txt and llms-full.txt match the current Org sources.",
     )
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Write llms.txt and llms-full.txt from the Org sources.",
+    )
     args = parser.parse_args()
+
+    if args.check and args.write:
+        parser.error("pass only one of --check and --write")
 
     if args.check:
         rc = main_check_only()
