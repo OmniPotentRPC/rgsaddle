@@ -246,3 +246,214 @@ fn reflect_matches_the_one_mode_spelling_and_the_block_sum() {
     assert_eq!(climbed[1].to_bits(), (-force[1]).to_bits());
     assert_eq!(climbed[2].to_bits(), 0.0_f64.to_bits());
 }
+
+struct SoftSaddle {
+    curvatures: [f64; 3],
+}
+
+impl PointSurface for SoftSaddle {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let mut energy = 0.0;
+        let mut gradient = Array1::zeros(3);
+        for i in 0..3 {
+            energy += 0.5 * self.curvatures[i] * x[i] * x[i];
+            gradient[i] = self.curvatures[i] * x[i];
+        }
+        Ok((energy, gradient))
+    }
+
+    fn hessian_vector(
+        &self,
+        _x: ArrayView1<f64>,
+        v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        Ok(Some(array![
+            self.curvatures[0] * v[0],
+            self.curvatures[1] * v[1],
+            self.curvatures[2] * v[2],
+        ]))
+    }
+}
+
+fn non_landscape_search_config() -> MinModeConfig {
+    MinModeConfig::default()
+        .with_force_tol(1.0e-8)
+        .with_max_move(0.1)
+        .with_saddle_check(None)
+}
+
+#[test]
+fn non_landscape_default_negative_tol_keeps_strictly_negative_convergence() {
+    // -5e-4 is strictly negative (and above -1e-3), so the default
+    // non-landscape IndexKConfig still converges for k = 1 and k > 1.
+    let one = SoftSaddle {
+        curvatures: [-5.0e-4, 1.0, 2.0],
+    };
+    let c1 = IndexKConfig::new(1, non_landscape_search_config());
+    assert_eq!(c1.negative_tol, 0.0);
+    let mut k1 = IndexKSession::new(c1, array![0.0, 0.0, 0.0], None).unwrap();
+    let r1 = k1.run(&one, 6).unwrap();
+    assert_eq!(r1.status, MinModeStatus::Converged);
+
+    let two = SoftSaddle {
+        curvatures: [-5.0e-4, -1.0, 2.0],
+    };
+    let c2 = IndexKConfig::new(2, non_landscape_search_config()).with_residual_tol(1.0e-10);
+    assert_eq!(c2.negative_tol, 0.0);
+    let mut k2 = IndexKSession::new(c2, array![0.0, 0.0, 0.0], None).unwrap();
+    let r2 = k2.run(&two, 6).unwrap();
+    assert_eq!(r2.status, MinModeStatus::Converged);
+
+    // Exact zero curvature does not count as negative under the default.
+    let flat = SoftSaddle {
+        curvatures: [0.0, 1.0, 2.0],
+    };
+    let mut k1_flat = IndexKSession::new(
+        IndexKConfig::new(1, non_landscape_search_config()),
+        array![0.0, 0.0, 0.0],
+        None,
+    )
+    .unwrap();
+    assert_eq!(k1_flat.step(&flat).unwrap().status, MinModeStatus::Running);
+}
+
+#[test]
+fn non_landscape_custom_negative_tol_controls_convergence() {
+    let one = SoftSaddle {
+        curvatures: [-5.0e-4, 1.0, 2.0],
+    };
+    let mut strict = IndexKSession::new(
+        IndexKConfig::new(1, non_landscape_search_config()).with_negative_tol(1.0e-3),
+        array![0.0, 0.0, 0.0],
+        None,
+    )
+    .unwrap();
+    let s1 = strict.step(&one).unwrap();
+    assert_eq!(s1.status, MinModeStatus::Running);
+    assert_eq!(s1.iteration, 1);
+    let s2 = strict.step(&one).unwrap();
+    assert_eq!(s2.status, MinModeStatus::Running);
+    assert_eq!(s2.iteration, 2);
+
+    let mut loose = IndexKSession::new(
+        IndexKConfig::new(1, non_landscape_search_config()).with_negative_tol(1.0e-4),
+        array![0.0, 0.0, 0.0],
+        None,
+    )
+    .unwrap();
+    assert_eq!(loose.run(&one, 6).unwrap().status, MinModeStatus::Converged);
+
+    let two = SoftSaddle {
+        curvatures: [-5.0e-4, -1.0, 2.0],
+    };
+    let mut strict_k2 = IndexKSession::new(
+        IndexKConfig::new(2, non_landscape_search_config())
+            .with_residual_tol(1.0e-10)
+            .with_negative_tol(1.0e-3),
+        array![0.0, 0.0, 0.0],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        strict_k2.run(&two, 6).unwrap().status,
+        MinModeStatus::Running
+    );
+
+    let mut loose_k2 = IndexKSession::new(
+        IndexKConfig::new(2, non_landscape_search_config())
+            .with_residual_tol(1.0e-10)
+            .with_negative_tol(1.0e-4),
+        array![0.0, 0.0, 0.0],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        loose_k2.run(&two, 6).unwrap().status,
+        MinModeStatus::Converged
+    );
+
+    for bad in [-1.0e-6, f64::NAN, f64::INFINITY] {
+        let err = IndexKSession::new(
+            IndexKConfig::new(1, non_landscape_search_config()).with_negative_tol(bad),
+            array![0.0, 0.0, 0.0],
+            None,
+        );
+        assert!(matches!(err, Err(SaddleError::Invalid(_))), "tol={bad}");
+    }
+}
+
+#[test]
+fn non_landscape_negative_tol_boundary_is_strict() {
+    let tol = 1.0e-3;
+    let boundary_k1 = SoftSaddle {
+        curvatures: [-tol, 1.0, 2.0],
+    };
+    let mut k1_at = IndexKSession::new(
+        IndexKConfig::new(1, non_landscape_search_config()).with_negative_tol(tol),
+        array![0.0, 0.0, 0.0],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        k1_at.run(&boundary_k1, 6).unwrap().status,
+        MinModeStatus::Running
+    );
+
+    let below_k1 = SoftSaddle {
+        curvatures: [-(tol + 1.0e-6), 1.0, 2.0],
+    };
+    let mut k1_below = IndexKSession::new(
+        IndexKConfig::new(1, non_landscape_search_config()).with_negative_tol(tol),
+        array![0.0, 0.0, 0.0],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        k1_below.run(&below_k1, 6).unwrap().status,
+        MinModeStatus::Converged
+    );
+
+    let boundary_k2 = SoftSaddle {
+        curvatures: [-tol, -1.0, 2.0],
+    };
+    let mut k2_at = IndexKSession::new(
+        IndexKConfig::new(2, non_landscape_search_config())
+            .with_residual_tol(1.0e-10)
+            .with_negative_tol(tol),
+        array![0.0, 0.0, 0.0],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        k2_at.run(&boundary_k2, 6).unwrap().status,
+        MinModeStatus::Running
+    );
+
+    let below_k2 = SoftSaddle {
+        curvatures: [-(tol + 1.0e-6), -1.0, 2.0],
+    };
+    let mut k2_below = IndexKSession::new(
+        IndexKConfig::new(2, non_landscape_search_config())
+            .with_residual_tol(1.0e-10)
+            .with_negative_tol(tol),
+        array![0.0, 0.0, 0.0],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        k2_below.run(&below_k2, 6).unwrap().status,
+        MinModeStatus::Converged
+    );
+}
+
+#[test]
+fn indexk_howto_passes_the_positive_curvature_threshold() {
+    let text = include_str!("../docs/orgmode/howto/indexk.org");
+    assert!(
+        !text.contains("=-NEGATIVE_CURVATURE_TOL="),
+        "with_negative_tol takes the positive tolerance"
+    );
+    assert!(text.contains("=NEGATIVE_CURVATURE_TOL="));
+    assert!(text.contains("non-negative"));
+    assert!(text.contains("=IndexKSession::new= rejects a negative threshold"));
+}

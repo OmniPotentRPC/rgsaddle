@@ -7,6 +7,10 @@
 //! history as the next rotation's seed, and
 //! [`MinModeSession::estimate_mode`] refreshes the mode without a
 //! translation, for a host that climbs with its own optimizer.
+//! [`MinModeSession::set_lbfgs_rotate`] replaces that Polak-Ribiere
+//! plane with L-BFGS in the tangent space (Kästner and Sherwood, J.
+//! Chem. Phys. 128, 014106 (2008), doi:10.1063/1.2815812). It is off
+//! by default.
 
 use std::collections::VecDeque;
 use std::f64::consts::PI;
@@ -22,6 +26,9 @@ use crate::kappa::{Complement, KappaDimerConfig, kappa_dimer_force};
 use crate::saddle_index::{
     Certificate, Probe, SaddleIndex, SaddleIndexCheck, certify, escape_push,
 };
+
+#[path = "rotation_lbfgs.rs"]
+mod rotation_lbfgs;
 
 /// The caller's surface for a single geometry.
 pub trait PointSurface: Sync {
@@ -223,7 +230,7 @@ impl Default for ArtNConfig {
     }
 }
 
-fn validate_artn(kind: MinModeKind, artn: &ArtNConfig) -> Result<(), SaddleError> {
+pub(crate) fn validate_artn(kind: MinModeKind, artn: &ArtNConfig) -> Result<(), SaddleError> {
     if kind != MinModeKind::Lanczos {
         return Err(SaddleError::Invalid(
             "ARTn requires the Lanczos minimum-mode estimator".into(),
@@ -764,7 +771,9 @@ impl<S: PointSurface> Counted<'_, S> {
 /// exact on a quadratic surface (`validation/dimer_rotation.py`), so
 /// the next iteration starts without a gradient call. Rotation
 /// directions are Polak-Ribiere conjugate on the rotational force,
-/// with the previous direction carried along the rotation.
+/// with the previous direction carried along the rotation. With
+/// [`MinModeSession::set_lbfgs_rotate`] the plane is the L-BFGS step
+/// instead, and that memory restarts at each estimate.
 /// Floor of the dimer's trial angle, radians. The Kastner-Sherwood
 /// guess `phi1 = atan(|b1| / |C|) / 2` falls under it once the
 /// rotational force is under `2e-4 |C|`.
@@ -819,6 +828,8 @@ struct RotationStop {
     torque_window: Option<bool>,
     /// See [`MinModeSession::set_rotation_stop_length`]; 0 is off.
     length: f64,
+    /// See [`MinModeSession::set_lbfgs_rotate`].
+    lbfgs: bool,
 }
 
 /// Force error that the rotation still to come would leave in a
@@ -889,6 +900,8 @@ fn rotate_dimer<S: PointSurface>(
     let mut n_new = Array1::zeros(dim);
     let mut theta_rotated = Array1::zeros(dim);
     let mut change = Array1::zeros(dim);
+    let mut gradient = Array1::zeros(dim);
+    let mut lbfgs = rotation_lbfgs::RotationLbfgs::new();
     let angle_stop = angle_stop_on(config);
     loop {
         let along = h.dot(&n);
@@ -914,20 +927,32 @@ fn rotate_dimer<S: PointSurface>(
             }
             break;
         }
-        dir.assign(&force);
-        if let (Some(fp), Some(dp)) = (&force_prev, &dir_prev) {
-            Zip::from(&mut change)
+        if stop.lbfgs {
+            // Curvature gradient. `force` is already its descent direction.
+            Zip::from(&mut gradient)
                 .and(&force)
-                .and(fp)
-                .for_each(|c, &f, &p| *c = f - p);
-            let gamma = (change.dot(&force) / fp.dot(fp)).max(0.0);
-            if gamma.is_finite() {
-                Zip::from(&mut dir)
-                    .and(dp)
-                    .for_each(|d, &p| *d += p * gamma);
+                .for_each(|component, &descent| *component = -descent);
+            dir.assign(&lbfgs.direction(&n, &gradient));
+        } else {
+            dir.assign(&force);
+            if let (Some(fp), Some(dp)) = (&force_prev, &dir_prev) {
+                Zip::from(&mut change)
+                    .and(&force)
+                    .and(fp)
+                    .for_each(|c, &f, &p| *c = f - p);
+                let gamma = (change.dot(&force) / fp.dot(fp)).max(0.0);
+                if gamma.is_finite() {
+                    Zip::from(&mut dir)
+                        .and(dp)
+                        .for_each(|d, &p| *d += p * gamma);
+                }
             }
         }
         perp_in_place(&mut dir, &n);
+        if stop.lbfgs && dir.dot(&dir).sqrt() <= 1e-14 * (1.0 + force_norm) {
+            dir.assign(&force);
+            perp_in_place(&mut dir, &n);
+        }
         let dir_norm = dir.dot(&dir).sqrt();
         if dir_norm <= 1e-14 * (1.0 + force_norm) {
             break;
@@ -1928,6 +1953,8 @@ pub struct MinModeSession {
     /// Polak-Ribiere steps in the plane perpendicular to the mode, with
     /// a Newton step along it. Off, the configured stepper translates.
     cg_translate: bool,
+    /// L-BFGS planes for dimer rotation. Off, Polak-Ribiere chooses them.
+    lbfgs_rotate: bool,
     cg_prev_perp: Option<Array1<f64>>,
     cg_dir: Option<Array1<f64>>,
     /// Barzilai-Borwein length from the previous perpendicular step.
@@ -2065,6 +2092,7 @@ impl MinModeSession {
             fire_stall_energy: f64::NAN,
             fire_stall_count: 0,
             cg_translate: false,
+            lbfgs_rotate: false,
             cg_prev_perp: None,
             cg_dir: None,
             cg_alpha: None,
@@ -2074,6 +2102,18 @@ impl MinModeSession {
             artn,
             saddle: SaddleTrack::default(),
         })
+    }
+
+    /// Choose dimer rotation planes by L-BFGS in the tangent space.
+    ///
+    /// Off, the default, the planes stay Polak-Ribiere. On, the
+    /// direction is the limited-memory BFGS step of Kästner and
+    /// Sherwood, J. Chem. Phys. 128, 014106 (2008),
+    /// doi:10.1063/1.2815812. The angle in that plane and the
+    /// extrapolated gradient are unchanged, and the memory restarts
+    /// at each estimate. Lanczos does not read this switch.
+    pub fn set_lbfgs_rotate(&mut self, enabled: bool) {
+        self.lbfgs_rotate = enabled;
     }
 
     /// Translate by Polak-Ribiere conjugate gradients perpendicular to
@@ -2255,6 +2295,7 @@ impl MinModeSession {
         RotationStop {
             torque_window: self.torque_window,
             length: self.rotation_stop_length,
+            lbfgs: self.lbfgs_rotate && self.config.kind == MinModeKind::Dimer,
         }
     }
 

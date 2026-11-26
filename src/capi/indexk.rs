@@ -68,11 +68,38 @@ pub struct RgsaddleIndexK {
     k: usize,
 }
 
-struct HostSurface {
+/// Geometry-aware Hessian action, `rgsaddle_hessian_at_fn`: the callback
+/// receives `(user, n_dof, position, vector, action)`.
+pub type RgsaddleHessianAtFn =
+    extern "C" fn(*mut c_void, i64, *const f64, *const f64, *mut f64) -> i32;
+
+#[derive(Clone, Copy)]
+pub(crate) enum HostHessian {
+    Vector(RgsaddleHessianFn),
+    AtPosition(RgsaddleHessianAtFn),
+}
+
+pub(crate) struct HostSurface {
     function: RgsaddleSurfaceFn,
     user: *mut c_void,
     n_atoms: i64,
-    hessian: Option<RgsaddleHessianFn>,
+    hessian: Option<HostHessian>,
+}
+
+impl HostSurface {
+    pub(crate) fn new(
+        function: RgsaddleSurfaceFn,
+        user: *mut c_void,
+        n_atoms: i64,
+        hessian: Option<HostHessian>,
+    ) -> Self {
+        Self {
+            function,
+            user,
+            n_atoms,
+            hessian,
+        }
+    }
 }
 
 unsafe impl Send for HostSurface {}
@@ -105,20 +132,37 @@ impl PointSurface for HostSurface {
 
     fn hessian_vector(
         &self,
-        _x: ArrayView1<f64>,
+        x: ArrayView1<f64>,
         vector: ArrayView1<f64>,
     ) -> Result<Option<Array1<f64>>, SaddleError> {
         let Some(hessian) = self.hessian else {
             return Ok(None);
         };
+        if x.len() != vector.len() {
+            return Err(SaddleError::Shape(
+                "hessian vector must match the position".into(),
+            ));
+        }
         let flat = vector.to_vec();
         let mut action = vec![0.0; flat.len()];
-        let rc = hessian(
-            self.user,
-            flat.len() as i64,
-            flat.as_ptr(),
-            action.as_mut_ptr(),
-        );
+        let rc = match hessian {
+            HostHessian::Vector(callback) => callback(
+                self.user,
+                flat.len() as i64,
+                flat.as_ptr(),
+                action.as_mut_ptr(),
+            ),
+            HostHessian::AtPosition(callback) => {
+                let position = x.to_vec();
+                callback(
+                    self.user,
+                    flat.len() as i64,
+                    position.as_ptr(),
+                    flat.as_ptr(),
+                    action.as_mut_ptr(),
+                )
+            }
+        };
         if rc != 0 {
             return Err(SaddleError::Surface(format!("hessian callback rc={rc}")));
         }
@@ -130,7 +174,10 @@ fn search_of(config: &RgsaddleIndexKConfig) -> Result<(MinModeConfig, BlockEigen
     if config.version.major != RGSADDLE_ABI_MAJOR {
         return Err(RGSADDLE_INVALID_PARAMETER);
     }
-    if config.index < 1 || config.max_block_iterations <= 0 {
+    if config.flags != 0 {
+        return Err(RGSADDLE_INVALID_PARAMETER);
+    }
+    if config.index < 1 || config.max_rotations < 0 || config.max_block_iterations <= 0 {
         return Err(RGSADDLE_INVALID_PARAMETER);
     }
     let Ok(max_rotations) = usize::try_from(config.max_rotations) else {
@@ -152,13 +199,20 @@ fn search_of(config: &RgsaddleIndexKConfig) -> Result<(MinModeConfig, BlockEigen
     Ok((search, block))
 }
 
-fn read_modes(n: usize, k: usize, modes: *const f64) -> Result<Option<Array2<f64>>, i32> {
+pub(crate) fn read_modes(
+    n: usize,
+    k: usize,
+    modes: *const f64,
+) -> Result<Option<Array2<f64>>, i32> {
     if modes.is_null() {
         return Ok(None);
     }
     let n_i = i64::try_from(n).map_err(|_| RGSADDLE_INVALID_PARAMETER)?;
     let k_i = i64::try_from(k).map_err(|_| RGSADDLE_INVALID_PARAMETER)?;
     let count = f64_len(&[n_i, k_i]).ok_or(RGSADDLE_INVALID_PARAMETER)?;
+    if count == 0 {
+        return Ok(Some(Array2::zeros((n, k))));
+    }
     let raw = unsafe { slice::from_raw_parts(modes, count) };
     let mut block = Array2::zeros((n, k));
     for row in 0..n {
@@ -169,7 +223,7 @@ fn read_modes(n: usize, k: usize, modes: *const f64) -> Result<Option<Array2<f64
     Ok(Some(block))
 }
 
-fn write_modes(modes: ndarray::ArrayView2<f64>, out: &mut [f64]) {
+pub(crate) fn write_modes(modes: ndarray::ArrayView2<f64>, out: &mut [f64]) {
     let (rows, cols) = modes.dim();
     for row in 0..rows {
         for column in 0..cols {
@@ -186,10 +240,10 @@ fn write_modes(modes: ndarray::ArrayView2<f64>, out: &mut [f64]) {
 /// starting directions. Both are copied. The index `k` is `config.index`.
 ///
 /// Returns NULL, with no other diagnostic, for a NULL `config` or `position`,
-/// `n_atoms < 1`, a config of another ABI major, `index < 1` or above
-/// `3 * n_atoms`, a negative `max_rotations`, a non-positive
-/// `max_block_iterations`, an unknown `method`, or seed modes the core crate
-/// rejects. Free the result with [`rgsaddle_indexk_free`].
+/// `n_atoms < 1`, a config of another ABI major, nonzero reserved `flags`,
+/// `index < 1` or above `3 * n_atoms`, a negative `max_rotations`, a
+/// non-positive `max_block_iterations`, an unknown `method`, or seed modes
+/// the core crate rejects. Free the result with [`rgsaddle_indexk_free`].
 ///
 /// # Safety
 /// `config` is valid for reads. `position` holds `3 * n_atoms` doubles. `modes`
@@ -270,6 +324,52 @@ pub unsafe extern "C" fn rgsaddle_indexk_step(
     user: *mut c_void,
     out: *mut RgsaddleReport,
 ) -> i32 {
+    unsafe {
+        step_with(
+            session,
+            surface,
+            hessian.map(HostHessian::Vector),
+            user,
+            out,
+        )
+    }
+}
+
+/// One index-k step with a geometry-aware Hessian action, ABI minor 69.
+///
+/// Identical to [`rgsaddle_indexk_step`] except that `hessian`, when not
+/// NULL, is called with `(user, n, position, vector, out)`. `position` is
+/// the geometry at which the action is requested and holds `n` doubles.
+///
+/// # Safety
+/// `session` comes from [`rgsaddle_indexk_create`]. `out` is writable.
+/// `surface` and `hessian` are called with `user` and must not unwind.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rgsaddle_indexk_step_at(
+    session: *mut RgsaddleIndexK,
+    surface: Option<RgsaddleSurfaceFn>,
+    hessian: Option<RgsaddleHessianAtFn>,
+    user: *mut c_void,
+    out: *mut RgsaddleReport,
+) -> i32 {
+    unsafe {
+        step_with(
+            session,
+            surface,
+            hessian.map(HostHessian::AtPosition),
+            user,
+            out,
+        )
+    }
+}
+
+unsafe fn step_with(
+    session: *mut RgsaddleIndexK,
+    surface: Option<RgsaddleSurfaceFn>,
+    hessian: Option<HostHessian>,
+    user: *mut c_void,
+    out: *mut RgsaddleReport,
+) -> i32 {
     if session.is_null() {
         return RGSADDLE_NULL_SESSION;
     }
@@ -279,13 +379,23 @@ pub unsafe extern "C" fn rgsaddle_indexk_step(
     let Some(function) = surface else {
         return RGSADDLE_NULL_SURFACE;
     };
+    unsafe { step_with_body(session, function, hessian, user, out) }
+}
+
+/// Session step after the null checks in [`step_with`].
+///
+/// # Safety
+/// `session` and `out` are non-null. `function` is called with `user`.
+#[cfg(not(kani))]
+unsafe fn step_with_body(
+    session: *mut RgsaddleIndexK,
+    function: RgsaddleSurfaceFn,
+    hessian: Option<HostHessian>,
+    user: *mut c_void,
+    out: *mut RgsaddleReport,
+) -> i32 {
     let session = unsafe { &mut *session };
-    let host = HostSurface {
-        function,
-        user,
-        n_atoms: session.n_atoms,
-        hessian,
-    };
+    let host = HostSurface::new(function, user, session.n_atoms, hessian);
     match session.session.step(&host) {
         Ok(report) => {
             let out = unsafe { &mut *out };
@@ -305,6 +415,24 @@ pub unsafe extern "C" fn rgsaddle_indexk_step(
         }
         Err(err) => status_of(&err),
     }
+}
+
+/// The null checks in [`step_with`] are the Kani contract. The session
+/// step calls `catch_unwind`, which this verifier cannot lower, so the
+/// proof stops before that body.
+///
+/// # Safety
+/// The pointer arguments are not read.
+#[cfg(kani)]
+unsafe fn step_with_body(
+    session: *mut RgsaddleIndexK,
+    function: RgsaddleSurfaceFn,
+    hessian: Option<HostHessian>,
+    user: *mut c_void,
+    out: *mut RgsaddleReport,
+) -> i32 {
+    let _ = (session, function, hessian, user, out);
+    RGSADDLE_NULL_SURFACE
 }
 
 /// Copy the current geometry, `3 * n_atoms` doubles in Angstrom, atom-major,
@@ -526,5 +654,160 @@ pub unsafe extern "C" fn rgsaddle_reflect_force(
             RGSADDLE_OK
         }
         Err(err) => status_of(&err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct Seen {
+        position: Vec<f64>,
+        vector: Vec<f64>,
+    }
+
+    static SEEN: Mutex<Option<Seen>> = Mutex::new(None);
+
+    extern "C" fn idle_surface(_user: *mut c_void, _request: *mut RgsaddleSurfaceRequest) -> i32 {
+        RGSADDLE_OK
+    }
+
+    extern "C" fn recording_hessian(
+        _user: *mut c_void,
+        n: i64,
+        position: *const f64,
+        vector: *const f64,
+        action: *mut f64,
+    ) -> i32 {
+        if position.is_null() || vector.is_null() || action.is_null() || n != 3 {
+            return -1;
+        }
+        let count = n as usize;
+        let position = unsafe { slice::from_raw_parts(position, count) }.to_vec();
+        let vector = unsafe { slice::from_raw_parts(vector, count) }.to_vec();
+        for (slot, value) in unsafe { slice::from_raw_parts_mut(action, count) }
+            .iter_mut()
+            .zip(vector.iter())
+        {
+            *slot = -value;
+        }
+        *SEEN.lock().expect("hessian record") = Some(Seen { position, vector });
+        0
+    }
+
+    #[test]
+    fn host_hessian_receives_the_position() {
+        *SEEN.lock().expect("clear") = None;
+        let host = HostSurface::new(
+            idle_surface,
+            std::ptr::null_mut(),
+            1,
+            Some(HostHessian::AtPosition(recording_hessian)),
+        );
+        let position = Array1::from_vec(vec![0.2, -0.4, 0.6]);
+        let vector = Array1::from_vec(vec![1.0, 0.0, -1.0]);
+        let action = host
+            .hessian_vector(position.view(), vector.view())
+            .expect("callback")
+            .expect("analytic action");
+        assert_eq!(action, Array1::from_vec(vec![-1.0, 0.0, 1.0]));
+        let seen = SEEN
+            .lock()
+            .expect("read")
+            .take()
+            .expect("position was recorded");
+        assert_eq!(seen.position, position.to_vec());
+        assert_eq!(seen.vector, vector.to_vec());
+        assert_ne!(seen.position, seen.vector);
+    }
+
+    extern "C" fn vector_only_hessian(
+        _user: *mut c_void,
+        n: i64,
+        vector: *const f64,
+        action: *mut f64,
+    ) -> i32 {
+        if vector.is_null() || action.is_null() || n != 3 {
+            return -1;
+        }
+        let count = n as usize;
+        let vector = unsafe { slice::from_raw_parts(vector, count) };
+        for (slot, value) in unsafe { slice::from_raw_parts_mut(action, count) }
+            .iter_mut()
+            .zip(vector.iter())
+        {
+            *slot = 2.0 * value;
+        }
+        0
+    }
+
+    #[test]
+    fn the_original_hessian_callback_gets_the_vector_alone() {
+        let host = HostSurface::new(
+            idle_surface,
+            std::ptr::null_mut(),
+            1,
+            Some(HostHessian::Vector(vector_only_hessian)),
+        );
+        let position = Array1::from_vec(vec![0.2, -0.4, 0.6]);
+        let vector = Array1::from_vec(vec![1.0, 0.0, -1.0]);
+        let action = host
+            .hessian_vector(position.view(), vector.view())
+            .expect("callback")
+            .expect("analytic action");
+        assert_eq!(action, Array1::from_vec(vec![2.0, 0.0, -2.0]));
+    }
+
+    fn indexk_config() -> RgsaddleIndexKConfig {
+        RgsaddleIndexKConfig {
+            version: RgsaddleVersion {
+                major: RGSADDLE_ABI_MAJOR,
+                minor: RGSADDLE_ABI_MINOR,
+            },
+            flags: 0,
+            index: 1,
+            method: 0,
+            dr: 1e-3,
+            rotation_tol: 1e-4,
+            max_rotations: 20,
+            force_tol: 1e-3,
+            max_move: 0.2,
+            residual_tol: 1e-4,
+            max_block_iterations: 30,
+        }
+    }
+
+    #[test]
+    fn create_rejects_nonzero_reserved_flags() {
+        let position = [0.2_f64, -0.1, 0.3];
+        let config = indexk_config();
+        let session =
+            unsafe { rgsaddle_indexk_create(&config, 1, position.as_ptr(), std::ptr::null()) };
+        assert!(!session.is_null());
+        unsafe { rgsaddle_indexk_free(session) };
+        let mut rejected_config = config;
+        rejected_config.flags = 1;
+        let rejected = unsafe {
+            rgsaddle_indexk_create(&rejected_config, 1, position.as_ptr(), std::ptr::null())
+        };
+        assert!(rejected.is_null());
+    }
+
+    #[test]
+    fn read_modes_with_a_zero_count_does_not_slice_the_pointer() {
+        let dangling = std::ptr::dangling();
+        let rows = read_modes(0, 3, dangling).expect("zero rows");
+        assert_eq!(rows.expect("empty rows").dim(), (0, 3));
+        let columns = read_modes(4, 0, dangling).expect("zero columns");
+        assert_eq!(columns.expect("empty columns").dim(), (4, 0));
+        let raw = [1.0, 2.0, 3.0, 4.0];
+        let block = read_modes(2, 2, raw.as_ptr())
+            .expect("block")
+            .expect("values");
+        assert_eq!(block[(0, 0)], 1.0);
+        assert_eq!(block[(0, 1)], 2.0);
+        assert_eq!(block[(1, 0)], 3.0);
+        assert_eq!(block[(1, 1)], 4.0);
     }
 }

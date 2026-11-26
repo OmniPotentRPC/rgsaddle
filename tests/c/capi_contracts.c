@@ -487,6 +487,9 @@ static int test_indexk_contracts(void) {
   bad = cfg;
   bad.max_block_iterations = 0;
   CHECK(rgsaddle_indexk_create(&bad, 1, x0, NULL) == NULL, "zero max_block_iterations");
+  bad = cfg;
+  bad.flags = 1;
+  CHECK(rgsaddle_indexk_create(&bad, 1, x0, NULL) == NULL, "nonzero reserved flags");
 
   for (int m = 0; m < 3; ++m) {
     cfg.method = (m == 0) ? RGSADDLE_MINMODE_DIMER

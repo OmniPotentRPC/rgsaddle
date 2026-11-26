@@ -102,9 +102,9 @@ jobs:
       matrix:
         include:
           - shard: create
-            harnesses: band_create_null_and_short band_create_solid_null_and_short minmode_create_null_and_short index1_create_null_and_short irc_create_null_and_short irc_create_from_surface_null_and_short constraints_create_null_and_short
+            harnesses: band_create_null_and_short band_create_solid_null_and_short minmode_create_null_and_short index1_create_null_and_short irc_create_null_and_short irc_create_from_surface_null_and_short constraints_create_null_and_short landscape_create_null_and_short
           - shard: step
-            harnesses: nichols_step_null_and_short prfo_step_null_and_short hessian_powell_null_and_short hessian_bofill_null_and_short cap_max_abs_null cap_max_abs_short
+            harnesses: nichols_step_null_and_short prfo_step_null_and_short hessian_powell_null_and_short hessian_bofill_null_and_short cap_max_abs_null cap_max_abs_short indexk_step_at_null_and_short
           - shard: sella-min
             harnesses: sella_min_create_null_and_short sella_min_create_on_null_and_short sella_min_create_internal_null_and_short sella_min_create_cell_null_and_short sella_min_create_cell_internal_null_and_short
           - shard: sella-saddle
