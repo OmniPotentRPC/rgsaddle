@@ -224,6 +224,64 @@ def org_to_markdown(org_text: str, org_path: Path) -> str:
     return text + "\n"
 
 
+# Closing punctuation of an Org emphasis marker. org-element matches
+# whitespace or one of these, or the end of the line:
+#   ! " ' ) , - . : ; ? [ \ }
+_ORG_POST = frozenset("!\"'),-.:;?[\\}")
+# Characters that may precede an opening marker, besides whitespace
+# and the start of the line.
+_ORG_PRE = frozenset("-('\"{")
+
+
+def _org_opens(text: str, index: int) -> bool:
+    if index + 1 >= len(text) or text[index + 1].isspace():
+        return False
+    if index == 0:
+        return True
+    prev = text[index - 1]
+    return prev.isspace() or prev in _ORG_PRE
+
+
+def _org_post(text: str, index: int) -> bool:
+    if index + 1 >= len(text):
+        return True
+    char = text[index + 1]
+    return char.isspace() or char in _ORG_POST
+
+
+def _replace_org_mono(text: str) -> str:
+    """Turn Org verbatim and code markers into Markdown inline code.
+
+    A closing ``=`` or ``~`` is the first marker of the same kind that
+    is preceded by non-whitespace and followed by whitespace, punctuation,
+    or the end of the line. Bytes between the markers are copied unchanged.
+    """
+    out: list[str] = []
+    index = 0
+    size = len(text)
+    while index < size:
+        if text[index] in "=~" and _org_opens(text, index):
+            mark = text[index]
+            close = None
+            for cand in range(index + 2, size):
+                if (
+                    text[cand] == mark
+                    and not text[cand - 1].isspace()
+                    and _org_post(text, cand)
+                ):
+                    close = cand
+                    break
+            if close is not None:
+                out.append("`")
+                out.append(text[index + 1 : close])
+                out.append("`")
+                index = close + 1
+                continue
+        out.append(text[index])
+        index += 1
+    return "".join(out)
+
+
 def clean_inline_org(text: str) -> str:
     text = re.sub(r"@@rst::doc:`([^`<]+?)\s*<([^>]+)>`@@", r"[\1](\2.html)", text)
     text = re.sub(r"@@rst::doc:`([^`]+)`@@", r"`\1`", text)
@@ -231,9 +289,7 @@ def clean_inline_org(text: str) -> str:
     text = re.sub(r"@@rst:([^@]+)@@", r"\1", text)
     text = re.sub(r"\[\[([^\]]+)\]\[([^\]]+)\]\]", r"[\2](\1)", text)
     text = re.sub(r"\[\[file:([^\]]+)\]\]", r"(\1)", text)
-    text = re.sub(r"(?<![A-Za-z0-9_])=([^=\n]+)=(?![A-Za-z0-9_])", r"`\1`", text)
-    text = re.sub(r"(?<![A-Za-z0-9_])~([^~\n]+)~(?![A-Za-z0-9_])", r"`\1`", text)
-    return text
+    return _replace_org_mono(text)
 
 
 def render_llms_txt() -> str:

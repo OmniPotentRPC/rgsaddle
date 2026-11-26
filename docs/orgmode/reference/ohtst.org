@@ -36,6 +36,7 @@ Full API documentation for every item below is on [[https://docs.rs/rgsaddle][do
 | =PlaneOptimizer= | =new(seed, config)= then =run(surface)=: a Riemannian trust region on the product manifold of the sphere of normals and the offset along it, reporting the optimized plane in =PlaneOptimum::plane= |
 | =PlaneOptimum= | The optimized =plane=, outer and inner (truncated conjugate-gradient) iteration counts, accepted planes, planes sampled, and force (and Hessian-action) evaluations |
 | =PlaneTrace= | One of the optimizer's accepted planes along its own iterates: =plane=, =normal_force= and its error, and the length =rotation= of the torque about the pivot, with its =rotation_error= and the =records= sampled. =PlanePath::trace= threads these into a path for =reversible_work_along= |
+| =PlaneOptimizerStatus= | Why =PlaneOptimizer::run= stopped: =Converged= when the accepted-step criterion passed for the configured patience, =MaxIterations= when the outer iteration cap was reached with a finite last estimate, or =MaxEvaluations= when another sample would exceed the evaluation cap |
 
 * Reactant normalization
 | Type | Role |
@@ -51,7 +52,7 @@ Full API documentation for every item below is on [[https://docs.rs/rgsaddle][do
 | Type | Role |
 |------+------|
 | =PlanePath= | =legs= (straight legs between given planes), =curve= (PAFI-style planes through a curve of points, normal to a chord-length cubic spline, with optional clamped end tangents), =trace= (an optimizer's own accepted =PlaneTrace= iterates), =then= (joins two paths that share an endpoint plane) |
-| =ReversibleWorkConfig= | Non-exhaustive. Defaults: =sampler = LangevinConfig::default()=, =warm_burn_in = 100=, =nodes = 9=, =simpson = true=, =bar_samples = 128=, =transport = Transport::Rigid=, =mbar = false=, =estimate = WorkEstimate::Integration=, =min_overlap = 0.03=. =with_sampler= sets the per-node =LangevinConfig=; =nodes >= 2= always, and =with_simpson(true)= (the default) requires an odd node count, so =with_nodes(2)= requires =with_simpson(false)=; =with_bar_samples= bounds samples used for BAR; =with_transport= picks =Transport=; =with_mbar(true)= turns on MBAR across every node; =with_estimate= picks the =WorkEstimate= that =ReversibleWork::work= reads; =min_overlap= is the two-state overlap threshold below which a node pair is named in =ReversibleWork::warnings= |
+| =ReversibleWorkConfig= | Non-exhaustive. Defaults: =sampler = LangevinConfig::default()=, =warm_burn_in = 100=, =nodes = 9=, =simpson = true=, =bar_samples = 128=, =transport = Transport::Rigid=, =mbar = false=, =estimate = WorkEstimate::Integration=, =min_overlap = 0.03=. =with_sampler= sets the per-node =LangevinConfig=; ~nodes >= 2~ always, and =with_simpson(true)= (the default) requires an odd node count, so =with_nodes(2)= requires =with_simpson(false)=; =with_bar_samples= bounds samples used for BAR; =with_transport= picks =Transport=; =with_mbar(true)= turns on MBAR across every node; =with_estimate= picks the =WorkEstimate= that =ReversibleWork::work= reads; =min_overlap= is the two-state overlap threshold below which a node pair is named in =ReversibleWork::warnings= |
 | =Transport= | =Rigid= (the default: the minimal rotation between neighbouring planes) or =Gaussian(GaussianTransport)=, built with =GaussianTransport::default().into()=: an optimal-transport map between the planes' fitted Gaussian moments, shrunk toward the rigid map by a James–Stein factor |
 | =GaussianTransport= | Settings of the Gaussian map: fitting =rank= (default =4=), =shrinkage= of each fitted covariance toward the identity (default =0.0=), and =shrink_to_rigid= (default =true=, James–Stein shrinkage of the fitted change toward the rigid one) |
 | =WorkEstimate= | =Integration= (default), =Bar= or =Mbar=: which value =ReversibleWork::work= (and so the rate functions) read |
@@ -65,11 +66,13 @@ Full API documentation for every item below is on [[https://docs.rs/rgsaddle][do
 |------+------|
 | =ohtst_rate= | =ohtst_rate(density, work)= with any =PlaneDensity= and a =ReversibleWork=: =k = sqrt(kT / 2*pi) * (Z_H/Z_R) * exp(-DeltaA/kT)=, unit mass in mass-weighted coordinates |
 | =OhTstRate= | =rate= and =error=, plus =log_rate= / =log_rate_error=, =flux= (=sqrt(kT/2*pi)=), =density= / =density_error= and =free_energy= / =free_energy_error=: the bare rate before any transmission correction, and the pieces that built it. =transmitted(&transmission) -> (f64, f64)= multiplies by any ~TransmissionEstimate~'s =kappa= and propagates the error |
+| =RateMultiplicity= | Explicit, separate multiplicities of a rate: =paths= (equivalent reaction paths or hop directions) and =in_plane_images= (degeneracy of one symmetry-unique in-plane region) |
 | =TransmissionConfig= | Non-exhaustive. Defaults: =thermal = 0.02585=, =friction = 0.0= (Newtonian), =time_step = 0.05=, =steps = 400=, =check_every = 40=, =commit = 0=, =shots = 256=, =blocks = 16=, =seed = 1=, =masses = None=, =counting = Counting::FirstCrossing=, =end_state = EndState::Side=, =hold_excluded = true=. Setters =with_thermal=, =with_friction=, =with_time_step=, =with_steps=, =with_check_every=, =with_commit=, =with_shots=, =with_blocks=, =with_seed=, =with_masses=, =with_counting=, =with_end_state=, =with_hold_excluded= (the friction must match the dynamics =kappa= corrects) |
 | =Counting= | =Final= (the Bennett–Chandler reactive flux, counting only each trajectory's final state) or =FirstCrossing= (the default, the effective positive flux of van Erp, Moroni and Bolhuis, counting a reactive trajectory once even if it recrosses) |
 | =EndState= | =Side= (the default, which side of the plane a shot ends on) or =Quench(Box<Basins>)= (the basin a steepest-descent quench reaches, built with =Basins::...into()=) |
 | =Endpoint= | =Reactant= or =Product=: which side a shot ended on, under =EndState::Side= |
 | =Basins= | Reference minima (=reactants=, =products=), a =StateDistance= (default =Euclidean=), =tolerance = 0.25=, optional =threshold = None=, and a =QuenchConfig= for =EndState::Quench= |
+| =QuenchedTransitionRegion= | Hard transition region whose exterior is any basin reached by an rgmin steepest-descent quench. Membership comes from =Basins::assign= |
 | =QuenchConfig= | Non-exhaustive. Steepest-descent quench settings used by =EndState::Quench=. Defaults: =method = Method::Ode12r=, =force_tol = 1e-4=, =max_steps = 5000=, =max_move = 0.1=, =initial_step = 0.1= |
 | =StateDistance= | =Euclidean= (the default) or =Permutation(Box<PermutationDistance>)=, built with =PermutationDistance::...into()=, so relabelled like atoms count as one state |
 | =PermutationDistance= | The intensive permutation-invariant distance of Goswami and Jónsson, ChemPhysChem 27, e202500730 (2026), doi:10.1002/cphc.202500730: =species= (which atoms may be exchanged), an optional periodic =cell=, optional =masses= when the coordinates are mass-weighted, and optional =atoms= subset |
@@ -79,6 +82,25 @@ Full API documentation for every item below is on [[https://docs.rs/rgsaddle][do
 | =TransmissionCoefficient= | =kappa= and its =error=, plus the checkpoint =time= and =kappa_of_t= series, =shots= that reached a state on both halves, =unassigned= shots that did not, =reactive= shots and =recrossed= backward halves, and =evaluations=. Implements =TransmissionEstimate=, the trait =OhTstRate::transmitted= reads =kappa= through |
 | =anharmonic_correction= | First-order correction to harmonic TST, =ln(k / k_HTST) = c_1 * kT + O(kT^2)=, and the first-order offset of the optimal plane, from Hessian actions and directional derivatives at Gaussian probes; no full Hessian is formed. =AnharmonicConfig= defaults: =probes = 2000=, =step = 1e-2=, =hvp_step = 1e-4=, =krylov = 64=, =krylov_tolerance = 1e-8=, =seed = 1=. =AnharmonicCorrection= holds the first-order anharmonic coefficients =reactant= / =reactant_error= (=A_R= at the minimum) and =saddle= / =saddle_error= (=A^\ddagger= on the saddle plane), =slope= / =slope_error= (=S=), =curvature= (\(\lvert \lambda_u \rvert\)), =coefficient= / =coefficient_error= (=c_1=) and =evaluations=, with methods =log_ratio=, =fixed_log_ratio= and =offset= |
 | =flux_mass= | =flux_mass(normal, masses)= is =1 / sum(n_i^2 / m_i)= for normalized =n=, the Cartesian flux mass along a normal; the 2001 paper's Eq. 24, =mu = sum(m_i n_i^2)=, agrees with it only for equal masses |
+
+* Thermodynamic integration on one plane
+| Type | Role |
+|------+------|
+| =HarmonicExpansion= | Second-order Taylor expansion of a =PointSurface= about a =HarmonicReference= point |
+| =ThermodynamicDerivative= | Observable =V_full - V_harmonic= at a sampled configuration |
+| =ThermodynamicSampler= | Records =V_full - V_harmonic= from sampled positions and attaches that observable to an inner sampler |
+| =ThermodynamicSurfaceSampler= | Projected BAOAB or GHMC sampler on =V_lambda= built from a harmonic Taylor expansion of the full surface |
+| =ThermodynamicIntegrationConfig= | Settings for fixed-plane lambda thermodynamic integration |
+| =ThermodynamicIntegrationNode= | One lambda node and its block estimate |
+| =ThermodynamicIntegrationEstimate= | =F_full - F_harmonic= on one fixed hyperplane |
+| =AnalyticThermodynamicSampler= | Analytic reference backend for =V_lambda = (1-lambda) V_harmonic + lambda V_full= |
+
+* Exact samples of a quadratic plane
+| Type | Role |
+|------+------|
+| =QuadraticModel= | Quadratic potential =V(q) = energy + gradient·(q-center) + ½(q-center)ᵀ H (q-center)= |
+| =HyperplaneObservable= | A named scalar measured at an exact Gaussian sample |
+| =ExactGaussianPlaneSampler= | Independent exact samples of a quadratic potential restricted to a plane |
 
 * What the tests check
 =tests/ohtst_estimators.rs=, =tests/ohtst_transmission.rs=, =tests/ohtst_bligaard_jonsson.rs=, =tests/ohtst_skewed_well.rs=, =tests/ohtst_coupled_modes.rs= and =tests/ohtst_leps.rs= check every piece above against closed forms, line or product quadrature, or exact draws; the full list with the numbers each test checks is in =reference.org='s main table and ~howto/oh-tst~'s own. =examples/ohtst_tutorial.rs= runs the same kind of pipeline on a simpler, reflection-symmetric surface, with numbers printed rather than asserted; =tutorials/oh-tst= walks through it.
