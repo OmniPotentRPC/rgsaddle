@@ -135,10 +135,10 @@ pub enum ArtStatus {
     NotIndexOne,
     /// A quench energy is not below the saddle.
     NotDownhill,
-    /// The lowest curvature became non-negative during the climb, along
-    /// both the new estimate and the carried mode, and stayed so after
-    /// [`ArtConfig::index_one_recovery_attempts`] restarts from the last
-    /// accepted index-1 point.
+    /// The lowest curvature became finite and non-negative during the
+    /// climb, along both the new estimate and the carried mode, and
+    /// stayed so after [`ArtConfig::index_one_recovery_attempts`]
+    /// restarts from the last accepted index-1 point.
     LostCurvature,
     /// The push budget, the climb budget, or [`ArtSession::run`]'s cap was spent.
     Exhausted,
@@ -198,7 +198,7 @@ pub struct ArtConfig {
     pub mode_overlap_tol: f64,
     /// Restarts from the last accepted index-1 point before the climb
     /// gives up: with [`ArtStatus::LostCurvature`] when the rejected
-    /// curvature is non-negative, otherwise with
+    /// curvature is finite and non-negative, otherwise with
     /// [`SaddleError::ArtIndexOneLost`].
     pub index_one_recovery_attempts: usize,
 }
@@ -1072,8 +1072,9 @@ impl ArtSession {
     /// Keep the carried unstable direction when its direct Rayleigh
     /// curvature remains negative. Otherwise restart from the last point
     /// where the mode was accepted. Once the restarts are spent, a
-    /// non-negative estimate finishes the event as
-    /// [`ArtStatus::LostCurvature`] and a negative one is a lost mode.
+    /// finite non-negative estimate finishes the event as
+    /// [`ArtStatus::LostCurvature`] and a negative or non-finite one
+    /// is a lost mode.
     fn recover_index_one<S: PointSurface>(
         &mut self,
         surface: &S,
@@ -1105,7 +1106,7 @@ impl ArtSession {
 
         self.recovery_attempts = self.recovery_attempts.saturating_add(1);
         if self.recovery_attempts > self.config.index_one_recovery_attempts {
-            if rejected_curvature >= 0.0 {
+            if rejected_curvature.is_finite() && rejected_curvature >= 0.0 {
                 self.curvature = rejected_curvature;
                 self.finish(ArtStatus::LostCurvature);
                 return Ok(false);
@@ -2969,6 +2970,55 @@ mod tests {
         assert_eq!(session.status(), ArtStatus::LostCurvature);
         assert_eq!(session.phase(), ArtPhase::Finished);
         assert!(session.curvature() >= 0.0, "{}", session.curvature());
+    }
+
+    #[test]
+    fn non_finite_rejected_curvature_is_a_lost_mode() {
+        for rejected in [f64::INFINITY, f64::NAN] {
+            let minimum = Array1::zeros(3);
+            let seed = array![1.0, 0.0, 0.0];
+            let config = ArtConfig::default()
+                .with_mode(
+                    MinModeConfig::default()
+                        .with_kind(MinModeKind::Lanczos)
+                        .with_krylov_dim(3)
+                        .with_max_rotations(3)
+                        .with_dr(1e-4),
+                )
+                .with_index_one_recovery_attempts(0);
+            let mut session =
+                ArtSession::new(config, minimum, seed, array![1.0, 0.0, 0.0]).unwrap();
+            session.leg = Leg::Climbing;
+            session.gradient.fill(0.0);
+            session.energy = 0.0;
+            session.max_force = 1.0;
+            session.curvature = -1.0;
+            session.save_index_one_checkpoint();
+            let surface = RotatedQuadratic {
+                negative: 2.0,
+                positive: 4.0,
+                cosine: 1.0,
+                sine: 0.0,
+            };
+
+            let error = session
+                .recover_index_one(&surface, rejected, 0.25)
+                .unwrap_err();
+
+            match error {
+                SaddleError::ArtIndexOneLost {
+                    attempts,
+                    curvature,
+                    overlap,
+                } => {
+                    assert_eq!(attempts, 0);
+                    assert_eq!(overlap, 0.25);
+                    assert_eq!(curvature.to_bits(), rejected.to_bits());
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+            assert_eq!(session.status(), ArtStatus::Running);
+        }
     }
 
     #[test]
