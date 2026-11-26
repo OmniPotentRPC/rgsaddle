@@ -834,9 +834,11 @@ rgsaddle_status_t rgsaddle_reparametrize(int64_t n_images, int64_t n_atoms, doub
  * and is rewritten in place. Rows 0 and n_images - 1 do not move. cell,
  * when not NULL, is the row-major 3x3 cell and the chords are minimum
  * images. A null positions, fewer than 3 images, a non-positive atom
- * count, a non-finite entry, a zero-length path, or a repeated image
- * returns RGSADDLE_INVALID_PARAMETER or RGSADDLE_NON_FINITE with
- * positions unchanged. No surface is evaluated.
+ * count, a non-finite coordinate or cell, a zero-length path, or a
+ * repeated image returns RGSADDLE_INVALID_PARAMETER with positions
+ * unchanged. Finite coordinates whose chord overflows return
+ * RGSADDLE_NON_FINITE with positions unchanged. No surface is
+ * evaluated.
  */
 rgsaddle_status_t rgsaddle_spline_resample(int64_t n_images, int64_t n_atoms, double *positions,
                                            const double *cell);
