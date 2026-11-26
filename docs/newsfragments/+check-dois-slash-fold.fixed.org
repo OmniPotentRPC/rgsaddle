@@ -1,0 +1,1 @@
+The documentation DOI checker drops a slash only after the legacy slashed letters =o= and =l=, as in =So/rensen=, and keeps a slash between any other letters.
