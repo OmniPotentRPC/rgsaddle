@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-#define RGSADDLE_EXPECTED_ABI_MINOR 68u
+#define RGSADDLE_EXPECTED_ABI_MINOR 74u
 _Static_assert(RGSADDLE_ABI_MINOR == RGSADDLE_EXPECTED_ABI_MINOR, "ABI minor");
 _Static_assert(RGSADDLE_LINEB_LINEAR_SEED == (1u << 0), "lineb flag bit 0");
 _Static_assert(RGSADDLE_LINEB_ENDPOINT_CONVERGENCE == (1u << 1), "lineb flag bit 1");
@@ -778,26 +778,26 @@ ABI67_VINEYARD_REPORT_FIELD(n_saddle_modes, 48, int64_t);
 ABI67_VINEYARD_REPORT_FIELD(evaluations, 56, int64_t);
 #undef ABI67_VINEYARD_REPORT_FIELD
 
-typedef rgsaddle_status_t (*abi67_signature_rgsaddle_atomic_mass)(int32_t z,
+typedef rgsaddle_status_t (*abi74_signature_rgsaddle_atomic_mass)(int32_t z,
                                                                   double *out);
-_Static_assert(_Generic(&rgsaddle_atomic_mass, abi67_signature_rgsaddle_atomic_mass: 1,
+_Static_assert(_Generic(&rgsaddle_atomic_mass, abi74_signature_rgsaddle_atomic_mass: 1,
                         default: 0),
                "rgsaddle_atomic_mass signature");
-typedef rgsaddle_status_t (*abi67_signature_rgsaddle_atomic_mass_by_symbol)(
+typedef rgsaddle_status_t (*abi74_signature_rgsaddle_atomic_mass_by_symbol)(
     const char *symbol, double *out);
 _Static_assert(_Generic(&rgsaddle_atomic_mass_by_symbol,
-                        abi67_signature_rgsaddle_atomic_mass_by_symbol: 1, default: 0),
+                        abi74_signature_rgsaddle_atomic_mass_by_symbol: 1, default: 0),
                "rgsaddle_atomic_mass_by_symbol signature");
-typedef rgsaddle_status_t (*abi67_signature_rgsaddle_vineyard_config_default)(
+typedef rgsaddle_status_t (*abi74_signature_rgsaddle_vineyard_config_default)(
     rgsaddle_vineyard_config_t *out);
 _Static_assert(_Generic(&rgsaddle_vineyard_config_default,
-                        abi67_signature_rgsaddle_vineyard_config_default: 1, default: 0),
+                        abi74_signature_rgsaddle_vineyard_config_default: 1, default: 0),
                "rgsaddle_vineyard_config_default signature");
-typedef rgsaddle_status_t (*abi67_signature_rgsaddle_vineyard_fd)(
+typedef rgsaddle_status_t (*abi74_signature_rgsaddle_vineyard_fd)(
     const rgsaddle_vineyard_config_t *config, int64_t n_atoms,
     const double *x_min, const double *x_saddle, const double *atom_masses,
     rgsaddle_surface_fn surface, void *user, rgsaddle_vineyard_report_t *report);
-_Static_assert(_Generic(&rgsaddle_vineyard_fd, abi67_signature_rgsaddle_vineyard_fd: 1,
+_Static_assert(_Generic(&rgsaddle_vineyard_fd, abi74_signature_rgsaddle_vineyard_fd: 1,
                         default: 0),
                "rgsaddle_vineyard_fd signature");
 

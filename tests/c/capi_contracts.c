@@ -1069,7 +1069,7 @@ static int test_trics_path_runtime(void) {
   return 0;
 }
 
-static int test_abi67_vineyard_contracts(void) {
+static int test_abi74_vineyard_contracts(void) {
   double mass = 0.0;
   CHECK(rgsaddle_atomic_mass(29, &mass) == RGSADDLE_OK,
         "atomic mass by number");
@@ -1215,7 +1215,7 @@ int main(void) {
   if (test_trics_path_runtime() != 0) {
     return 1;
   }
-  if (test_abi67_vineyard_contracts() != 0) {
+  if (test_abi74_vineyard_contracts() != 0) {
     return 1;
   }
   printf("RGSADDLE_CAPI_CONTRACTS_OK\n");

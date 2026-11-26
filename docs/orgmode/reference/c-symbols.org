@@ -207,9 +207,9 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_geodesic_config_default=. Purpose: Fill `out` with the default geodesic controls (step and gradient tolerances 1e-6, max_move 0.5, lower_ratio 0.95, upper_ratio 1.1, 40 sweeps, 40 iterations, memory 8, 10 bound samples, 32 images, seed 0). Parameters: the declaration. Units: the caller's.
 - =rgsaddle_geodesic_path=. Purpose: Minimize the geodesic length of an existing path. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_geodesic_morse=. Purpose: Morse pair geodesic between two geometries. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_atomic_mass=. Purpose: Look up standard atomic mass in amu by atomic number `z` in [1, 118], ABI minor 67. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_atomic_mass_by_symbol=. Purpose: Look up standard atomic mass in amu by IUPAC element symbol, ABI minor 67. Parameters: the declaration. Units: the caller's.
-- =rgsaddle_vineyard_config_default=. Purpose: Fill `out` with default Vineyard finite-difference controls (step 1e-2, central differences, positive_tol 1e-8, negative_tol 1e-4), ABI minor 67. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_atomic_mass=. Purpose: Look up standard atomic mass in amu by atomic number `z` in [1, 118], ABI minor 74. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_atomic_mass_by_symbol=. Purpose: Look up standard atomic mass in amu by IUPAC element symbol, ABI minor 74. Parameters: the declaration. Units: the caller's.
+- =rgsaddle_vineyard_config_default=. Purpose: Fill `out` with default Vineyard finite-difference controls (step 1e-2, central differences, positive_tol 1e-8, negative_tol 1e-4), ABI minor 74. Parameters: the declaration. Units: the caller's.
 - =rgsaddle_vineyard_fd=. Purpose: Evaluate the harmonic Vineyard prefactor from dense finite-difference Hessians on `surface` at `x_min` and `x_saddle`. Parameters: the declaration. Units: the caller's.
 
 * Types and callbacks
@@ -287,8 +287,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - =rgsaddle_lineb_rate_diagnostics_t=. Purpose: Geometry counts within the rate, and the Cartesian finite-difference displacement used at the path images (NaN for direct or path-only solves).
 - =rgsaddle_refine_method_t=. Purpose: Refine stepper of rgsaddle_band_set_refine, ABI minor 60.
 - =rgsaddle_geodesic_config_t=. Purpose: Geodesic interpolation controls.
-- =rgsaddle_vineyard_config_t=. Purpose: Mass-weighted finite-difference Vineyard prefactor controls, ABI minor 67.
-- =rgsaddle_vineyard_report_t=. Purpose: Mass-weighted Vineyard prefactor summary report, ABI minor 67.
+- =rgsaddle_vineyard_config_t=. Purpose: Mass-weighted finite-difference Vineyard prefactor controls, ABI minor 74.
+- =rgsaddle_vineyard_report_t=. Purpose: Mass-weighted Vineyard prefactor summary report, ABI minor 74.
 - =rgsaddle_hyperplane_emit_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_sample_hyperplane_fn=. Purpose: Callback typedef in include/rgsaddle.h.
 - =rgsaddle_surface_fn=. Purpose: Callback typedef in include/rgsaddle.h.
