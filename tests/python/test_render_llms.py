@@ -22,7 +22,7 @@ _POST = frozenset("!\"'),-.:;?[\\}")
 _PRE = frozenset("-('\"{")
 _PUB_TYPE = re.compile(
     r"^pub (?:struct|enum|trait|type) ([A-Za-z_][A-Za-z0-9_]*)",
-    re.M,
+    re.MULTILINE,
 )
 _CURVATURE = (
     "if the rejected curvature is finite and non-negative",
@@ -60,7 +60,11 @@ def _mono_line(text: str) -> list[str]:
             mark = text[index]
             close = None
             for cand in range(index + 2, size):
-                if text[cand] == mark and not _space(text[cand - 1]) and _post(text, cand):
+                if (
+                    text[cand] == mark
+                    and not _space(text[cand - 1])
+                    and _post(text, cand)
+                ):
                     close = cand
                     break
             if close is not None:
@@ -99,7 +103,7 @@ def _pub_types(*paths: Path) -> set[str]:
 def _reexported_types(path: Path) -> set[str]:
     names: set[str] = set()
     text = path.read_text(encoding="utf-8")
-    for block in re.finditer(r"pub use [^;]+;", text, flags=re.S):
+    for block in re.finditer(r"pub use [^;]+;", text, flags=re.DOTALL):
         for name in re.findall(r"\b([A-Z][A-Za-z0-9_]*)\b", block.group(0)):
             if not name.isupper():
                 names.add(name)
@@ -109,7 +113,10 @@ def _reexported_types(path: Path) -> set[str]:
 def _missing(names: set[str], page: str) -> list[str]:
     absent = []
     for name in sorted(names):
-        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", page) is None:
+        if (
+            re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", page)
+            is None
+        ):
             absent.append(name)
     return absent
 
@@ -140,7 +147,9 @@ def test_pipe_outside_a_table_does_not_close_verbatim() -> None:
 
 def test_pafi_table_cells_close_at_the_separator() -> None:
     """Rows 83, 84, and 89 of the PAFI howto have no space before `|`."""
-    org = (_REPO / "docs" / "orgmode" / "howto" / "pafi.org").read_text(encoding="utf-8")
+    org = (_REPO / "docs" / "orgmode" / "howto" / "pafi.org").read_text(
+        encoding="utf-8"
+    )
     lines = org.splitlines()
     want = {
         83: (
@@ -191,7 +200,11 @@ def test_pafi_and_ohtst_pages_name_every_public_type() -> None:
     pafi_names.add("arc_at_time")
     ohtst_names = _pub_types(_REPO / "src" / "ohtst")
     ohtst_names.update(_reexported_types(_REPO / "src" / "ohtst" / "mod.rs"))
-    pafi_page = (_REPO / "docs" / "orgmode" / "reference" / "pafi.org").read_text(encoding="utf-8")
-    ohtst_page = (_REPO / "docs" / "orgmode" / "reference" / "ohtst.org").read_text(encoding="utf-8")
+    pafi_page = (_REPO / "docs" / "orgmode" / "reference" / "pafi.org").read_text(
+        encoding="utf-8"
+    )
+    ohtst_page = (_REPO / "docs" / "orgmode" / "reference" / "ohtst.org").read_text(
+        encoding="utf-8"
+    )
     assert _missing(pafi_names, pafi_page) == []
     assert _missing(ohtst_names, ohtst_page) == []
