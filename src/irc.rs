@@ -356,14 +356,15 @@ impl IrcSession {
             last_step: None,
             last_outer: None,
         };
-        session.seed_ts_mode();
+        session.seed_ts_mode()?;
         session.set_direction(direction);
         Ok(session)
     }
 
-    fn seed_ts_mode(&mut self) {
-        let weighted = self.metric.multiply_sqrt(self.mode.view());
+    fn seed_ts_mode(&mut self) -> Result<(), SaddleError> {
+        let weighted = self.metric.multiply_sqrt(self.mode.view())?;
         self.hess.seed_mode(&weighted, -1.0);
+        Ok(())
     }
 
     /// Launch along the lowest eigenvector of the mass-weighted Hessian
@@ -426,7 +427,8 @@ impl IrcSession {
     pub fn reset(&mut self) {
         self.hess.forget();
         self.hess_pairs = 0;
-        self.seed_ts_mode();
+        self.seed_ts_mode()
+            .expect("saddle mode matches the mass metric");
     }
 
     /// Restore the saddle, the requested `dx` and an empty model, and set the kick for
@@ -434,34 +436,37 @@ impl IrcSession {
     pub fn set_direction(&mut self, direction: IrcDirection) {
         self.config.dx = self.dx_target;
         self.x = self.x_saddle.clone();
-        self.d1 = self.kick_vector(direction);
+        self.d1 = self
+            .kick_vector(direction)
+            .expect("saddle mode matches the mass metric");
         self.first = true;
         self.arc = 0.0;
         self.last_step = None;
         self.last_outer = None;
         self.hess.forget();
         self.hess_pairs = 0;
-        self.seed_ts_mode();
+        self.seed_ts_mode()
+            .expect("saddle mode matches the mass metric");
     }
 
-    fn kick_vector(&self, direction: IrcDirection) -> Array1<f64> {
-        let mw = self.metric.multiply_sqrt(self.mode.view());
+    fn kick_vector(&self, direction: IrcDirection) -> Result<Array1<f64>, SaddleError> {
+        let mw = self.metric.multiply_sqrt(self.mode.view())?;
         let n = nrm2(mw.view());
         if n <= 1e-16 {
-            return Array1::zeros(self.mode.len());
+            return Ok(Array1::zeros(self.mode.len()));
         }
         let scaled = mw.mapv(|component| self.config.dx * (component / n));
-        let mut v0ts = self.metric.divide_sqrt(scaled.view());
+        let mut v0ts = self.metric.divide_sqrt(scaled.view())?;
         // Sella: first nonzero of v0ts is positive, then reverse is -v0ts.
         if let Some(&v) = v0ts.iter().find(|v| v.abs() > 1e-16)
             && v < 0.0
         {
             v0ts.mapv_inplace(|c| -c);
         }
-        match direction {
+        Ok(match direction {
             IrcDirection::Forward => v0ts,
             IrcDirection::Reverse => v0ts.mapv(|c| -c),
-        }
+        })
     }
 
     /// Radius of the inner sphere, `dx / 2` about the [`IrcKind::Gs2`] pivot.
@@ -478,18 +483,18 @@ impl IrcSession {
 
     /// `x_k` less the [`IrcKind::Gs2`] pivot, `(dx / 2) g / |g|` in the
     /// session metric, as a coordinate displacement.
-    fn pivot_offset(&self, g: &Array1<f64>) -> Array1<f64> {
-        let g_mw = self.metric.divide_sqrt(g.view());
+    fn pivot_offset(&self, g: &Array1<f64>) -> Result<Array1<f64>, SaddleError> {
+        let g_mw = self.metric.divide_sqrt(g.view())?;
         let norm = nrm2(g_mw.view());
         if norm <= 1e-16 {
-            return Array1::zeros(g.len());
+            return Ok(Array1::zeros(g.len()));
         }
         let scaled = g_mw.mapv(|component| component * (self.radius() / norm));
         self.metric.divide_sqrt(scaled.view())
     }
 
     /// Sella: project `g` orthogonal to the path in the MW metric.
-    fn path_force(&self, g: &Array1<f64>) -> Array1<f64> {
+    fn path_force(&self, g: &Array1<f64>) -> Result<Array1<f64>, SaddleError> {
         path_projected_force(g, &self.d1, &self.metric)
     }
 
@@ -536,7 +541,11 @@ impl IrcSession {
     /// A [`IrcKind::Gs2`] point starts on its sphere uphill of the pivot,
     /// where the radial projection of a model minimum between the two is
     /// that point itself, so an interior Gs2 step runs on along its line.
-    fn restricted_increment(&self, g: &Array1<f64>, spectrum: &ModelSpectrum) -> Array1<f64> {
+    fn restricted_increment(
+        &self,
+        g: &Array1<f64>,
+        spectrum: &ModelSpectrum,
+    ) -> Result<Array1<f64>, SaddleError> {
         let inside = if spectrum.posdef && self.arc > 8.0 * self.config.dx {
             Inside::Keep
         } else if self.config.kind == IrcKind::Gs2 {
@@ -584,8 +593,9 @@ impl IrcSession {
     ///
     /// # Errors
     ///
-    /// [`SaddleError::NonFinite`] when the gradient is not finite, and the errors of
-    /// `surface`.
+    /// [`SaddleError::NonFinite`] when the gradient is not finite,
+    /// [`SaddleError::Shape`] when a gradient length differs from the masses,
+    /// and the errors of `surface`.
     pub fn step<S: PointSurface>(&mut self, surface: &S) -> Result<IrcReport, SaddleError> {
         if self.config.kind == IrcKind::Morokuma {
             return self.step_morokuma(surface);
@@ -610,7 +620,7 @@ impl IrcSession {
             return Err(SaddleError::NonFinite("irc gradient"));
         }
         if !kicked && self.config.kind == IrcKind::Gs2 {
-            self.d1 = self.pivot_offset(&g0);
+            self.d1 = self.pivot_offset(&g0)?;
         }
         let max_force0 = self.config.force_gate.value(g0.view());
         let fmax_inner = self.config.force_tol.min(0.01);
@@ -622,7 +632,7 @@ impl IrcSession {
         for _ in 0..self.config.max_inner {
             inner_steps += 1;
             let spectrum = self.model_spectrum()?;
-            let s = self.restricted_increment(&g, &spectrum);
+            let s = self.restricted_increment(&g, &spectrum)?;
             let interior = spectrum.posdef
                 && self.arc > 8.0 * self.config.dx
                 && self.trust().cons(&s) + 1e-8 < self.radius();
@@ -679,13 +689,18 @@ impl IrcSession {
                 break;
             }
             energy = ev.0;
+            if ev.1.len() != self.metric.len() {
+                return Err(SaddleError::Shape(
+                    "irc gradient length differs from the masses".into(),
+                ));
+            }
             let y = &ev.1 - &g;
-            let s_mw = self.metric.multiply_sqrt(s.view());
-            let y_mw = self.metric.divide_sqrt(y.view());
+            let s_mw = self.metric.multiply_sqrt(s.view())?;
+            let y_mw = self.metric.divide_sqrt(y.view())?;
             self.update_model(&s_mw, &y_mw);
             g = ev.1;
             max_force = self.config.force_gate.value(g.view());
-            let g_path = self.path_force(&g);
+            let g_path = self.path_force(&g)?;
             let fmax_path = nrminf(g_path.view());
             let bound = self.trust().on_bound(&Array1::zeros(s.len()), 1e-8);
             if (bound && fmax_path <= fmax_inner)
@@ -700,7 +715,11 @@ impl IrcSession {
         self.d1.fill(0.0);
         self.last_step = None;
         self.arc += match self.config.kind {
-            IrcKind::Gs2 => nrm2(self.metric.multiply_sqrt((&self.x - &x_from).view()).view()),
+            IrcKind::Gs2 => nrm2(
+                self.metric
+                    .multiply_sqrt((&self.x - &x_from).view())?
+                    .view(),
+            ),
             _ => self.config.dx,
         };
         if !rejected {
@@ -771,7 +790,7 @@ impl IrcSession {
             }
         }
 
-        let g_mw = self.metric.divide_sqrt(g0.view());
+        let g_mw = self.metric.divide_sqrt(g0.view())?;
         let gn = nrm2(g_mw.view());
         if gn <= 1e-16 {
             return Ok(IrcReport {
@@ -786,7 +805,7 @@ impl IrcSession {
         let h = self.config.dx;
         let predictor = g_mw.mapv(|component| -h * component / gn);
         let mut x_pred = self.x.clone();
-        let predictor_step = self.metric.divide_sqrt(predictor.view());
+        let predictor_step = self.metric.divide_sqrt(predictor.view())?;
         for (coordinate, step) in x_pred.iter_mut().zip(predictor_step.iter()) {
             *coordinate += step;
         }
@@ -794,7 +813,7 @@ impl IrcSession {
         if !ev_pred.1.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("irc gradient"));
         }
-        let g_pred_mw = self.metric.divide_sqrt(ev_pred.1.view());
+        let g_pred_mw = self.metric.divide_sqrt(ev_pred.1.view())?;
         let mut g_avg = g_mw;
         axpy(1.0, g_pred_mw.view(), &mut g_avg);
         g_avg.mapv_inplace(|v| 0.5 * v);
@@ -816,7 +835,7 @@ impl IrcSession {
             dx_mw_n2 += dmw * dmw;
             *slot = dmw;
         }
-        let s = self.metric.divide_sqrt(weighted_step.view());
+        let s = self.metric.divide_sqrt(weighted_step.view())?;
         if let Some(prev) = &self.last_outer
             && self.arc > 8.0 * h
             && dot(prev.view(), s.view()) < 0.0
@@ -887,18 +906,18 @@ fn sphere_increment(
     spectrum: &ModelSpectrum,
     g: &Array1<f64>,
     inside: Inside,
-) -> Array1<f64> {
-    let g_mw = metric.divide_sqrt(g.view());
-    let d1_mw = metric.multiply_sqrt(trust.d1.view());
-    let step_at = |alpha: f64| {
+) -> Result<Array1<f64>, SaddleError> {
+    let g_mw = metric.divide_sqrt(g.view())?;
+    let d1_mw = metric.multiply_sqrt(trust.d1.view())?;
+    let step_at = |alpha: f64| -> Result<Array1<f64>, SaddleError> {
         let (s_mw, _) = qn_irc_get_s(&spectrum.evals, &spectrum.evecs, &g_mw, &d1_mw, alpha);
         metric.divide_sqrt(s_mw.view())
     };
-    let s0 = step_at(0.0);
+    let s0 = step_at(0.0)?;
     if trust.cons(&s0) <= trust.dx + 1e-14 {
         return match inside {
-            Inside::Keep => s0,
-            Inside::Radial => trust.project(&s0),
+            Inside::Keep => Ok(s0),
+            Inside::Radial => Ok(trust.project(&s0)),
             Inside::Chord => chord_exit(&d1_mw, &s0, trust, metric),
         };
     }
@@ -935,22 +954,26 @@ fn chord_exit(
     s: &Array1<f64>,
     trust: &IrcTrust,
     metric: &MassMetric,
-) -> Array1<f64> {
-    let s_mw = metric.multiply_sqrt(s.view());
+) -> Result<Array1<f64>, SaddleError> {
+    let s_mw = metric.multiply_sqrt(s.view())?;
     let len = nrm2(s_mw.view());
     if len <= 1e-16 {
-        return trust.project(s);
+        return Ok(trust.project(s));
     }
     let b = dot(d1_mw.view(), s_mw.view()) / len;
     let c = dot(d1_mw.view(), d1_mw.view()) - trust.dx * trust.dx;
     let tau = -b + (b * b - c).max(0.0).sqrt();
-    s.mapv(|v| v * tau / len)
+    Ok(s.mapv(|v| v * tau / len))
 }
 
 /// Mass-weighted path-orthogonal force. Algebra is `rgmin::vecops`.
-fn path_projected_force(g: &Array1<f64>, d1: &Array1<f64>, metric: &MassMetric) -> Array1<f64> {
-    let d1m = metric.multiply_sqrt(d1.view());
-    let mut gm = metric.divide_sqrt(g.view());
+fn path_projected_force(
+    g: &Array1<f64>,
+    d1: &Array1<f64>,
+    metric: &MassMetric,
+) -> Result<Array1<f64>, SaddleError> {
+    let d1m = metric.multiply_sqrt(d1.view())?;
+    let mut gm = metric.divide_sqrt(g.view())?;
     let dn = nrm2(d1m.view());
     if dn > 1e-16 {
         let proj = dot(d1m.view(), gm.view()) / dn;
@@ -961,7 +984,7 @@ fn path_projected_force(g: &Array1<f64>, d1: &Array1<f64>, metric: &MassMetric) 
     for i in 0..n {
         force[i] = -gm[i] * metric.sqrt_at(i);
     }
-    force
+    Ok(force)
 }
 
 /// Finite-difference Hessian action `H v` at `x` with the forward
@@ -999,14 +1022,23 @@ struct FdHvp<'a, S: PointSurface> {
 impl<S: PointSurface> ApplyHessian for FdHvp<'_, S> {
     fn apply_hessian(&self, x: ArrayView1<f64>, v: ArrayView1<f64>) -> Array1<f64> {
         let lifted = self.space.lift(v);
-        let cartesian = self.metric.divide_sqrt(lifted.view());
-        match hessian_action(self.surface, x, self.g0.view(), cartesian.view(), self.dr) {
-            Ok(hv) => {
-                let weighted = self.metric.divide_sqrt(hv.view());
-                self.space.reduce(weighted.view())
+        let cartesian = match self.metric.divide_sqrt(lifted.view()) {
+            Ok(cartesian) => cartesian,
+            Err(error) => {
+                self.fail.replace(Some(error));
+                return Array1::zeros(v.len());
             }
-            Err(e) => {
-                self.fail.replace(Some(e));
+        };
+        match hessian_action(self.surface, x, self.g0.view(), cartesian.view(), self.dr) {
+            Ok(hv) => match self.metric.divide_sqrt(hv.view()) {
+                Ok(weighted) => self.space.reduce(weighted.view()),
+                Err(error) => {
+                    self.fail.replace(Some(error));
+                    Array1::zeros(v.len())
+                }
+            },
+            Err(error) => {
+                self.fail.replace(Some(error));
                 Array1::zeros(v.len())
             }
         }
@@ -1033,12 +1065,12 @@ fn lowest_via_fd<S: PointSurface>(
     }
     let mut space = Complement::new(x.len());
     for direction in excluded.rows() {
-        space.exclude(metric.multiply_sqrt(direction).view());
+        space.exclude(metric.multiply_sqrt(direction)?.view());
     }
     if space.dimension() == 0 {
         return Err(SaddleError::Shape("minimum-mode space is empty".into()));
     }
-    let mut reduced_seed = space.reduce(metric.multiply_sqrt(seed.view()).view());
+    let mut reduced_seed = space.reduce(metric.multiply_sqrt(seed.view())?.view());
     if reduced_seed.dot(&reduced_seed).sqrt() <= 64.0 * f64::EPSILON {
         reduced_seed = Array1::from_iter(
             (0..space.dimension()).map(|i| ((i + 1) as f64 * 1.618033988749895).sin()),
@@ -1068,7 +1100,7 @@ fn lowest_via_fd<S: PointSurface>(
         return Err(SaddleError::NonFinite("lowest-mode eigenpair"));
     }
     let lifted = h.space.lift(out.vector.view());
-    let mode = metric.divide_sqrt(lifted.view());
+    let mode = metric.divide_sqrt(lifted.view())?;
     Ok((mode, out.value, out.actions))
 }
 
@@ -1281,7 +1313,7 @@ mod tests {
         for _ in 0..4 {
             let report = irc.step(&Well).unwrap();
             let x = irc.position().to_owned();
-            arc += nrm2(metric.multiply_sqrt((&x - &last).view()).view());
+            arc += nrm2(metric.multiply_sqrt((&x - &last).view()).unwrap().view());
             assert_eq!(report.arc, arc);
             last = x;
         }
@@ -1294,24 +1326,32 @@ mod tests {
         let sqrtm = metric.sqrt_vector();
         let mut d1_mw = Array1::zeros(6);
         d1_mw[3] = dx;
-        let trust = IrcTrust::new(metric.divide_sqrt(d1_mw.view()), sqrtm.clone(), dx);
-        let toward_centre = metric.divide_sqrt((&d1_mw * -0.3).view());
-        let radial = metric.multiply_sqrt(trust.project(&toward_centre).view());
+        let trust = IrcTrust::new(metric.divide_sqrt(d1_mw.view()).unwrap(), sqrtm.clone(), dx);
+        let toward_centre = metric.divide_sqrt((&d1_mw * -0.3).view()).unwrap();
+        let radial = metric
+            .multiply_sqrt(trust.project(&toward_centre).view())
+            .unwrap();
         assert!(nrm2(radial.view()) < 1e-12, "{radial}");
-        let chord =
-            metric.multiply_sqrt(chord_exit(&d1_mw, &toward_centre, &trust, &metric).view());
+        let chord = metric
+            .multiply_sqrt(
+                chord_exit(&d1_mw, &toward_centre, &trust, &metric)
+                    .unwrap()
+                    .view(),
+            )
+            .unwrap();
         assert!(nrm2((&chord + &d1_mw * 2.0).view()) < 1e-12, "{chord}");
 
         let mut oblique_mw = &d1_mw * -0.3;
         oblique_mw[0] = 0.05;
         let s = chord_exit(
             &d1_mw,
-            &metric.divide_sqrt(oblique_mw.view()),
+            &metric.divide_sqrt(oblique_mw.view()).unwrap(),
             &trust,
             &metric,
-        );
+        )
+        .unwrap();
         assert!((trust.cons(&s) - dx).abs() < 1e-12);
-        let s_mw = metric.multiply_sqrt(s.view());
+        let s_mw = metric.multiply_sqrt(s.view()).unwrap();
         let cos =
             dot(s_mw.view(), oblique_mw.view()) / (nrm2(s_mw.view()) * nrm2(oblique_mw.view()));
         assert!((cos - 1.0).abs() < 1e-12, "cos {cos}");

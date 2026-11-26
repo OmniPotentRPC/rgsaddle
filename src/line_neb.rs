@@ -286,7 +286,10 @@ fn validate_inputs(
     Ok(())
 }
 
-fn mass_scaled(metric: &MassMetric, positions: ArrayView2<'_, f64>) -> Array2<f64> {
+fn mass_scaled(
+    metric: &MassMetric,
+    positions: ArrayView2<'_, f64>,
+) -> Result<Array2<f64>, SaddleError> {
     metric.weight_point_rows(positions)
 }
 
@@ -413,7 +416,7 @@ fn trapezoid_action(
     metric: &MassMetric,
     xi: &Array1<f64>,
 ) -> Result<f64, SaddleError> {
-    let q = mass_scaled(metric, positions);
+    let q = mass_scaled(metric, positions)?;
     let (_, lengths) = segments(q.view())?;
     let mut action = 0.0;
     for i in 0..lengths.len() {
@@ -483,11 +486,11 @@ pub fn fixed_energy_action_force(
         return Err(SaddleError::NonFinite("LI-NEB gradients"));
     }
     let metric = MassMetric::coordinates(masses, masses.len())?;
-    let q = metric.weight_point_rows(positions);
-    let force_q = metric.weight_force_rows(gradients);
+    let q = metric.weight_point_rows(positions)?;
+    let force_q = metric.weight_force_rows(gradients)?;
     let xi = action_weights(energies, energy, reduced_planck, BelowEndpoint::Refuse)?;
     let force = action_force_q(q.view(), &xi, force_q.view(), reduced_planck)?;
-    Ok(metric.unweight_covector_rows(force.view()))
+    metric.unweight_covector_rows(force.view())
 }
 
 fn store<T>(mutex: &Mutex<T>, value: T) -> bool {
@@ -569,7 +572,7 @@ fn evaluate(
     q: ArrayView2<'_, f64>,
     step: usize,
 ) -> Result<Evaluation, SaddleError> {
-    let positions = metric.unweight_point_rows(q);
+    let positions = metric.unweight_point_rows(q)?;
     let mut energies = Array1::zeros(q.nrows());
     let mut gradients = Array2::zeros(q.raw_dim());
     surface.eval(positions.view(), &mut energies, &mut gradients)?;
@@ -585,7 +588,7 @@ fn evaluate(
     };
     let xi = action_weights(energies.view(), config.energy, config.reduced_planck, below)?;
     let action = trapezoid_action(positions.view(), metric, &xi)?;
-    let force_q = metric.weight_force_rows(gradients.view());
+    let force_q = metric.weight_force_rows(gradients.view())?;
     let action_force = action_force_q(q, &xi, force_q.view(), config.reduced_planck)?;
     let (_, lengths) = segments(q)?;
     let mut optimization_force = Array2::zeros(q.raw_dim());
@@ -989,7 +992,7 @@ pub fn fixed_energy_mep_seed(
                 .assign(&(&joined[left] + fraction * (&joined[right] - &joined[left])));
         }
     }
-    Ok(metric.unweight_point_rows(result_q.view()))
+    metric.unweight_point_rows(result_q.view())
 }
 
 /// Fixed-image-count LI-NEB session using rgmin's global eOn
@@ -1044,7 +1047,7 @@ impl LineNebSession {
             Some(masses) => MassMetric::coordinates(masses.view(), masses.len())?,
             None => MassMetric::unit(positions.ncols())?,
         };
-        let q = mass_scaled(&metric, positions.view());
+        let q = mass_scaled(&metric, positions.view())?;
         segments(q.view())?;
         let dim = q.len();
         let mut solver = Solver::new(
@@ -1070,7 +1073,9 @@ impl LineNebSession {
 
     /// Current physical positions, including the movable endpoints.
     pub fn positions(&self) -> Array2<f64> {
-        self.metric.unweight_point_rows(self.q.view())
+        self.metric
+            .unweight_point_rows(self.q.view())
+            .expect("LI-NEB images match the mass metric")
     }
 
     /// Controls this session was built with. Unset masses stay `None`;

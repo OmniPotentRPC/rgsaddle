@@ -414,64 +414,88 @@ impl MassMetric {
         }
     }
 
-    /// `M^{1/2} x` when `src` has the metric length.
+    /// `M^{1/2} x`.
     ///
-    /// Debug builds assert that equality. Session code calls this only
-    /// after its own length check. [`Self::weight_point`] and the other
-    /// public maps return [`SaddleError::Shape`] for a mismatch.
-    #[must_use]
-    pub(crate) fn multiply_sqrt(&self, src: ArrayView1<'_, f64>) -> Array1<f64> {
+    /// # Errors
+    ///
+    /// [`SaddleError::Shape`] when `src` length is not the dimension.
+    pub(crate) fn multiply_sqrt(
+        &self,
+        src: ArrayView1<'_, f64>,
+    ) -> Result<Array1<f64>, SaddleError> {
         self.scaled(src, MapOp::Multiply)
     }
 
-    /// `M^{-1/2} x` when `src` has the metric length.
+    /// `M^{-1/2} x`.
     ///
-    /// Debug builds assert that equality. The public maps return
-    /// [`SaddleError::Shape`] for a mismatch.
-    #[must_use]
-    pub(crate) fn divide_sqrt(&self, src: ArrayView1<'_, f64>) -> Array1<f64> {
+    /// # Errors
+    ///
+    /// [`SaddleError::Shape`] when `src` length is not the dimension.
+    pub(crate) fn divide_sqrt(&self, src: ArrayView1<'_, f64>) -> Result<Array1<f64>, SaddleError> {
         self.scaled(src, MapOp::Divide)
     }
 
-    #[must_use]
-    pub(crate) fn weight_point_rows(&self, rows: ArrayView2<'_, f64>) -> Array2<f64> {
+    /// `M^{1/2}` on every row.
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Shape`] when the row width is not the dimension.
+    pub(crate) fn weight_point_rows(
+        &self,
+        rows: ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, SaddleError> {
         self.map_rows(rows, MapOp::Multiply, false)
     }
 
-    #[must_use]
-    pub(crate) fn unweight_point_rows(&self, rows: ArrayView2<'_, f64>) -> Array2<f64> {
+    /// `M^{-1/2}` on every row.
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Shape`] when the row width is not the dimension.
+    pub(crate) fn unweight_point_rows(
+        &self,
+        rows: ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, SaddleError> {
         self.map_rows(rows, MapOp::Divide, false)
     }
 
     /// `(-c) / sqrt(m)` on every row. The negation is on the covector, then
     /// the covector map divides.
-    #[must_use]
-    pub(crate) fn weight_force_rows(&self, rows: ArrayView2<'_, f64>) -> Array2<f64> {
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Shape`] when the row width is not the dimension.
+    pub(crate) fn weight_force_rows(
+        &self,
+        rows: ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, SaddleError> {
         self.map_rows(rows, MapOp::Divide, true)
     }
 
-    #[must_use]
-    pub(crate) fn unweight_covector_rows(&self, rows: ArrayView2<'_, f64>) -> Array2<f64> {
+    /// `M^{1/2}` on every covector row.
+    ///
+    /// # Errors
+    ///
+    /// [`SaddleError::Shape`] when the row width is not the dimension.
+    pub(crate) fn unweight_covector_rows(
+        &self,
+        rows: ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, SaddleError> {
         self.map_rows(rows, MapOp::Multiply, false)
     }
 
     fn map_checked(&self, src: ArrayView1<'_, f64>, op: MapOp) -> Result<Array1<f64>, SaddleError> {
+        self.scaled(src, op)
+    }
+
+    fn scaled(&self, src: ArrayView1<'_, f64>, op: MapOp) -> Result<Array1<f64>, SaddleError> {
         if src.len() != self.len() {
             return Err(SaddleError::Shape(
                 "mass metric vector length must match the masses".into(),
             ));
         }
-        Ok(self.scaled(src, op))
-    }
-
-    fn scaled(&self, src: ArrayView1<'_, f64>, op: MapOp) -> Array1<f64> {
-        debug_assert_eq!(
-            src.len(),
-            self.len(),
-            "mass metric vector length must match the masses"
-        );
         match &self.scale {
-            Scale::Identity { .. } => src.to_owned(),
+            Scale::Identity { .. } => Ok(src.to_owned()),
             Scale::Diagonal { sqrt_mass, .. } => {
                 let mut out = Array1::zeros(src.len());
                 for index in 0..src.len() {
@@ -481,17 +505,22 @@ impl MassMetric {
                         MapOp::Divide => src[index] / weight,
                     };
                 }
-                out
+                Ok(out)
             }
         }
     }
 
-    fn map_rows(&self, rows: ArrayView2<'_, f64>, op: MapOp, negate: bool) -> Array2<f64> {
-        debug_assert_eq!(
-            rows.ncols(),
-            self.len(),
-            "mass metric row width must match the masses"
-        );
+    fn map_rows(
+        &self,
+        rows: ArrayView2<'_, f64>,
+        op: MapOp,
+        negate: bool,
+    ) -> Result<Array2<f64>, SaddleError> {
+        if rows.ncols() != self.len() {
+            return Err(SaddleError::Shape(
+                "mass metric row width must match the masses".into(),
+            ));
+        }
         let mut out = rows.to_owned();
         match &self.scale {
             Scale::Identity { .. } => {
@@ -533,7 +562,7 @@ impl MassMetric {
                 }
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -798,83 +827,120 @@ mod tests {
     }
 
     #[test]
-    fn unchecked_maps_match_the_public_result_on_equal_lengths() {
+    fn crate_maps_match_the_public_result_on_equal_lengths() {
         let metric = sample();
         let values = array![0.5, -1.5, 0.25];
         assert_eq!(
-            metric.multiply_sqrt(values.view()),
+            metric.multiply_sqrt(values.view()).unwrap(),
             metric
                 .weight_point(MetricPoint::new(values.view()))
                 .unwrap()
         );
         assert_eq!(
-            metric.divide_sqrt(values.view()),
+            metric.divide_sqrt(values.view()).unwrap(),
             metric
                 .unweight_point(MetricPoint::new(values.view()))
                 .unwrap()
         );
         let rows = array![[0.5, -1.5, 0.25], [1.0, -2.0, 0.5]];
-        let weighted = metric.weight_point_rows(rows.view());
-        let forced = metric.weight_force_rows(rows.view());
+        let weighted = metric.weight_point_rows(rows.view()).unwrap();
+        let forced = metric.weight_force_rows(rows.view()).unwrap();
         for (index, row) in rows.outer_iter().enumerate() {
             let point = metric.weight_point(MetricPoint::new(row)).unwrap();
             assert_eq!(weighted.row(index), point);
             let covector = metric.weight_covector(MetricCovector::new(row)).unwrap();
             assert_eq!(forced.row(index), -covector);
         }
+        let back = metric.unweight_point_rows(weighted.view()).unwrap();
+        assert_eq!(back, rows);
+        let empty = Array2::<f64>::zeros((0, 3));
+        assert_eq!(
+            metric.weight_point_rows(empty.view()).unwrap().dim(),
+            (0, 3)
+        );
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "mass metric vector length must match the masses")]
     fn multiply_sqrt_rejects_a_short_vector() {
-        let _ = sample().multiply_sqrt(array![1.0, 2.0].view());
+        let result = sample().multiply_sqrt(array![1.0, 2.0].view());
+        assert!(matches!(
+            result,
+            Err(SaddleError::Shape(ref message))
+                if message == "mass metric vector length must match the masses"
+        ));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "mass metric vector length must match the masses")]
     fn divide_sqrt_rejects_a_long_vector() {
-        let _ = sample().divide_sqrt(array![1.0, 2.0, 3.0, 4.0].view());
+        let result = sample().divide_sqrt(array![1.0, 2.0, 3.0, 4.0].view());
+        assert!(matches!(
+            result,
+            Err(SaddleError::Shape(ref message))
+                if message == "mass metric vector length must match the masses"
+        ));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "mass metric vector length must match the masses")]
     fn identity_map_rejects_a_different_length() {
         let metric = MassMetric::unit(3).unwrap();
-        let _ = metric.multiply_sqrt(array![1.0].view());
+        let short = metric.multiply_sqrt(array![1.0].view());
+        let long = metric.divide_sqrt(array![1.0, 2.0, 3.0, 4.0].view());
+        assert!(matches!(short, Err(SaddleError::Shape(_))));
+        assert!(matches!(long, Err(SaddleError::Shape(_))));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "mass metric row width must match the masses")]
     fn point_rows_reject_a_different_width() {
         let rows = array![[1.0, 2.0], [3.0, 4.0]];
-        let _ = sample().weight_point_rows(rows.view());
+        let result = sample().weight_point_rows(rows.view());
+        assert!(matches!(
+            result,
+            Err(SaddleError::Shape(ref message))
+                if message == "mass metric row width must match the masses"
+        ));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "mass metric row width must match the masses")]
     fn unweight_point_rows_reject_a_different_width() {
         let rows = array![[1.0, 2.0, 3.0, 4.0]];
-        let _ = sample().unweight_point_rows(rows.view());
+        let result = sample().unweight_point_rows(rows.view());
+        assert!(matches!(result, Err(SaddleError::Shape(_))));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "mass metric row width must match the masses")]
     fn force_rows_reject_a_different_width() {
         let rows = array![[1.0, 2.0]];
-        let _ = sample().weight_force_rows(rows.view());
+        let result = sample().weight_force_rows(rows.view());
+        assert!(matches!(result, Err(SaddleError::Shape(_))));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "mass metric row width must match the masses")]
     fn covector_rows_reject_a_different_width() {
         let rows = array![[1.0, 2.0, 3.0, 4.0]];
-        let _ = sample().unweight_covector_rows(rows.view());
+        let result = sample().unweight_covector_rows(rows.view());
+        assert!(matches!(result, Err(SaddleError::Shape(_))));
+    }
+
+    #[test]
+    fn identity_rows_reject_a_different_width() {
+        let metric = MassMetric::unit(3).unwrap();
+        let short = array![[1.0, 2.0]];
+        let long = array![[1.0, 2.0, 3.0, 4.0]];
+        assert!(matches!(
+            metric.weight_point_rows(short.view()),
+            Err(SaddleError::Shape(_))
+        ));
+        assert!(matches!(
+            metric.unweight_point_rows(long.view()),
+            Err(SaddleError::Shape(_))
+        ));
+        assert!(matches!(
+            metric.weight_force_rows(short.view()),
+            Err(SaddleError::Shape(_))
+        ));
+        assert!(matches!(
+            metric.unweight_covector_rows(long.view()),
+            Err(SaddleError::Shape(_))
+        ));
     }
 }
