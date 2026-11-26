@@ -269,7 +269,9 @@ pub use relax::{
     DEFAULT_FORCE_TOL, DEFAULT_MAX_STEPS, RelaxConfig, Relaxation, max_atom_force,
     relax_to_tolerance,
 };
-pub use saddle_index::{SaddleEscape, SaddleIndex, SaddleIndexCheck, saddle_index};
+pub use saddle_index::{
+    NEGATIVE_CURVATURE_TOL, SaddleEscape, SaddleIndex, SaddleIndexCheck, saddle_index,
+};
 pub use solid_dimer::{
     CellMask, IndexCheck, IndexReport, JointChart, STRAIN_VOIGT, SolidDimer, SolidDimerConfig,
     SolidDimerReport, StressCheck, VineyardIndexError, VineyardIndexReport, certify_vineyard_pair,

@@ -153,7 +153,7 @@ Every public module exported by =src/lib.rs=, with its public types, free functi
 | =restricted= | Types: =InternalWeights=, =MaxInternalStep=, =RestrictedAtomicStep=, =RestrictedKind=, =TrustRegion=. Functions: =cons_max=, =mis_clip=, =pack_weights=, =ras_cons=, =weights_for_equalities=, =weights_for_equalities_with=. Constants: =RAS_SYNONYMS=, =TRUST_SYNONYMS= |
 | =rfo= | Types: =RationalFunctionOptimization=. Functions: =rfo_stepper=. Constants: =SYNONYMS= |
 | =rtr= | Types: =BandForces=, =BandRtr=, =RtrConfig=, =RtrRadius=, =RtrReport=, =TcgResult=, =TcgStop=. Functions: =band_forces=, =reparametrize_equal_arc=, =reparametrize_equal_arc_in_cell=, =truncated_cg= |
-| =saddle_index= | Types: =SaddleEscape=, =SaddleIndex=, =SaddleIndexCheck=. Functions: =saddle_index= |
+| =saddle_index= | Types: =SaddleEscape=, =SaddleIndex=, =SaddleIndexCheck=. Functions: =saddle_index=. Constants: =NEGATIVE_CURVATURE_TOL= |
 | =samd= | Types: =SamdConfig=, =SamdReport=, =SamdSession=, =VelocitySofteningConfig=, =VelocitySofteningReport=. Functions: =project_velocity=, =retract_samd=, =soften_velocity_on=, =t_exp=, =t_linear=, =transport_velocity=, =verlet_increment= |
 | =seed_direction= | Types: =ModeSweepDirectionPlan=, =SoftModeDirectionPlan=. Functions: =hessian_mode_sweep_directions=, =mode_sweep_schedule=, =soft_mode_then_full_directions=, =spectral_gap_rank= |
 | =sella_min= | Types: =SellaMinConfig=, =SellaMinReport=, =SellaMinSession= |
