@@ -536,7 +536,7 @@ For config minors 5 through 62 this field is read as given, so 0 disables the an
 From minor 63, 0 keeps the Rust default unless flag bit 0, `RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL`, is set; then 0 disables it.
 The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 63 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
-`RGSADDLE_ABI_MINOR` is 66.
+`RGSADDLE_ABI_MINOR` is 68.
 `rgsaddle_band_set_dynamic` (minor 65) sets or clears `DynamicNeb` on a band.
 `rgsaddle_dyneb_mask` (minor 65) applies that mask to a projected band.
 From minor 24, `rgsaddle_sella_saddle_set_symmetrized_ritz` sets `SellaSaddleConfig::symmetrized_ritz` from 0 or 1.
@@ -566,7 +566,7 @@ The feature macro `RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS` advertises
 modes. Each reports `-1` for a path-only or failed solve.
 
 From minor 60, `rgsaddle_band_set_refine` installs or clears the per-step L-BFGS refine stepper, and `rgsaddle_band_is_refining` reports whether the last first-order step used it. A host checks `rgsaddle_abi_version()` for minor 60 or newer. The worked example is `tests/band_refine.rs`.
-From minor 66, `rgsaddle_autoneb_run` grows an AutoNEB band to completion. `rgsaddle_autoneb_config_t` and `rgsaddle_autoneb_report_t` are the inputs and the result. `RGSADDLE_AUTONEB_CLIMB`, `RGSADDLE_AUTONEB_IDPP`, and `RGSADDLE_AUTONEB_KEEP_TRANSLATION` are the flag bits. The callback stays on the calling thread.
+From minor 68, `rgsaddle_autoneb_run` grows an AutoNEB band to completion. `rgsaddle_autoneb_config_t` and `rgsaddle_autoneb_report_t` are the inputs and the result. `RGSADDLE_AUTONEB_CLIMB`, `RGSADDLE_AUTONEB_IDPP`, and `RGSADDLE_AUTONEB_KEEP_TRANSLATION` are the flag bits. The callback stays on the calling thread.
 The request flags are `RGSADDLE_REQ_ONE_IMAGE` (bit 0) and `RGSADDLE_REQ_CLIMBING_IMAGE` (bit 1).
 From a band config at minor 22, the refinement's one-image requests also set bit 1.
 Their `image` is then the climbing image's band index.
@@ -3871,7 +3871,7 @@ CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --locked --features chemfiles
 
 > Stepping bands, minimum-mode sessions, Sella, IRC, and strings from C and C++
 
-`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 66. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
+`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 68. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
 
 A surface callback returns `rgsaddle_status_t` and receives one `rgsaddle_surface_request_t`. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES` report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -4036,7 +4036,7 @@ A solid-state band, the trust-region stepper, the simplified string method, and 
 A non-finite position, energy, force, `fmax`, or `scale_fmax` returns `RGSADDLE_NON_FINITE`.
 While the option is on, an interior image that a neighbour pulls back over its threshold is requested alone: `RGSADDLE_REQ_ONE_IMAGE` is set, `image` is that image's band index, `n_images` is the band length, and `RGSADDLE_REQ_CLIMBING_IMAGE` is not set.
 A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 65 before resolving either symbol.
-ABI minor 66 adds the run-to-completion AutoNEB of Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868. `rgsaddle_autoneb_run` grows a band from at least two images and writes `n_max` rows. `rgsaddle_autoneb_config_t` carries the spring `k`, the two force stops, the two step caps, `n_simul`, `n_max`, the projection, the tangent, and `space_energy_ratio`. `RGSADDLE_AUTONEB_CLIMB` arms the climb from the first evaluation of the climbing window. `RGSADDLE_AUTONEB_IDPP` places new images with the image-dependent pair potential. `RGSADDLE_AUTONEB_KEEP_TRANSLATION` leaves the mean Cartesian force in the window. `rgsaddle_autoneb_report_t` reports `status`, `max_force`, `ci_index` (-1 when there is none), `surface_rows`, `n_images`, and `iteration`. `iteration` counts the steps of the last stage alone, also when that stage keeps the window and the band session of the stage before it. The surface callback is the band callback, and it is not entered from another thread. Python calls it as `autoneb_run` and reads `AutonebReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`). `rgsaddle.ase.AutoNEB` is the ASE-shaped wrapper, and its `run()` returns an `AutoNEBReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`, `images`). A run that spends its steps returns `RGSADDLE_OK` with `status` 0, so a host tests `status` and `max_force`. `tests/c/autoneb_abi.c` drives the entry point on a double well and checks the status, the force, the iteration count, and the error returns. A host checks `rgsaddle_abi_version()` for minor 66 before resolving the symbol. The Rust types are `RgsaddleAutonebConfig` and `RgsaddleAutonebReport`.
+ABI minor 68 adds the run-to-completion AutoNEB of Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868. `rgsaddle_autoneb_run` grows a band from at least two images and writes `n_max` rows. `rgsaddle_autoneb_config_t` carries the spring `k`, the two force stops, the two step caps, `n_simul`, `n_max`, the projection, the tangent, and `space_energy_ratio`. `RGSADDLE_AUTONEB_CLIMB` arms the climb from the first evaluation of the climbing window. `RGSADDLE_AUTONEB_IDPP` places new images with the image-dependent pair potential. `RGSADDLE_AUTONEB_KEEP_TRANSLATION` leaves the mean Cartesian force in the window. `rgsaddle_autoneb_report_t` reports `status`, `max_force`, `ci_index` (-1 when there is none), `surface_rows`, `n_images`, and `iteration`. `iteration` counts the steps of the last stage alone, also when that stage keeps the window and the band session of the stage before it. The surface callback is the band callback, and it is not entered from another thread. Python calls it as `autoneb_run` and reads `AutonebReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`). `rgsaddle.ase.AutoNEB` is the ASE-shaped wrapper, and its `run()` returns an `AutoNEBReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`, `images`). A run that spends its steps returns `RGSADDLE_OK` with `status` 0, so a host tests `status` and `max_force`. `tests/c/autoneb_abi.c` drives the entry point on a double well and checks the status, the force, the iteration count, and the error returns. A host checks `rgsaddle_abi_version()` for minor 68 before resolving the symbol. The Rust types are `RgsaddleAutonebConfig` and `RgsaddleAutonebReport`.
 
 # Use the headers from a meson project (`docs/orgmode/howto/meson.org`)
 
@@ -4285,7 +4285,7 @@ ART pushes along the seed until the curvature falls under `art_threshold` (defau
 
 `Stencil::band` checks the array and returns `BAND_PRESET_SEAM` (`band presets stay on feat/band-methods-zoom`, kept for compatibility) because band presets are not implemented in the stencil builder. Use `BandSession`, `AutoNeb`, or `OcinebSession` directly for a band search, and `BandConfig::zoom` or `SpringKind::EnergyWeighted` for zoom-NEB and energy-weighted springs. The chain, the mesh (remesh, insert, window), and the point controller are implemented.
 
-From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only; the stencil symbols were added at ABI minor 16 and remain additive under the current ABI minor 65.
+From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only; the stencil symbols were added at ABI minor 16 and remain additive under the current ABI minor 68.
 
 From Python, `rgsaddle.Stencil.point(x, preset`"dimer")= takes a C-contiguous float64 vector. `step(surface)` releases the thread, and the surface callback re-attaches. `rgsaddle.ase.Point(atoms, preset`"dimer").run(fmax, steps)= is an ASE `Optimizer` whose `step` is one stencil step. A second thread that enters the same handle raises `RuntimeError`.
 
@@ -5603,7 +5603,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_sella_saddle_config_t`. Purpose: Sella order-1 (P-RFO + trust).
 - `rgsaddle_constraints_config_t`. Purpose: Empty Constraints chart.
 - `rgsaddle_samd_config_t`. Purpose: Sella BDP thermostat.
-- `rgsaddle_autoneb_config_t`. Purpose: Run-to-completion AutoNEB, ABI minor 66.
+- `rgsaddle_autoneb_config_t`. Purpose: Run-to-completion AutoNEB, ABI minor 68.
 - `rgsaddle_autoneb_report_t`. Purpose: Result of rgsaddle_autoneb_run.
 - `rgsaddle_ocineb_phase_t`. Purpose: Phase of one OCI-NEB host step.
 - `rgsaddle_ocineb_config_t`. Purpose: Hand-off parameters.
@@ -5647,9 +5647,9 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `RGSADDLE_REQ_ONE_IMAGE`. Purpose: Request flags bit 0.
 - `RGSADDLE_REQ_CLIMBING_IMAGE`. Purpose: Request flags bit 1, ABI minor 23.
 - `RGSADDLE_VERSION_INIT`. Purpose: Macro constant in include/rgsaddle.h.
-- `RGSADDLE_AUTONEB_CLIMB`. Purpose: AutoNEB flag bit 0, ABI minor 66.
-- `RGSADDLE_AUTONEB_IDPP`. Purpose: AutoNEB flag bit 1, ABI minor 66.
-- `RGSADDLE_AUTONEB_KEEP_TRANSLATION`. Purpose: AutoNEB flag bit 2, ABI minor 66.
+- `RGSADDLE_AUTONEB_CLIMB`. Purpose: AutoNEB flag bit 0, ABI minor 68.
+- `RGSADDLE_AUTONEB_IDPP`. Purpose: AutoNEB flag bit 1, ABI minor 68.
+- `RGSADDLE_AUTONEB_KEEP_TRANSLATION`. Purpose: AutoNEB flag bit 2, ABI minor 68.
 - `RGSADDLE_STENCIL_MIN`. Purpose: Macro constant in include/rgsaddle.h.
 - `RGSADDLE_STENCIL_DIMER`. Purpose: Macro constant in include/rgsaddle.h.
 - `RGSADDLE_STENCIL_LANCZOS`. Purpose: Macro constant in include/rgsaddle.h.
