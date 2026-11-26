@@ -1465,24 +1465,28 @@ impl Default for VineyardConfig {
 
 impl VineyardConfig {
     /// Set the finite-difference step size.
+    #[must_use]
     pub fn with_step(mut self, step: f64) -> Self {
         self.step = step;
         self
     }
 
     /// Set the finite-difference scheme.
+    #[must_use]
     pub fn with_difference(mut self, difference: FiniteDifference) -> Self {
         self.difference = difference;
         self
     }
 
     /// Set the positive vibrational eigenvalue threshold in eV/(u Å²).
+    #[must_use]
     pub fn with_positive_tol(mut self, positive_tol: f64) -> Self {
         self.positive_tol = positive_tol;
         self
     }
 
     /// Set the negative curvature threshold magnitude in eV/(u Å²).
+    #[must_use]
     pub fn with_negative_tol(mut self, negative_tol: f64) -> Self {
         self.negative_tol = negative_tol;
         self
