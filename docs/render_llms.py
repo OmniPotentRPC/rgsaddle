@@ -130,6 +130,14 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
                 "Public PAFI configuration, result types, and the functions that connect them",
             ),
             ("reference/ohtst.org", "Public OH-TST configuration and result types"),
+            (
+                "explanation/cyclic-block.org",
+                "Rotation fallback, singular criterion, symmetric part, and residual norm of the cyclic block factor",
+            ),
+            (
+                "reference/block-cyclic.org",
+                "Cyclic block-tridiagonal factor, inertia, and the solve residual",
+            ),
             ("contributing/index.org", "Build, test, MSRV, Python stub, documentation, and release workflow"),
         ],
     ),

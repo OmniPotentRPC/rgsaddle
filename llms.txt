@@ -78,4 +78,6 @@ rgsaddle is system-agnostic and unit-agnostic: surfaces supply energies, gradien
 - [C function index](https://omnipotentrpc.github.io/rgsaddle/reference/c-symbols.html): Complete C ABI symbol index for include/rgsaddle.h (`docs/orgmode/reference/c-symbols.org`)
 - [PAFI types](https://omnipotentrpc.github.io/rgsaddle/reference/pafi.html): Public PAFI configuration, result types, and the functions that connect them (`docs/orgmode/reference/pafi.org`)
 - [OH-TST types](https://omnipotentrpc.github.io/rgsaddle/reference/ohtst.html): Public OH-TST configuration and result types (`docs/orgmode/reference/ohtst.org`)
+- [Cyclic block factorization](https://omnipotentrpc.github.io/rgsaddle/explanation/cyclic-block.html): Rotation fallback, singular criterion, symmetric part, and residual norm of the cyclic block factor (`docs/orgmode/explanation/cyclic-block.org`)
+- [Cyclic block factor](https://omnipotentrpc.github.io/rgsaddle/reference/block-cyclic.html): Cyclic block-tridiagonal factor, inertia, and the solve residual (`docs/orgmode/reference/block-cyclic.org`)
 - [Contributing](https://omnipotentrpc.github.io/rgsaddle/contributing/index.html): Build, test, MSRV, Python stub, documentation, and release workflow (`docs/orgmode/contributing/index.org`)

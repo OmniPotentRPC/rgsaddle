@@ -130,6 +130,10 @@ required-features = ["lineb-oracle"]
 name = "band_scaling"
 harness = false
 
+[[bench]]
+name = "irc_mass"
+harness = false
+
 [profile.dev.package.faer]
 opt-level = 3
 
