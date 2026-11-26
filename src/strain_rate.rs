@@ -1247,7 +1247,11 @@ pub fn angular_scale_rad_s() -> f64 {
 /// Vineyard prefactor in Hz from positive mass-weighted Hessian eigenvalues
 /// in eV/(u Å²).
 ///
-/// Translations are already excluded and the saddle's unstable mode is left out.
+/// Translations are already excluded and the saddle's unstable mode is left
+/// out. `ν_i = ω_i / 2π` with `ω_i = sqrt(λ_i)` times `angular_scale_rad_s`,
+/// and the prefactor is `(∏ ν_min) / (∏ ν_sad)`. The minimum product must
+/// contain exactly one more mode than the saddle product, so the result has
+/// units of frequency.
 pub fn vineyard_prefactor_weighted(
     min_lambda: &[f64],
     sad_lambda: &[f64],
@@ -1257,9 +1261,9 @@ pub fn vineyard_prefactor_weighted(
             "Vineyard needs at least one positive minimum eigenvalue".into(),
         ));
     }
-    if min_lambda.len() < sad_lambda.len() {
+    if min_lambda.len() != sad_lambda.len() + 1 {
         return Err(SaddleError::Invalid(
-            "the saddle product is longer than the minimum product".into(),
+            "Vineyard products need exactly one missing saddle mode".into(),
         ));
     }
     let mut log_ratio = 0.0;

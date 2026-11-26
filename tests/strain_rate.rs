@@ -9,6 +9,7 @@ use rgsaddle::{
     CurvatureBound, ElasticDipole, LINEAR_FOLD_EV, SaddleError, SaddleSeed, SearchReason, Strain,
     StrainResponse, Trust, TrustPolicy, activation_volume, compliance_from_stiffness,
     cubic_rotations, rotation_x, split_translational_modes, vineyard_prefactor,
+    vineyard_prefactor_weighted,
 };
 
 fn det(h: [[f64; 3]; 3]) -> f64 {
@@ -511,6 +512,20 @@ fn vineyard_prefactor_has_one_factor_of_frequency() {
 fn vineyard_rejects_more_than_one_missing_saddle_mode() {
     let error = vineyard_prefactor(&[1.0, 2.0], &[], 1.0).unwrap_err();
     assert!(error.to_string().contains("exactly one"));
+}
+
+#[test]
+fn weighted_vineyard_needs_exactly_one_missing_saddle_mode() {
+    let too_many = vineyard_prefactor_weighted(&[1.0, 2.0], &[]).unwrap_err();
+    assert!(too_many.to_string().contains("exactly one"));
+    let equal = vineyard_prefactor_weighted(&[1.0], &[2.0]).unwrap_err();
+    assert!(equal.to_string().contains("exactly one"));
+    let longer_saddle = vineyard_prefactor_weighted(&[1.0], &[2.0, 3.0]).unwrap_err();
+    assert!(longer_saddle.to_string().contains("exactly one"));
+    let scale = rgsaddle::angular_scale_rad_s();
+    let got = vineyard_prefactor_weighted(&[4.0, 9.0], &[9.0]).unwrap();
+    let expected = scale * 2.0 / (2.0 * std::f64::consts::PI);
+    assert!((got - expected).abs() / expected < 1e-12);
 }
 
 #[test]
