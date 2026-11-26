@@ -16,10 +16,6 @@ if _SPEC is None or _SPEC.loader is None:
 render_llms = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(render_llms)
 
-# Org emphasis post-marker characters, from org-element's closing regexp:
-# whitespace, or one of ! " ' ) , - . : ; ? [ \ }
-_POST = frozenset("!\"'),-.:;?[\\}")
-_PRE = frozenset("-('\"{")
 _PUB_TYPE = re.compile(
     r"^pub (?:struct|enum|trait|type) ([A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
@@ -29,66 +25,6 @@ _CURVATURE = (
     "a finite non-negative rejected curvature",
     "When the restarts are spent and the rejected curvature is finite and non-negative",
 )
-
-
-def _space(char: str) -> bool:
-    return char.isspace()
-
-
-def _opens(text: str, index: int) -> bool:
-    if index + 1 >= len(text) or _space(text[index + 1]):
-        return False
-    if index == 0:
-        return True
-    prev = text[index - 1]
-    return _space(prev) or prev in _PRE
-
-
-def _post(text: str, index: int) -> bool:
-    if index + 1 >= len(text):
-        return True
-    char = text[index + 1]
-    return _space(char) or char in _POST
-
-
-def _mono_line(text: str) -> list[str]:
-    found: list[str] = []
-    index = 0
-    size = len(text)
-    while index < size:
-        if text[index] in "=~" and _opens(text, index):
-            mark = text[index]
-            close = None
-            for cand in range(index + 2, size):
-                if (
-                    text[cand] == mark
-                    and not _space(text[cand - 1])
-                    and _post(text, cand)
-                ):
-                    close = cand
-                    break
-            if close is not None:
-                found.append(text[index + 1 : close])
-                index = close + 1
-                continue
-        index += 1
-    return found
-
-
-def mono_contents(text: str) -> list[str]:
-    """Inner text of each Org =verbatim= and ~code~ span on one line.
-
-    The closer is the first marker preceded by non-whitespace and followed
-    by whitespace, punctuation, or the end of the line. The bytes between
-    the markers are the span. A table row is split into cells first, so the
-    end of a cell is a border. The separator is not punctuation.
-    """
-    if text.lstrip(" \t").startswith("|"):
-        found: list[str] = []
-        for cell in text.split("|"):
-            found.extend(_mono_line(cell))
-        return found
-    return _mono_line(text)
 
 
 def _pub_types(*paths: Path) -> set[str]:
@@ -169,28 +105,49 @@ def test_pafi_table_cells_close_at_the_separator() -> None:
         assert render_llms.clean_inline_org(lines[number - 1]) == expected
 
 
-@pytest.mark.thread_unsafe
-def test_every_org_mono_span_is_inline_code() -> None:
-    seen: list[str] = []
-    real = render_llms.clean_inline_org
+_FENCE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE = re.compile(r"`[^`]*`")
+_LATEX = re.compile(r"\\\(.*?\\\)|\\\[.*?\\\]", re.DOTALL)
+_SLASH = re.compile(r"=/=")
+_BESIDE = re.compile(r"(?:=`|`=)")
+_VERBATIM = re.compile(r"=[A-Za-z_][A-Za-z0-9_]*=")
+_STRAY = re.compile(r"\)=\s|[\"']=")
+_CMP = re.compile(r"[<>]`\s+\S*=")
 
-    def spy(text: str) -> str:
-        seen.append(text)
-        return real(text)
 
-    original = render_llms.clean_inline_org
-    render_llms.clean_inline_org = spy
-    try:
-        full = render_llms.render_llms_full_txt()
-    finally:
-        render_llms.clean_inline_org = original
-    missing: list[str] = []
-    for line in seen:
-        for content in mono_contents(line):
-            needle = f"`{content}`"
-            if needle not in full:
-                missing.append(content)
-    assert missing == []
+def _guide_problems(text: str) -> list[str]:
+    """Report broken verbatim left in rendered Markdown.
+
+    Fenced blocks are ignored. The checks read the finished text: a
+    slash join, an equals sign against a backtick, a comparison that
+    closed early, a tight ``=name=`` span outside inline code, or a
+    closer left after a quote or parenthesis.
+    """
+    body = _FENCE.sub("", text)
+    problems: list[str] = []
+    for number, line in enumerate(body.splitlines(), 1):
+        if _SLASH.search(line):
+            problems.append(f"{number}: collapsed slash span")
+        if _BESIDE.search(line):
+            problems.append(f"{number}: equals beside a backtick")
+        if _CMP.search(line):
+            problems.append(f"{number}: comparison split out of a code span")
+        prose = _LATEX.sub("", _INLINE.sub("", line))
+        match = _VERBATIM.search(prose)
+        if match is not None:
+            problems.append(f"{number}: verbatim left in prose ({match.group(0)})")
+        if _STRAY.search(prose):
+            problems.append(f"{number}: stray closer outside a code span")
+    return problems
+
+
+def test_rendered_guides_keep_verbatim_inside_code() -> None:
+    problems: list[str] = []
+    for name in ("llms-full.txt", "llms.txt"):
+        text = (_REPO / name).read_text(encoding="utf-8")
+        problems.extend(f"{name}:{item}" for item in _guide_problems(text))
+    assert problems == []
+    full = (_REPO / "llms-full.txt").read_text(encoding="utf-8")
     for clause in _CURVATURE:
         assert clause in full
 
