@@ -60,6 +60,71 @@ static rgsaddle_status_t surface_quad_counted(void *user,
   return surface_quad(user, req);
 }
 
+static rgsaddle_status_t surface_bowl(void *user, rgsaddle_surface_request_t *req) {
+  (void)user;
+  if (req->n_images != 1 || req->n_atoms != 1 || req->image != -1) {
+    return RGSADDLE_SHAPE;
+  }
+  const double *p = req->positions;
+  req->energies[0] = p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
+  for (int k = 0; k < 3; ++k) {
+    req->gradients[k] = 2.0 * p[k];
+  }
+  return RGSADDLE_OK;
+}
+
+/* A host loop capped on report.iteration, as in the rgsaddle_minmode_create
+ * example, stops at a stationary minimum: the step there leaves the atom in
+ * place and still counts. */
+static rgsaddle_status_t minmode_stationary_cap(void) {
+  rgsaddle_minmode_config_t cfg;
+  memset(&cfg, 0, sizeof cfg);
+  cfg.version.major = RGSADDLE_ABI_MAJOR;
+  cfg.version.minor = RGSADDLE_ABI_MINOR;
+  cfg.kind = RGSADDLE_MINMODE_DIMER;
+  cfg.method = RGSADDLE_METHOD_FIRE;
+  cfg.dr = 1e-3;
+  cfg.rotation_tol = 1e-4;
+  cfg.max_rotations = 20;
+  cfg.krylov_dim = 3;
+  cfg.force_tol = 1e-4;
+  /* No cap leaves the translation to the solver, which has no force to
+     follow at the minimum, so every step leaves the atom where it is. */
+  cfg.max_move = 0.0;
+  cfg.difference = RGSADDLE_DIFFERENCE_FORWARD;
+  const double x[3] = {0.0, 0.0, 0.0};
+  const double mode[3] = {1.0, 0.0, 0.0};
+  RgsaddleMinMode *mm = rgsaddle_minmode_create(&cfg, 1, x, mode);
+  if (!mm) {
+    return fail(RGSADDLE_SHAPE, "stationary minmode create");
+  }
+  const int64_t cap = 25;
+  rgsaddle_report_t rep;
+  memset(&rep, 0, sizeof rep);
+  int64_t calls = 0;
+  while (calls < 4 * cap) {
+    const rgsaddle_status_t st = rgsaddle_minmode_step(mm, surface_bowl, NULL, &rep);
+    calls += 1;
+    if (st != RGSADDLE_OK) {
+      rgsaddle_minmode_free(mm);
+      return fail(st, "stationary minmode step");
+    }
+    if (rep.status == RGSADDLE_STATUS_CONVERGED || rep.iteration >= cap) {
+      break;
+    }
+  }
+  double back[3];
+  rgsaddle_minmode_position(mm, back);
+  rgsaddle_minmode_free(mm);
+  if (rep.status == RGSADDLE_STATUS_CONVERGED || calls != cap || rep.iteration != cap ||
+      !(rep.curvature > 0.0) || fabs(back[0]) + fabs(back[1]) + fabs(back[2]) != 0.0) {
+    fprintf(stderr, "stationary cap status=%d calls=%lld iteration=%lld curvature=%g\n",
+            (int)rep.status, (long long)calls, (long long)rep.iteration, rep.curvature);
+    return fail(RGSADDLE_SOLVER, "minmode loop did not stop at its cap");
+  }
+  return RGSADDLE_OK;
+}
+
 /* One min-mode session kept across points: set_position with the
  * host's gradient and the previous mode as seed costs one evaluation. */
 static rgsaddle_status_t minmode_reuse(void) {
@@ -559,6 +624,10 @@ int main(void) {
   }
 
   st = minmode_reuse();
+  if (st != RGSADDLE_OK) {
+    return st;
+  }
+  st = minmode_stationary_cap();
   if (st != RGSADDLE_OK) {
     return st;
   }

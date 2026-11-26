@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-#define RGSADDLE_EXPECTED_ABI_MINOR 66u
+#define RGSADDLE_EXPECTED_ABI_MINOR 68u
 _Static_assert(RGSADDLE_ABI_MINOR == RGSADDLE_EXPECTED_ABI_MINOR, "ABI minor");
 _Static_assert(RGSADDLE_LINEB_LINEAR_SEED == (1u << 0), "lineb flag bit 0");
 _Static_assert(RGSADDLE_LINEB_ENDPOINT_CONVERGENCE == (1u << 1), "lineb flag bit 1");

@@ -299,7 +299,7 @@ For config minors 5 through 62 this field is read as given, so 0 disables the an
 From minor 63, 0 keeps the Rust default unless flag bit 0, =RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL=, is set; then 0 disables it.
 The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 63 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
-=RGSADDLE_ABI_MINOR= is 66.
+=RGSADDLE_ABI_MINOR= is 68.
 =rgsaddle_band_set_dynamic= (minor 65) sets or clears =DynamicNeb= on a band.
 =rgsaddle_dyneb_mask= (minor 65) applies that mask to a projected band.
 From minor 24, =rgsaddle_sella_saddle_set_symmetrized_ritz= sets =SellaSaddleConfig::symmetrized_ritz= from 0 or 1.
@@ -329,6 +329,7 @@ The feature macro =RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS= advertises
 modes. Each reports =-1= for a path-only or failed solve.
 
 From minor 60, =rgsaddle_band_set_refine= installs or clears the per-step L-BFGS refine stepper, and =rgsaddle_band_is_refining= reports whether the last first-order step used it. A host checks =rgsaddle_abi_version()= for minor 60 or newer. The worked example is =tests/band_refine.rs=.
+From minor 68, =rgsaddle_autoneb_run= grows an AutoNEB band to completion. =rgsaddle_autoneb_config_t= and =rgsaddle_autoneb_report_t= are the inputs and the result. =RGSADDLE_AUTONEB_CLIMB=, =RGSADDLE_AUTONEB_IDPP=, and =RGSADDLE_AUTONEB_KEEP_TRANSLATION= are the flag bits. The callback stays on the calling thread.
 The request flags are =RGSADDLE_REQ_ONE_IMAGE= (bit 0) and =RGSADDLE_REQ_CLIMBING_IMAGE= (bit 1).
 From a band config at minor 22, the refinement's one-image requests also set bit 1.
 Their =image= is then the climbing image's band index.
@@ -377,7 +378,7 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 | =rgsaddle.saddle_index= | Standalone point saddle-index certification on a callback surface, returning =SaddleIndex= (=certified=, =index=, =converged=, =curvatures=, =evaluations=, =total_evaluations=, =escapes=) |
 | =rgsaddle.reparametrize= | Equal-arc-length reparametrization of a path with =scheme="linear"= or ="not-a-knot"= (="spline"=) |
 | =rgsaddle._core= | Extension symbols: =ClaimSlot= (=__enter__=, =__exit__=), =MinMode= (=estimate=, =step=, =set_position=, =position=, =mode=, =saddle_index=, =set_saddle_check=), =SellaSaddle= (=step=, =position=), =version=, =project_band=, =dyneb_mask=, =halve_raised_energy=, =trust_update=, =RGSADDLE_FORCE_L2=, =RGSADDLE_FORCE_LINF=, =RGSADDLE_FORCE_MAX_ATOM=, =RGSADDLE_MINMODE_DIMER=, =RGSADDLE_MINMODE_LANCZOS=, =RGSADDLE_IRC_GS2=, =RGSADDLE_IRC_MOROKUMA=, =RGSADDLE_IRC_SELLA_SPHERE= |
-| =rgsaddle.ase.NEB=, =MinModeAtoms=, =Sella=, =saddle_index= | ASE drop-in wrappers for nudged elastic band (=interpolate=, =get_positions=, =set_positions=, =get_potential_energy=, =get_forces=, =saddle_index=), minimum-mode effective forces (=get_forces=), order-1 Sella optimization (=attach=, =run=), and saddle-index certification |
+| =rgsaddle.ase.NEB=, =AutoNEB=, =MinModeAtoms=, =Sella=, =saddle_index= | ASE drop-in wrappers for nudged elastic band (=interpolate=, =get_positions=, =set_positions=, =get_potential_energy=, =get_forces=, =saddle_index=), AutoNEB (=run= returns =AutoNEBReport= (=status=, =max_force=, =ci_index=, =surface_rows=, =n_images=, =iteration=, =positions=, =images=)), minimum-mode effective forces (=get_forces=), order-1 Sella optimization (=attach=, =run=), and saddle-index certification |
 | =rgsaddle.connect= | Run-to-completion double-ended search. =surface(x)= is the one-image =(energy, gradient)= callback. =ConnectReport= holds =position=, =energy=, =force_norm=, =kind=, =hessian_index=, and =evaluations= |
 | =rgsaddle.lineb_solve= | Fixed-energy LI-NEB path and optional harmonic rate. =positions= is =(n_images, 3N)=, =atom_masses= one mass per atom, =molecular= selects coordinate expansion or molecule alignment, =beads=0= leaves =log_rate_over_reactant= as NaN. =LinebResult= holds =positions=, =action=, half periods, temperatures, call tallies, and the log rate |
 | =rgsaddle.Band= | Stepping NEB, simplified-string (=string=True=, =reparametrization=), and free-end adaptive NEB session. =step=, =run=, =positions=, =set_positions=, =evaluation=, =set_string=, =set_free_end=, =target_energy_residual=, =free_end_cuts=, =set_fixed_atoms=, =saddle_index=, =set_saddle_check=, =restart=, =reset= |
@@ -405,6 +406,7 @@ The importable package is =rgsaddle=. =rgsaddle._core= is the nanobind extension
 - =tests/softmode_seeding.rs=: soft-mode-subspace-first direction seeding (=soft_mode_then_full_directions=, =spectral_gap_rank=) against isotropic random starts on coupled wells and Müller-Brown.
 - =tests/makri_vacancy.rs= — Makri, Ortner, and Kermode (2019) Table II 107-atom Morse Cu fcc vacancy counts for ODE12r and ODE12r-Exp, plus simplified string (spline, linear, and climbing spline) barrier parity with NEB
 - =tests/autoneb.rs= — ASE AutoNEB decisions and the Müller-Brown insertion sequence. =tests/autoneb_gate.rs= hashes the insertion list and the trajectory at 1, 2, 3 and 8 threads, and an ignored release run compares AutoNEB with CI-NEB at one force-call budget. Strong scaling of a full AutoNEB run is an ignored test in the crate.
+- =tests/autoneb_abi.rs= runs =tests/c/autoneb_abi.c=: =rgsaddle_autoneb_run= on a double well reports =status= 1 with =max_force= under the stop and a repeatable =iteration= count, reports =status= 0 and =iteration= equal to the step budget when the climb is cut short, and returns =RGSADDLE_INVALID_PARAMETER=, =RGSADDLE_NULL_SURFACE=, =RGSADDLE_SHAPE=, =RGSADDLE_NON_FINITE=, =RGSADDLE_ABI_MISMATCH=, and =RGSADDLE_SURFACE_FAILED= for the matching bad inputs.
 - =tests/minmode_saddle.rs= — dimer / Lanczos
 - =tests/band_workspace.rs=: a warm band step allocates as often at 13
   images as at 5, for five spring, projection and optimizer settings,

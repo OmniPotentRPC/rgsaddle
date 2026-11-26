@@ -1,0 +1,1 @@
+~AutoNebReport::iteration~, the ~iteration~ of ~rgsaddle_autoneb_report_t~, and ~AutoNEBReport.iteration~ count the steps of the last stage alone. A climb that keeps the window of the stage before no longer adds that stage's steps, so a one-step climb reports 1.

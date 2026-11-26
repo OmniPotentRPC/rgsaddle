@@ -1,0 +1,1 @@
+~rgsaddle.ase.AutoNEB~ checks the stored images the way ASE's ~NEB~ does, so endpoints that differ in atom count, atomic numbers, ~pbc~, or periodic cell raise instead of returning a band built from the first endpoint. The finished endpoints keep their own ~Atoms~ records.
