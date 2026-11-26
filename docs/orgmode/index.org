@@ -75,6 +75,7 @@ while report.status != BandStatus::Converged {
    howto/minmode
    howto/art
    howto/indexk
+   howto/landscape
    howto/solid-dimer
    howto/ssneb
    howto/strain-rate
