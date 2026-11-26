@@ -1099,6 +1099,10 @@ static int test_abi70_vineyard_contracts(void) {
   CHECK(rgsaddle_vineyard_fd(&config, 0, x_min, x_saddle, masses,
                              vineyard_surface, NULL, &report) == RGSADDLE_SHAPE,
         "vineyard rejects zero atoms");
+  CHECK(rgsaddle_vineyard_fd(&config, 9223372036854775807LL, x_min, x_saddle,
+                             masses, vineyard_surface, NULL, &report) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "vineyard rejects an overflowing coordinate count");
   CHECK(rgsaddle_vineyard_fd(&config, 1, x_min, x_saddle, masses, NULL, NULL,
                              &report) == RGSADDLE_NULL_SURFACE,
         "vineyard rejects null surface");

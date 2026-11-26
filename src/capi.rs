@@ -2502,7 +2502,9 @@ pub unsafe extern "C" fn rgsaddle_vineyard_fd(
             .with_negative_tol(raw.negative_tol)
     };
     let n = n_atoms as usize;
-    let dof = 3 * n;
+    let Some(dof) = n.checked_mul(3) else {
+        return RGSADDLE_INVALID_PARAMETER;
+    };
     let x_min_slice = unsafe { slice::from_raw_parts(x_min, dof) };
     let x_sad_slice = unsafe { slice::from_raw_parts(x_saddle, dof) };
     let masses_slice = unsafe { slice::from_raw_parts(atom_masses, n) };
