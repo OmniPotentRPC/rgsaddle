@@ -76,6 +76,7 @@ while report.status != BandStatus::Converged {
    howto/art
    howto/direction-cover
    howto/indexk
+   howto/landscape
    howto/solid-dimer
    howto/ssneb
    howto/strain-rate

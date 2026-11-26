@@ -64,6 +64,8 @@ An index above 1 at a converged climbing image says the band stopped on a saddle
 
 The index-k step has no Python session name. It is =rgsaddle_indexk_step= in the C ABI and =rgsaddle::IndexK= in the C++ header.
 
+=Landscape= searches downward from a critical point of length =3N=. =modes= is shape =(3N, k)= or omitted. The opening controls are =push= (0.1), =duplicate_distance= (0.001), =max_nodes= (64), =max_evaluations= (100000), =max_steps= (2000), and =force_tol= and =relax_force_tol= (0.001). =Landscape.run= takes the surface callback and an optional =hessian=. It returns a =PathwayMap= whose =nodes= are =CriticalPoint= values and whose =edges= are =LandscapeEdge= values. =hessian= matches =rgsaddle_hessian_at_fn=: it receives the geometry and the vector. Omit it and the search estimates the action from the surface. A node has =position=, =energy=, =index=, =curvatures=, and =evaluations=. An edge has =parent=, =child=, =direction=, =sign=, and =evaluations=. The map's =evaluations= counts every force evaluation. A node or evaluation limit raises =ValueError= and returns no pathway. The surface callback is the one-image =(1, 3N)= callback of =saddle_index=.
+
 * Thread safety
 Immutable values, such as the enum members, are shared freely. =SurfaceAdapter= is a mutable session. Each call claims an atomic flag for the whole call and drops it when the call returns, including when the calculator raises. =raw_forces= is assigned before that drop. Do not call the adapter again from inside its own calculator.
 

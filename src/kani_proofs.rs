@@ -87,13 +87,15 @@ mod translated_bits {
 #[cfg(all(kani, feature = "capi"))]
 mod abi_guards {
     use crate::capi::{
-        RGSADDLE_INVALID_PARAMETER, rgsaddle_band_create, rgsaddle_band_create_solid,
-        rgsaddle_cap_max_abs, rgsaddle_constraints_create, rgsaddle_hessian_bofill,
-        rgsaddle_hessian_powell, rgsaddle_index1_create, rgsaddle_internal_pes_create,
+        RGSADDLE_INVALID_PARAMETER, RGSADDLE_NULL_REPORT, RGSADDLE_NULL_SESSION,
+        rgsaddle_band_create, rgsaddle_band_create_solid, rgsaddle_cap_max_abs,
+        rgsaddle_constraints_create, rgsaddle_hessian_bofill, rgsaddle_hessian_powell,
+        rgsaddle_index1_create, rgsaddle_indexk_step_at, rgsaddle_internal_pes_create,
         rgsaddle_internal_pes_create_dummies, rgsaddle_internal_pes_create_from_find,
-        rgsaddle_irc_create, rgsaddle_irc_create_from_surface, rgsaddle_minmode_create,
-        rgsaddle_nichols_step, rgsaddle_pes_create, rgsaddle_place_perp_dummy, rgsaddle_prfo_step,
-        rgsaddle_samd_create, rgsaddle_sella_min_create, rgsaddle_sella_min_create_cell,
+        rgsaddle_irc_create, rgsaddle_irc_create_from_surface, rgsaddle_landscape_create,
+        rgsaddle_minmode_create, rgsaddle_nichols_step, rgsaddle_pes_create,
+        rgsaddle_place_perp_dummy, rgsaddle_prfo_step, rgsaddle_samd_create,
+        rgsaddle_sella_min_create, rgsaddle_sella_min_create_cell,
         rgsaddle_sella_min_create_cell_internal, rgsaddle_sella_min_create_internal,
         rgsaddle_sella_min_create_on, rgsaddle_sella_saddle_create,
         rgsaddle_sella_saddle_create_cell, rgsaddle_sella_saddle_create_cell_internal,
@@ -622,5 +624,31 @@ mod abi_guards {
             rgsaddle_place_perp_dummy(i64::from(n_atoms), dangling(), 0, 1, dangling_mut())
         };
         assert_eq!(status_short, RGSADDLE_INVALID_PARAMETER);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn landscape_create_null_and_short() {
+        let n = length_upto_4();
+        let rejected = unsafe { rgsaddle_landscape_create(null(), n, null(), null(), 0) };
+        assert!(rejected.is_null());
+        let n_atoms = short_nonpositive();
+        let rejected_short =
+            unsafe { rgsaddle_landscape_create(dangling(), n_atoms, dangling(), dangling(), 0) };
+        assert!(rejected_short.is_null());
+    }
+
+    /// `rgsaddle_indexk_step_at` has no length. A null session returns
+    /// before the report is read. A dangling session with a null report
+    /// returns before the session is read. Unwind 1: neither call loops.
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn indexk_step_at_null_and_short() {
+        let status =
+            unsafe { rgsaddle_indexk_step_at(null_mut(), None, None, null_mut(), null_mut()) };
+        assert_eq!(status, RGSADDLE_NULL_SESSION);
+        let status_short =
+            unsafe { rgsaddle_indexk_step_at(dangling_mut(), None, None, null_mut(), null_mut()) };
+        assert_eq!(status_short, RGSADDLE_NULL_REPORT);
     }
 }

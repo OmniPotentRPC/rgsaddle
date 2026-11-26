@@ -223,7 +223,7 @@ impl Default for ArtNConfig {
     }
 }
 
-fn validate_artn(kind: MinModeKind, artn: &ArtNConfig) -> Result<(), SaddleError> {
+pub(crate) fn validate_artn(kind: MinModeKind, artn: &ArtNConfig) -> Result<(), SaddleError> {
     if kind != MinModeKind::Lanczos {
         return Err(SaddleError::Invalid(
             "ARTn requires the Lanczos minimum-mode estimator".into(),

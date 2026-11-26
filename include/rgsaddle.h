@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 72u
+#define RGSADDLE_ABI_MINOR 70u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -165,7 +165,14 @@ typedef enum {
    * A geodesic interpolation used all of its sweeps with an image still
    * moving. The outputs hold the last iterate. ABI minor 64.
    */
-  RGSADDLE_NOT_CONVERGED = -16
+  RGSADDLE_NOT_CONVERGED = -16,
+  /**
+   * A solution-landscape search met its node limit or its force-evaluation
+   * limit. The report's counts are the nodes already accepted and the
+   * evaluations already performed. Node and edge queries have no pathway.
+   * ABI minor 69.
+   */
+  RGSADDLE_LANDSCAPE_BOUND = -17
 } rgsaddle_status_t;
 
 typedef enum {
@@ -908,6 +915,17 @@ typedef struct {
 
 typedef int (*rgsaddle_hessian_fn)(void *user, int64_t n_dof,
                                   const double *vector, double *action);
+/**
+ * Geometry-aware Hessian action, ABI minor 69. The callback writes the
+ * action at `position` on `vector` into `action`. `position`, `vector`
+ * and `action` each hold `n_dof` doubles, and `action` does not alias
+ * the inputs. Return 0 on success and a non-zero code on failure. Do not
+ * unwind. Used by `rgsaddle_indexk_step_at` and `rgsaddle_landscape_run`.
+ * `rgsaddle_hessian_fn` keeps its original signature.
+ */
+typedef int (*rgsaddle_hessian_at_fn)(void *user, int64_t n_dof,
+                                      const double *position, const double *vector,
+                                      double *action);
 rgsaddle_status_t rgsaddle_kappa_config_default(rgsaddle_kappa_config_t *config);
 rgsaddle_status_t rgsaddle_minmode_set_kappa(RgsaddleMinMode *session,
     const rgsaddle_kappa_config_t *config);
@@ -1815,7 +1833,7 @@ typedef struct {
 /**
  * Create an index-k session. position holds 3 * n_atoms doubles.
  * modes is row-major (3 * n_atoms) by k, or NULL for the coordinate seed.
- * Returns NULL on an unknown major, a non-positive k, or a bad shape.
+ * Returns NULL on an unknown major, nonzero reserved flags, a non-positive k, or a bad shape.
  */
 RgsaddleIndexK *rgsaddle_indexk_create(const rgsaddle_indexk_config_t *config,
                                        int64_t n_atoms, const double *position,
@@ -1831,6 +1849,16 @@ rgsaddle_status_t rgsaddle_indexk_step(RgsaddleIndexK *session,
                                        rgsaddle_surface_fn surface,
                                        rgsaddle_hessian_fn hessian, void *user,
                                        rgsaddle_report_t *out);
+
+/**
+ * rgsaddle_indexk_step with a geometry-aware Hessian action, ABI minor 69.
+ * hessian is called with the geometry at which the action is requested.
+ * NULL estimates the action from surface.
+ */
+rgsaddle_status_t rgsaddle_indexk_step_at(RgsaddleIndexK *session,
+                                          rgsaddle_surface_fn surface,
+                                          rgsaddle_hessian_at_fn hessian, void *user,
+                                          rgsaddle_report_t *out);
 
 rgsaddle_status_t rgsaddle_indexk_position(const RgsaddleIndexK *session,
                                            double *out);
@@ -2381,6 +2409,91 @@ rgsaddle_status_t rgsaddle_lineb_solve_counted_rate(const rgsaddle_lineb_config_
                                        rgsaddle_lineb_counts_t *counts, int64_t *negative_modes, int64_t *modes,
                                        rgsaddle_lineb_orbit_t *orbit, rgsaddle_lineb_turning_t *turning,
                                        const double *image_hessian_step, rgsaddle_lineb_rate_diagnostics_t *rate_diagnostics);
+/**
+ * Downward solution-landscape search, ABI minor 69.
+ * The parent is certified by the saddle-index check, each unstable
+ * direction is pushed by `push`, and an index-(k-1) minimum-mode leg
+ * follows it. A minimum is an rgmin solve on the true gradient.
+ * `cell` is a row-major 3x3, or NULL. `method` is rgsaddle_minmode_t.
+ */
+typedef struct RgsaddleLandscape RgsaddleLandscape;
+
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  double duplicate_distance;
+  double push;
+  int64_t max_nodes;
+  int64_t max_evaluations;
+  int64_t max_steps;
+  double force_tol;
+  double relax_force_tol;
+  double max_move;
+  double max_atom_move;
+  double initial_step;
+  double dr;
+  double rotation_tol;
+  double residual_tol;
+  int64_t max_rotations;
+  int32_t max_block_iterations;
+  int32_t method;
+  const double *cell;
+} rgsaddle_landscape_config_t;
+
+typedef struct {
+  rgsaddle_version_t version;
+  uint64_t flags;
+  int64_t n_nodes;
+  int64_t n_edges;
+  /** 0 when the search finished, 1 for the node limit, 2 for the evaluation limit. */
+  int32_t bound;
+  int64_t evaluations;
+} rgsaddle_landscape_report_t;
+
+/** Write the Rust defaults. cell is NULL. */
+rgsaddle_status_t rgsaddle_landscape_config_default(rgsaddle_landscape_config_t *out);
+
+/**
+ * Open a search. position holds 3 * n_atoms doubles. modes is NULL when
+ * k is 0, otherwise row-major (3 * n_atoms) by k. Returns NULL when the
+ * config or the shape is refused.
+ */
+RgsaddleLandscape *rgsaddle_landscape_create(const rgsaddle_landscape_config_t *config,
+                                             int64_t n_atoms, const double *position,
+                                             const double *modes, int32_t k);
+
+/**
+ * Run the search. hessian NULL estimates each action from surface.
+ * A non-NULL hessian receives the geometry of each request.
+ * On RGSADDLE_LANDSCAPE_BOUND the report holds the accepted node count
+ * and the evaluations, n_edges is 0, and no pathway is stored.
+ */
+rgsaddle_status_t rgsaddle_landscape_run(RgsaddleLandscape *session,
+                                         rgsaddle_surface_fn surface,
+                                         rgsaddle_hessian_at_fn hessian, void *user,
+                                         rgsaddle_landscape_report_t *out);
+
+/**
+ * Read one node. curvatures NULL queries n_curvatures. A short buffer
+ * returns RGSADDLE_SHAPE. RGSADDLE_NO_EVALUATION before a stored pathway.
+ */
+rgsaddle_status_t rgsaddle_landscape_node(const RgsaddleLandscape *session, int64_t node,
+                                          double *position, double *energy, int32_t *index,
+                                          double *curvatures, int32_t curvature_capacity,
+                                          int32_t *n_curvatures, int64_t *evaluations);
+
+/** Unstable modes, row-major, 3 * n_atoms by the saddle index. modes NULL queries n_columns.
+ * A node with no columns leaves a non-NULL modes pointer unread.
+ */
+rgsaddle_status_t rgsaddle_landscape_modes(const RgsaddleLandscape *session, int64_t node,
+                                           double *modes, int32_t *n_columns);
+
+/** One downward edge. */
+rgsaddle_status_t rgsaddle_landscape_edge(const RgsaddleLandscape *session, int64_t edge,
+                                          int64_t *parent, int64_t *child, int32_t *direction,
+                                          int32_t *sign, int64_t *evaluations);
+
+void rgsaddle_landscape_free(RgsaddleLandscape *session);
 
 /** Refine stepper of rgsaddle_band_set_refine, ABI minor 60. */
 typedef enum {
