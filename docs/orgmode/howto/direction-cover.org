@@ -6,7 +6,7 @@
 Nothing here builds a Hessian. The inputs are the minimum, an optional per-atom active mask, a =u64= seed, a =DirectionCoverConfig= and a =CoverBudget=. Bad input returns =SaddleError=; nothing is clamped or replaced.
 
 #+begin_export rst
-:cite:`xuAdaptiveKineticMonte2008,pedersenEfficientSamplingSaddle2011,belandKineticActivationRelaxation2015,plasenciaImprovedMinimumMode2017,quappGradientOnlyAlgorithm1996,quappSearchingSaddlePoints1998,barkemaEventBasedRelaxation1996,malekFindingSaddlePoints2000,henkelmanDimerMethodFinding1999,xiaoBasinConstrainedKappa2014,jonesEfficientGlobalOptimization1998,goodPopulationFrequenciesSpecies1953`
+:cite:`xuAdaptiveKineticMonte2008,pedersenEfficientSamplingSaddle2011,belandKineticActivationRelaxation2015,plasenciaImprovedMinimumMode2017,quappGradientOnlyAlgorithm1996,quappSearchingSaddlePoints1998,barkemaEventBasedRelaxation1996,malekDynamicsLennardJones2000,henkelmanDimerMethodFinding1999,xiaoBasinConstrainedKappa2014,jonesEfficientGlobalOptimization1998,goodPopulationFrequenciesSpecies1953`
 #+end_export
 
 * Run a budget of arms
