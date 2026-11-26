@@ -65,14 +65,15 @@ impl ForceGate {
 
     /// Reduce `g` (a gradient; same magnitude as `-F`) to the gate scalar.
     ///
-    /// `g` has length `3 N`, atom-major, in eV/Angstrom. The result is
-    /// nonnegative and in the same unit. A NaN component is not rejected
-    /// here, and [`ForceGate::MaxForceOnAtom`] skips an atom whose norm is
-    /// NaN, so check the force evaluation for finiteness before comparing
-    /// the result with a tolerance. When `g` has fewer than three entries,
-    /// [`ForceGate::MaxForceOnAtom`] falls back to the max absolute
-    /// component; trailing entries of a length that is not a multiple of
-    /// three are ignored by that gate.
+    /// `g` has length `3 N`, atom-major, in eV/Angstrom. A finite result is
+    /// nonnegative and in the same unit. [`ForceGate::MaxForceOnAtom`] skips
+    /// an atom whose norm is NaN when another atom has a positive finite
+    /// norm. When a NaN atom is present and every finite atom norm is zero,
+    /// the result is NaN, so an all-NaN gradient does not report zero. When
+    /// `g` has fewer than three entries, the gate uses the max absolute
+    /// component, and a non-finite component yields infinity. Trailing
+    /// entries of a length that is not a multiple of three are ignored by
+    /// the per-atom gate.
     ///
     /// # Examples
     ///
@@ -99,18 +100,22 @@ fn max_force_on_atom(g: ArrayView1<f64>) -> f64 {
     if g.len() < 3 {
         return nrminf(g);
     }
-    let mut m = 0.0;
-    let n = g.len() / 3;
-    for i in 0..n {
-        let fx = g[3 * i];
-        let fy = g[3 * i + 1];
-        let fz = g[3 * i + 2];
-        let nrm = (fx * fx + fy * fy + fz * fz).sqrt();
-        if nrm > m {
-            m = nrm;
+    let mut max = 0.0;
+    let mut saw_nan = false;
+    let atoms = g.len() / 3;
+    for atom in 0..atoms {
+        let base = 3 * atom;
+        let norm =
+            (g[base] * g[base] + g[base + 1] * g[base + 1] + g[base + 2] * g[base + 2]).sqrt();
+        if norm.is_nan() {
+            saw_nan = true;
+            continue;
+        }
+        if norm > max {
+            max = norm;
         }
     }
-    m
+    if saw_nan && max <= 0.0 { f64::NAN } else { max }
 }
 
 #[cfg(test)]
@@ -132,5 +137,15 @@ mod tests {
         assert_eq!(ForceGate::try_from_abi(2), Some(ForceGate::MaxForceOnAtom));
         assert_eq!(ForceGate::LinfNorm.to_abi(), 1);
         assert_eq!(ForceGate::try_from_abi(99), None);
+    }
+
+    #[test]
+    fn max_force_on_atom_does_not_treat_nan_as_zero() {
+        let all_nan = array![f64::NAN, f64::NAN, f64::NAN];
+        assert!(ForceGate::MaxForceOnAtom.value(all_nan.view()).is_nan());
+        let quiet_nan = array![0.0, 0.0, 0.0, f64::NAN, 0.0, 0.0];
+        assert!(ForceGate::MaxForceOnAtom.value(quiet_nan.view()).is_nan());
+        let mixed = array![3.0, 4.0, 0.0, f64::NAN, 0.0, 0.0];
+        assert_eq!(ForceGate::MaxForceOnAtom.value(mixed.view()), 5.0);
     }
 }

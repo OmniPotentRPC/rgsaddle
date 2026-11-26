@@ -233,6 +233,9 @@ A host that climbs with its own optimizer keeps one session for the whole search
 ## Index-k minimum mode
 `indexk_step` and `IndexKSession` reflect the force in the k lowest modes and take one translator step. `k ` 1= is the dimer or Lanczos step, bit for bit. The block solver is LOBPCG or block Lanczos. See `howto/indexk`. From C, ABI minor 37, the names are `rgsaddle_indexk_*` and `rgsaddle_reflect_force`.
 
+## Solution landscape
+`LandscapeSession` pushes a certified saddle along each unstable eigenvector and follows index-(k-1) minimum-mode dynamics down to minima. The result is a `PathwayMap`. See `howto/landscape`. From C, ABI minor 69, the names are `rgsaddle_landscape_*`. Python is `Landscape`.
+
 ## Index-1 Newton
 `Index1Session` takes a restricted-step partitioned rational function optimization (RFO) step on a dense Hessian and updates it with Powell or Bofill. Pass an initial Hessian, or leave it empty and the first step builds one by central differences. `Index1Config` is non-exhaustive. `with_sparse_pattern` builds that seed from a distance-2 colouring instead. The flag stays off unless set. The trust radius is the Euclidean bound on the Cartesian step. See [the sparse Hessian how-to](howto/sparse-hessian.html).
 
@@ -279,6 +282,7 @@ The table below lists the main types.
 | `ArtSession`                   | ART nouveau in eight persisted phases: masked host seed, perpendicular relaxation, Lanczos, lowest-mode climb, index-1 certificate, push both ways, unconstrained quench, reversibility. The climb checks curvature and consecutive-mode overlap, recovers the carried mode or restarts from the last accepted index-1 point. When recovery is exhausted it finishes as `ArtStatus::LostCurvature` if the rejected curvature is finite and non-negative and returns `SaddleError::ArtIndexOneLost` otherwise. `run_events` marks duplicate saddles. `ArtStatus::Reverted` is not a completed exit. `force_calls` is the bounded recent window; `force_call_count` is the total. Non-exhaustive `ArtConfig` and `ArtOutcome` |
 | `DirectionCover`               | Signed per-atom direction cover and arm picker for saddle searches from one minimum. Each active atom is its own centre with an even signed cover of `cover_points` on its sphere and an optional Gaussian kick on neighbours within `kick_radius`. The climb is `ArtSession`. `run`, or `suggest`, `run_arm` and `record` for a host loop. `coverage` is the `CoverageReport`: exact covering radius per centre, per arm records, distinct saddles against draws, frequency counts, and the next arm with its score. No Hessian. Non-exhaustive `DirectionCoverConfig` and `CoverBudget` |
 | `IndexKSession`                | Index-k minimum-mode step. `k ` 1= is `MinModeSession`. `indexk_step` is one shot. `reflect_force` and `translated_force` are the subspace maps |
+| `LandscapeSession`             | Downward pathway map. `PathwayMap` of `CriticalPoint` nodes and `LandscapeEdge` connections. `LandscapeConfig` bounds the nodes and the force evaluations. `LandscapeBoundKind` names the limit `SaddleError::LandscapeBound` reports |
 | `SolidDimer`                   | That search on atoms plus Jacobian-scaled cell strain. `CellMask::frozen` is the fixed-cell dimer. `stress` and `elastic_dipole` are `σ` and `V σ`. `SolidDimerConfig`, `IndexCheck`, `StressCheck`, `SolidDimerReport` and `IndexReport` are non-exhaustive |
 | `VineyardIndexReport`          | The `IndexReport` of a certified `minimum` and `saddle`, returned by `certify_vineyard_pair`. The function needs each point stationary to a force tolerance, a minimum with no projected negative mode, a saddle with exactly one, and `IndexCheck::lowest` of at least two. Non-exhaustive |
 | `VineyardIndexError`           | Why a pair is not Vineyard-ready: `Evaluation`, `MinimumForce`, `SaddleForce`, `Minimum` or `Saddle`, the last two with the lowest projected spectrum. Non-exhaustive |
@@ -371,6 +375,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `io` | Types: `ConImage`, `ConSpecies`, `MolecularFrame`. Functions: `frame_from_con`, `frame_from_con_nth`, `frames_from_con`, `store_band`, `write_band`, `write_restart` |
 | `irc` | Types: `IrcConfig`, `IrcDirection`, `IrcKind`, `IrcReport`, `IrcSession` |
 | `kappa` | Types: `KappaDimerConfig`, `KappaDimerForce`. Functions: `kappa_dimer_force` |
+| `landscape` | Types: `CriticalPoint`, `LandscapeBoundKind`, `LandscapeConfig`, `LandscapeEdge`, `LandscapeSession`, `PathwayMap`. Constants: `DEFAULT_DUPLICATE_DISTANCE`, `DEFAULT_LANDSCAPE_MAX_EVALUATIONS`, `DEFAULT_LANDSCAPE_MAX_NODES`, `DEFAULT_LANDSCAPE_MAX_STEPS`, `DEFAULT_LANDSCAPE_PUSH` |
 | `lammps` | Types: `LammpsHyperplaneSampler`, `LammpsSamplerConfig`, `LammpsSystem`, `LammpsThermodynamicReference`, `LammpsThermostatKind`, `LammpsThermostatRecord` |
 | `lineb` | Types: `Continuation`, `HqtstRate`, `LinebCalls`, `LinebConfig`, `LinebPath`, `LinebReport`, `LinebSession`, `LinebStatus`, `Masses`. Functions: `continue_from_mep`, `continue_from_mep_with_observer`, `continue_from_path_with_observer`, `hqtst_rate`, `hqtst_rate_interpolated_hessian` |
 | `linalg` | Types: `NumericalHessian`. Functions: `hessian_vec_sign`, `lift_through`, `modified_gram_schmidt`, `numerical_hvp`, `numerical_hvp_on`, `numerical_hvp_proj`, `project_hvp`, `project_through`, `retract_hvp`, `symmetrize_vt_av`, `transport_hvp` |
@@ -399,7 +404,7 @@ Every public module exported by `src/lib.rs`, with its public types, free functi
 | `restricted` | Types: `InternalWeights`, `MaxInternalStep`, `RestrictedAtomicStep`, `RestrictedKind`, `TrustRegion`. Functions: `cons_max`, `mis_clip`, `pack_weights`, `ras_cons`, `weights_for_equalities`, `weights_for_equalities_with`. Constants: `RAS_SYNONYMS`, `TRUST_SYNONYMS` |
 | `rfo` | Types: `RationalFunctionOptimization`. Functions: `rfo_stepper`. Constants: `SYNONYMS` |
 | `rtr` | Types: `BandForces`, `BandRtr`, `RtrConfig`, `RtrRadius`, `RtrReport`, `TcgResult`, `TcgStop`. Functions: `band_forces`, `reparametrize_equal_arc`, `reparametrize_equal_arc_in_cell`, `truncated_cg` |
-| `saddle_index` | Types: `SaddleEscape`, `SaddleIndex`, `SaddleIndexCheck`. Functions: `saddle_index` |
+| `saddle_index` | Types: `SaddleEscape`, `SaddleIndex`, `SaddleIndexCheck`. Functions: `saddle_index`. Constants: `NEGATIVE_CURVATURE_TOL` |
 | `samd` | Types: `SamdConfig`, `SamdReport`, `SamdSession`, `VelocitySofteningConfig`, `VelocitySofteningReport`. Functions: `project_velocity`, `retract_samd`, `soften_velocity_on`, `t_exp`, `t_linear`, `transport_velocity`, `verlet_increment` |
 | `seed_direction` | Types: `ModeSweepDirectionPlan`, `SoftModeDirectionPlan`. Functions: `hessian_mode_sweep_directions`, `mode_sweep_schedule`, `soft_mode_then_full_directions`, `spectral_gap_rank` |
 | `sella_min` | Types: `SellaMinConfig`, `SellaMinReport`, `SellaMinSession` |
@@ -468,6 +473,7 @@ Every public configuration struct, its public fields, and the corresponding chai
 | `LammpsSamplerConfig` | `excluded_modes` (`with_excluded_modes`), `friction_per_ps` (`with_friction_per_ps`), `library_path` (`with_library_path`), `thermodynamic_reference` (`with_thermodynamic_reference`), `thermostat` (`with_thermostat`), `time_step_ps` (`with_time_step_ps`) |
 | `LammpsSystem` | `atomic_numbers` (`with_atomic_numbers`), `box_matrix` (`with_box_matrix`), `config_bytes` (`with_config_bytes`), `masses` (`with_masses`), `positions` (`with_positions`) |
 | `LammpsThermodynamicReference` | `energy`, `gradient`, `hessian`, `point` (`LammpsThermodynamicReference::new`) |
+| `LandscapeConfig` | `cell` (`with_cell`), `certificate` (`with_certificate`), `duplicate_distance` (`with_duplicate_distance`), `force_gate` (`with_force_gate`), `max_evaluations` (`with_max_evaluations`), `max_nodes` (`with_max_nodes`), `max_steps` (`with_max_steps`), `push` (`with_push`), `relax` (`with_relax`), `search` (`with_search`) |
 | `LineNebConfig` | `endpoint_below_energy` (`with_endpoint_below_energy`), `endpoint_kappa` (`with_endpoint_kappa`), `energy` (`with_energy`), `force_tol` (`with_force_tol`), `masses` (`with_masses`), `reduced_planck` (`with_reduced_planck`), `spring_k` (`with_spring_k`), `time_step` (`with_time_step`) |
 | `LangevinConfig` | `blocks` (`with_blocks`), `burn_in` (`with_burn_in`), `control` (`with_control`), `friction` (`with_friction`), `hold_excluded` (`with_hold_excluded`), `integrator` (`with_integrator`), `records` (`with_records`), `region` (`with_region`), `retain` (`with_retain`), `seed` (`with_seed`), `stride` (`with_stride`), `thermal` (`with_thermal`), `time_step` (`with_time_step`) |
 | `LinebConfig` | `boltzmann` (`with_boltzmann`), `endpoint_scale` (`with_endpoint_scale`), `gradient_end_tangents` (`with_gradient_end_tangents`), `hbar` (`with_hbar`), `max_move` (`with_max_move`), `method` (`with_method`), `opt_tol` (`with_opt_tol`), `perp_tol` (`with_perp_tol`), `quadrature_pairs` (`with_quadrature_pairs`), `spring` (`with_spring`), `time_step` (`with_time_step`), `turning_width` (`with_turning_width`) |
@@ -545,7 +551,7 @@ For config minors 5 through 62 this field is read as given, so 0 disables the an
 From minor 63, 0 keeps the Rust default unless flag bit 0, `RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL`, is set; then 0 disables it.
 The Rust default is five degrees. With an explicit 0 (legacy minors, or minor 63 with the explicit flag) the stop is off.
 Both fields are read only from a config whose version minor is 5 or newer.
-`RGSADDLE_ABI_MINOR` is 68.
+`RGSADDLE_ABI_MINOR` is 69.
 `rgsaddle_band_set_dynamic` (minor 65) sets or clears `DynamicNeb` on a band.
 `rgsaddle_dyneb_mask` (minor 65) applies that mask to a projected band.
 From minor 24, `rgsaddle_sella_saddle_set_symmetrized_ritz` sets `SellaSaddleConfig::symmetrized_ritz` from 0 or 1.
@@ -583,6 +589,7 @@ Their `image` is then the climbing image's band index.
 It takes a row-major cell or NULL.
 From minor 64, `rgsaddle_geodesic_config_default`, `rgsaddle_geodesic_path`, and `rgsaddle_geodesic_morse` interpolate a path in a redundant coordinate chart (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), doi:10.1063/1.5090303). `rgsaddle_geodesic_path` takes a host chart. `rgsaddle_geodesic_morse` uses Eq. (7) with alpha 1.7 and beta 0.01. A NULL config selects the defaults, including an image cap of 32, so it requires `n_images` of at least 32. A supplied cap above `n_images` is `RGSADDLE_INVALID_PARAMETER`.
 From minor 66, `rgsaddle_trics_path` refines an image-major unwrapped Cartesian path in translation-rotation internal coordinates with splicing and writes the refined path to `out` (which may alias `initial` for in-place refinement). Its length controls are in angstrom and `length_per_angstrom` converts the caller's coordinates.
+From minor 69, `rgsaddle_landscape_config_default`, `rgsaddle_landscape_create`, `rgsaddle_landscape_run`, `rgsaddle_landscape_node`, `rgsaddle_landscape_modes`, `rgsaddle_landscape_edge`, and `rgsaddle_landscape_free` expose the downward pathway search. `RGSADDLE_LANDSCAPE_BOUND` reports a node or evaluation limit and does not return a pathway. `rgsaddle_landscape_run` takes the geometry-aware Hessian action `rgsaddle_hessian_at_fn`, which minor 69 also adds with `rgsaddle_indexk_step_at`. `rgsaddle_hessian_fn` keeps its original signature from minor 37. `rgsaddle_landscape_report_t` has `flags` after `version`. The worked example is `tests/landscape.rs`.
 `rgsaddle_ocineb_step` reports the hand-off phase (band, tangent alignment, or minimum-mode translation).
 `rgsaddle_connect` runs the double-ended search of `connect` to completion on two endpoint arrays and a host surface.
 The surface writes energy and the Cartesian gradient for one image.
@@ -2316,13 +2323,13 @@ Quick timing observations belong in `NOTES.md`, not in this reference.
 
 `IndexKSession` and `indexk_step` take one minimum-mode step in a k-dimensional unstable subspace. `k ` 1= is `MinModeSession`: the same dimer or Lanczos estimate, the same translated force, and the same translator step. A Gaussian-process surrogate supplies the Hessian action through `PointSurface::hessian_vector`, or through `WithHessian` when the product is a separate callback. With no action, the session uses the finite difference on `MinModeConfig`.
 
-The translated force is `F - 2 Σ_i v_i (v_i · F)` once every one of the k curvatures is negative (Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063, Equation 3, for one mode). While any of those curvatures is not negative the step climbs inside the subspace and drops the orthogonal force, the one-mode rule of Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999), doi:10.1063/1.480097. `reflect_force` is the Householder product alone. `translated_force` applies the sign rule.
+The translated force is `F - 2 Σ_i v_i (v_i · F)` once every one of the k curvatures is negative (Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063, Equation 3, for one mode). While any of those curvatures is not negative the step climbs inside the subspace and drops the orthogonal force, the one-mode rule of Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999), doi:10.1063/1.480097. `reflect_force` is the Householder product alone. `translated_force` applies the sign rule. By default `IndexKConfig::negative_tol` is `0.0`, so convergence requires every requested curvature to be strictly negative (`curvature < 0.0`) and the force to be within tolerance. Chain `IndexKConfig::with_negative_tol` with a finite non-negative threshold so every requested curvature lies strictly below `-negative_tol`. `SaddleIndexCheck::negative_tol` defaults to `NEGATIVE_CURVATURE_TOL` (1e-3), and that positive value is a valid argument. `IndexKSession::new` rejects a negative threshold.
 
 The k lowest pairs are a local block iteration behind `LowestEigenpairs`. LOBPCG keeps the previous block and its conjugate direction (Knyazev, SIAM J. Sci. Comput. 23, 517 (2001), doi:10.1137/S1064827500366124). Lanczos selects a reorthogonalized block Lanczos. Either slot can later call rgmin's `lowest_eigenpairs`. The step does not loop the one-vector eigenpair.
 
 Gould, Ortner, and Packwood, Math. Comp. 85, 2939 (2016), doi:10.1090/mcom/3096, analyse the dimer; the third author is Packwood, not Zhang. The shrinking-dimer convergence they use is Zhang and Du, SIAM J. Numer. Anal. 50, 1899 (2012), doi:10.1137/110843149. The index-k dimer is Yin, Zhang, and Zhang, SIAM J. Sci. Comput. 41, A3576 (2019), doi:10.1137/19M1253356. The surrogate that owns the Hessian product is the one in Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), doi:10.1021/acs.jctc.5c00866.
 
-From C, ABI minor 37 adds `rgsaddle_indexk_create`, `rgsaddle_indexk_step`, `rgsaddle_indexk_modes`, `rgsaddle_indexk_translated`, `rgsaddle_indexk_position`, `rgsaddle_indexk_set_position`, `rgsaddle_indexk_free`, and `rgsaddle_reflect_force`. `modes` is row-major n-by-k with `n ` 3 * n_atoms=, and may be NULL. A null Hessian callback estimates the action from the surface. The report's `curvature` is the lowest of the k values. The translator is FIRE. `k ` 1= with `RGSADDLE_MINMODE_LOBPCG` uses Lanczos. `k < 1` or `k` larger than the dimension makes `rgsaddle_indexk_create` return NULL. The C++ owner is `rgsaddle::IndexK` in `include/rgsaddle/session.hpp`. There is no Python session name.
+From C, ABI minor 37 adds `rgsaddle_indexk_create`, `rgsaddle_indexk_step`, `rgsaddle_indexk_modes`, `rgsaddle_indexk_translated`, `rgsaddle_indexk_position`, `rgsaddle_indexk_set_position`, `rgsaddle_indexk_free`, and `rgsaddle_reflect_force`. `modes` is row-major n-by-k with `n ` 3 * n_atoms=, and may be NULL. A null Hessian callback estimates the action from the surface. The report's `curvature` is the lowest of the k values. The translator is FIRE. `k ` 1= with `RGSADDLE_MINMODE_LOBPCG` uses Lanczos. `k < 1` or `k` larger than the dimension makes `rgsaddle_indexk_create` return NULL. `rgsaddle_hessian_fn` receives the vector only. A host that needs the geometry calls `rgsaddle_indexk_step_at` (ABI minor 69), which takes a `rgsaddle_hessian_at_fn` that also receives the position. The C++ owner is `rgsaddle::IndexK` in `include/rgsaddle/session.hpp`, with `step` and `step_at`. There is no Python session name.
 
 The runnable example is the doctest on `IndexKSession`: an index-2 quadratic, an analytic Hessian action, and a search that finishes at the origin. `cargo test --doc indexk` runs it.
 
@@ -2376,6 +2383,64 @@ fn main() -> Result<(), SaddleError> {
     Ok(())
 }
 ```
+
+# Map a pathway down from a saddle (`docs/orgmode/howto/landscape.org`)
+
+> Downward pathway maps from a certified saddle to minima
+
+`LandscapeSession` builds a pathway map downward from one certified critical point. The parent is a saddle of index k, either the position and unstable block of a converged `IndexKSession` or a point `saddle_index` certifies. The search pushes a Euclidean step of length `LandscapeConfig::push` (`DEFAULT_LANDSCAPE_PUSH`, 0.1) along each unit unstable eigenvector, both ways, and follows index-(k-1) minimum-mode dynamics until that leg converges. The point is certified again. A new critical point is stored only when its index is one less than the parent, and the search repeats on it. Any other index is `SaddleError::Solver`. A repeated point, closer than `LandscapeConfig::duplicate_distance` (`DEFAULT_DUPLICATE_DISTANCE`, 1e-3), adds an edge and is not searched again. Index 0 is a minimum: that leg is an rgmin solve on the true gradient, the same stepper `RelaxConfig` uses, not a reflected force.
+
+The index-k leg is `IndexKSession`. It reflects the force in the k lowest modes once their curvatures are negative, the dimer translation of Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), doi:10.3389/fchem.2026.1807063, Equation 3, applied to the block, which is the high-index saddle dynamics of Yin, Zhang, and Zhang, SIAM J. Sci. Comput. 41, A3576 (2019), doi:10.1137/19M1253356. Each child leg inherits `LandscapeConfig::certificate.negative_tol` (defaulting to `NEGATIVE_CURVATURE_TOL`, 1e-3, or set for both through `LandscapeConfig::with_negative_tol`), so leg convergence and certification always agree on which curvatures count as negative. The pathway itself is the construction of Yin, Wang, Chen, Zhang, and Zhang, Phys. Rev. Lett. 124, 090601 (2020), doi:10.1103/PhysRevLett.124.090601: critical points whose indices differ by one are joined by the unstable direction that was pushed. The certificate is the block Lanczos saddle index of Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), doi:10.1021/acs.jctc.5c00866. Each child copy of `LandscapeConfig::search` clears `saddle_check` and `artn` before the index-k leg. `artn` is the ART nouveau activation. `IndexKSession::new` already clears `saddle_check` on the one-mode session. `LandscapeSession::new` still rejects an invalid `saddle_check`, an invalid `artn`, and an invalid `escape`. `LandscapeConfig::certificate` certifies every accepted point after `escape` is set to none.
+
+`PathwayMap::nodes` starts with the parent. A `CriticalPoint` holds the coordinates, the energy, the saddle index, the lowest curvatures, the unstable modes (shape `(n, index)`, lowest curvature first), and the force evaluations spent accepting it. A `LandscapeEdge` records the parent, the child, the column of the parent's unstable block, the sign of the push, and the evaluations of that leg. `PathwayMap::evaluations` counts every `PointSurface::eval`. An analytic `PointSurface::hessian_vector` is not a force evaluation. The parent's `evaluations` plus the sum of the edge evaluations equals the map total: a later arrival at a stored node is charged to the edge only.
+
+The push has to leave the neighbourhood in which the perturbed curvature is still among the k-1 lowest, or the index-(k-1) dynamics return to the parent and the search returns `SaddleError::Solver`. On the separable well of `tests/saddle_index.rs`, that crossing along the most negative mode is at `1/sqrt(6)`, so a push of 0.5 is past it and a push of 0.1 is not. `LandscapeConfig::max_nodes` (`DEFAULT_LANDSCAPE_MAX_NODES`, 64, including the parent) and `LandscapeConfig::max_evaluations` (`DEFAULT_LANDSCAPE_MAX_EVALUATIONS`, 100000) are hard stops. Reaching either is `SaddleError::LandscapeBound` with `LandscapeBoundKind::Nodes` or `LandscapeBoundKind::Evaluations`, the accepted node count, and the evaluations already performed. The partial pathway is not returned. `LandscapeConfig::max_steps` (`DEFAULT_LANDSCAPE_MAX_STEPS`, 2000) caps one saddle leg and one minimum; exhausting it is `SaddleError::Solver`, not a shorter map. `LandscapeConfig::force_gate` is the infinity norm by default. The parent, each index-k leg, and each minimum measure the force with that one gate. A minimum compares it with `RelaxConfig::force_tol`. A saddle leg and the parent compare it with `MinModeConfig::force_tol`. `LandscapeConfig::cell` is a `Cell` or none. With a cell the duplicate test is the Euclidean norm of `Cell::minimum_image`, and the coordinate length must be a multiple of three.
+
+`LandscapeConfig` is non-exhaustive. Start from `LandscapeConfig::default` and chain `with_duplicate_distance`, `with_push`, `with_max_nodes`, `with_max_evaluations`, `with_max_steps`, `with_search`, `with_relax`, `with_certificate`, `with_negative_tol`, `with_force_gate`, and `with_cell`.
+
+From C, ABI minor 69 adds `rgsaddle_landscape_config_default`, `rgsaddle_landscape_create`, `rgsaddle_landscape_run`, `rgsaddle_landscape_node`, `rgsaddle_landscape_modes`, `rgsaddle_landscape_edge`, and `rgsaddle_landscape_free`. The coordinate length is `3 * n_atoms`. A null Hessian callback estimates the action from the surface. A supplied callback is a `rgsaddle_hessian_at_fn` and receives the geometry and the vector. `RGSADDLE_LANDSCAPE_BOUND` is the limit, and the report's `bound` is 1 for nodes or 2 for evaluations. Node and edge queries then return `RGSADDLE_NO_EVALUATION` because no pathway was stored. The C++ owner is `rgsaddle::Landscape` in `include/rgsaddle/session.hpp`, and its constructor requires ABI 1.69. Python exposes `Landscape`, `PathwayMap`, `CriticalPoint`, and `LandscapeEdge`. `Landscape.run` takes the same one-image callback as `saddle_index`. A limit raises `ValueError` in Python and `std::runtime_error` from `rgsaddle::Landscape::run`, and returns no map.
+
+The runnable Rust example is the doctest on `LandscapeSession`. `cargo test --doc landscape` runs it.
+
+## A two-dimensional surface
+
+The Müller-Brown potential (Müller and Brown, Theoretica Chimica Acta 53, 75 (1979), doi:10.1007/BF00547608) is a surface of two coordinates. It has no index-2 point in the window used by `tests/simplified_string.rs`. The downward maps start at the two published index-1 saddles. `PointSurface` has length 2. The C and Python sessions stay on a multiple of three because the ABI packs atoms; the Rust session does not.
+
+With an analytic Hessian action, push 0.2, force tolerance 1e-6, duplicate distance 0.05, and per-atom minimizer cap 0.05, the map from S1 at (-0.822001558733, 0.624312802815) stored that saddle and the minima A and C. The parent cost 1 force evaluation, A cost 131, and C cost 87, 219 in all. The map from S2 at (0.212486582001, 0.292988325107) stored that saddle and the minima C and B. The parent cost 1, C cost 114, and B cost 86, 201 in all. The two maps together called the surface 420 times. Positions matched the published stationary points to 1e-2 and energies to 1e-3, with the indices 1 and 0.
+
+The same search on the separable well of `tests/landscape.rs`, three coordinates and an analytic action, push 0.5 and force tolerance 1e-8, stored 9 nodes and 12 edges in 865 force evaluations. The origin cost 1. The index-1 saddles at `(+-1, 0, 0)` cost 7 each to discover, the index-1 saddles at `(0, +-1/sqrt(2), 0)` cost 43 each, and each of the four minima cost 79. The other 448 evaluations are later edges that arrive at a node already stored. Direction 0 at the origin, the most negative curvature, connects to the saddles on the x axis. Each minimum has two parents.
+
+```rust
+use ndarray::array;
+use rgsaddle::{IndexKConfig, LandscapeConfig, LandscapeSession, MinModeConfig, RelaxConfig};
+
+let search = MinModeConfig::default()
+    .with_force_tol(1.0e-6)
+    .with_max_move(0.05)
+    .with_saddle_check(None);
+let config = LandscapeConfig::default()
+    .with_push(0.2)
+    .with_duplicate_distance(5.0e-2)
+    .with_search(IndexKConfig::new(1, search))
+    .with_relax(
+        RelaxConfig::default()
+            .with_force_tol(1.0e-6)
+            .with_max_atom_move(0.05)
+            .with_initial_step(0.02),
+    );
+let session = LandscapeSession::new(
+    config,
+    array![-0.822_001_558_733, 0.624_312_802_815],
+    None,
+)?;
+let map = session.run(&surface)?;
+assert_eq!(map.nodes[0].index, 1);
+assert_eq!(map.nodes.len(), 3);
+assert_eq!(map.edges.len(), 2);
+# Ok::<(), rgsaddle::SaddleError>(())
+```
+
+`surface` is the `PointSurface` in `tests/landscape.rs`. That test also checks the node and evaluation limits and the minimum-image duplicate test on a periodic cell.
 
 # Solid-state dimer (`docs/orgmode/howto/solid-dimer.org`)
 
@@ -4023,7 +4088,7 @@ CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --locked --features chemfiles
 
 > Stepping bands, minimum-mode sessions, Sella, IRC, and strings from C and C++
 
-`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 68. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
+`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 69. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see [the meson how-to](meson.html).
 
 A surface callback returns `rgsaddle_status_t` and receives one `rgsaddle_surface_request_t`. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
 From ABI minor 42, `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES` report constrained-ensemble tails that fail the drift or effective-sample guards.
@@ -4188,7 +4253,10 @@ A solid-state band, the trust-region stepper, the simplified string method, and 
 A non-finite position, energy, force, `fmax`, or `scale_fmax` returns `RGSADDLE_NON_FINITE`.
 While the option is on, an interior image that a neighbour pulls back over its threshold is requested alone: `RGSADDLE_REQ_ONE_IMAGE` is set, `image` is that image's band index, `n_images` is the band length, and `RGSADDLE_REQ_CLIMBING_IMAGE` is not set.
 A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 65 before resolving either symbol.
+
 ABI minor 68 adds the run-to-completion AutoNEB of Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), doi:10.1063/1.4961868. `rgsaddle_autoneb_run` grows a band from at least two images and writes `n_max` rows. `rgsaddle_autoneb_config_t` carries the spring `k`, the two force stops, the two step caps, `n_simul`, `n_max`, the projection, the tangent, and `space_energy_ratio`. `RGSADDLE_AUTONEB_CLIMB` arms the climb from the first evaluation of the climbing window. `RGSADDLE_AUTONEB_IDPP` places new images with the image-dependent pair potential. `RGSADDLE_AUTONEB_KEEP_TRANSLATION` leaves the mean Cartesian force in the window. `rgsaddle_autoneb_report_t` reports `status`, `max_force`, `ci_index` (-1 when there is none), `surface_rows`, `n_images`, and `iteration`. `iteration` counts the steps of the last stage alone, also when that stage keeps the window and the band session of the stage before it. The surface callback is the band callback, and it is not entered from another thread. Python calls it as `autoneb_run` and reads `AutonebReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`). `rgsaddle.ase.AutoNEB` is the ASE-shaped wrapper, and its `run()` returns an `AutoNEBReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`, `images`). A run that spends its steps returns `RGSADDLE_OK` with `status` 0, so a host tests `status` and `max_force`. `tests/c/autoneb_abi.c` drives the entry point on a double well and checks the status, the force, the iteration count, and the error returns. A host checks `rgsaddle_abi_version()` for minor 68 before resolving the symbol. The Rust types are `RgsaddleAutonebConfig` and `RgsaddleAutonebReport`.
+
+ABI minor 69 adds the downward solution-landscape search. `rgsaddle_landscape_config_default` fills an `rgsaddle_landscape_config_t` from the Rust defaults. `rgsaddle_landscape_create` opens an `RgsaddleLandscape` at a critical point whose optional unstable block is row-major `(3 * n_atoms)` by `k`. `rgsaddle_landscape_run` follows every unstable direction. Its Hessian argument is the new `rgsaddle_hessian_at_fn`, which receives the geometry, the vector and the output action; a null Hessian estimates the action from the surface. On `RGSADDLE_LANDSCAPE_BOUND` the report's `n_nodes` and `evaluations` are the counts already reached, `bound` is 1 for the node limit or 2 for the evaluation limit, `n_edges` is 0, and no pathway is stored. `rgsaddle_landscape_node`, `rgsaddle_landscape_modes`, and `rgsaddle_landscape_edge` read a stored map; before one they return `RGSADDLE_NO_EVALUATION`. `rgsaddle_landscape_free` releases the session. `include/rgsaddle/session.hpp` wraps it as `rgsaddle::Landscape`, and the constructor requires ABI 1.69. Python exposes `Landscape`. The worked example is `tests/landscape.rs`. ABI minor 69 also adds the typedef `rgsaddle_hessian_at_fn`, which is `int (*)(void *user, int64_t n_dof, const double *position, const double *vector, double *action)`. `rgsaddle_indexk_step_at` is `rgsaddle_indexk_step` with that geometry-aware callback, and `rgsaddle::IndexK::step_at` wraps it. `rgsaddle_hessian_fn` keeps its original four-argument signature, and `rgsaddle_indexk_step` and `rgsaddle_kappa_dimer_force` still take it. `rgsaddle_landscape_report_t` carries `flags` right after `version`, and the library writes zero. A library below minor 69 does not export the landscape symbols or `rgsaddle_indexk_step_at`.
 
 # Use the headers from a meson project (`docs/orgmode/howto/meson.org`)
 
@@ -4336,6 +4404,8 @@ An index above 1 at a converged climbing image says the band stopped on a saddle
 
 The index-k step has no Python session name. It is `rgsaddle_indexk_step` in the C ABI and `rgsaddle::IndexK` in the C++ header.
 
+`Landscape` searches downward from a critical point of length `3N`. `modes` is shape `(3N, k)` or omitted. The opening controls are `push` (0.1), `duplicate_distance` (0.001), `max_nodes` (64), `max_evaluations` (100000), `max_steps` (2000), and `force_tol` and `relax_force_tol` (0.001). `Landscape.run` takes the surface callback and an optional `hessian`. It returns a `PathwayMap` whose `nodes` are `CriticalPoint` values and whose `edges` are `LandscapeEdge` values. `hessian` matches `rgsaddle_hessian_at_fn`: it receives the geometry and the vector. Omit it and the search estimates the action from the surface. A node has `position`, `energy`, `index`, `curvatures`, and `evaluations`. An edge has `parent`, `child`, `direction`, `sign`, and `evaluations`. The map's `evaluations` counts every force evaluation. A node or evaluation limit raises `ValueError` and returns no pathway. The surface callback is the one-image `(1, 3N)` callback of `saddle_index`.
+
 ## Thread safety
 Immutable values, such as the enum members, are shared freely. `SurfaceAdapter` is a mutable session. Each call claims an atomic flag for the whole call and drops it when the call returns, including when the calculator raises. `raw_forces` is assigned before that drop. Do not call the adapter again from inside its own calculator.
 
@@ -4437,7 +4507,7 @@ ART pushes along the seed until the curvature falls under `art_threshold` (defau
 
 `Stencil::band` checks the array and returns `BAND_PRESET_SEAM` (`band presets stay on feat/band-methods-zoom`, kept for compatibility) because band presets are not implemented in the stencil builder. Use `BandSession`, `AutoNeb`, or `OcinebSession` directly for a band search, and `BandConfig::zoom` or `SpringKind::EnergyWeighted` for zoom-NEB and energy-weighted springs. The chain, the mesh (remesh, insert, window), and the point controller are implemented.
 
-From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only; the stencil symbols were added at ABI minor 16 and remain additive under the current ABI minor 68.
+From C, `rgsaddle_stencil_config_new` takes the preset discriminant. Unknown keys return `RGSADDLE_INVALID_PARAMETER`. `rgsaddle_last_error` is thread-local. `rgsaddle_stencil_run` loops over `rgsaddle_stencil_step`. The report opens with `struct_size`. The older band and min-mode entries stay step-only; the stencil symbols were added at ABI minor 16 and remain additive under the current ABI minor 69.
 
 From Python, `rgsaddle.Stencil.point(x, preset`"dimer")= takes a C-contiguous float64 vector. `step(surface)` releases the thread, and the surface callback re-attaches. `rgsaddle.ase.Point(atoms, preset`"dimer").run(fmax, steps)= is an ASE `Optimizer` whose `step` is one stencil step. A second thread that enters the same handle raises `RuntimeError`.
 
@@ -5658,6 +5728,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_stencil_free`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_indexk_create`. Purpose: Create an index-k session. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_indexk_step`. Purpose: One index-k step. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_indexk_step_at`. Purpose: rgsaddle_indexk_step with a geometry-aware Hessian action, ABI minor 69. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_indexk_position`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_indexk_modes`. Purpose: Writes n-by-k row-major modes and k curvatures. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_indexk_translated`. Purpose: The effective gradient of the last successful step, length 3 * n_atoms. Parameters: the declaration. Units: the caller's.
@@ -5696,6 +5767,13 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_lineb_solve_counted_orbit`. Purpose: Counted solve with optional bead observations. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_lineb_solve_counted_turning`. Purpose: Counted orbit solve with optional return-turn geometry and energy checks. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_lineb_solve_counted_rate`. Purpose: Counted solve with selectable image-Hessian interpolation. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_landscape_config_default`. Purpose: Write the Rust defaults. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_landscape_create`. Purpose: Open a search. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_landscape_run`. Purpose: Run the search. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_landscape_node`. Purpose: Read one node. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_landscape_modes`. Purpose: Unstable modes, row-major, 3 * n_atoms by the saddle index. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_landscape_edge`. Purpose: One downward edge. Parameters: the declaration. Units: the caller's.
+- `rgsaddle_landscape_free`. Purpose: Declared in include/rgsaddle.h. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_band_set_refine`. Purpose: Per-step refine stepper, ABI minor 60. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_band_is_refining`. Purpose: 1 when the last first-order step used the refine stepper, else 0. Parameters: the declaration. Units: the caller's.
 - `rgsaddle_geodesic_config_default`. Purpose: Fill `out` with the default geodesic controls (step and gradient tolerances 1e-6, max_move 0.5, lower_ratio 0.95, upper_ratio 1.1, 40 sweeps, 40 iterations, memory 8, 10 bound samples, 32 images, seed 0). Parameters: the declaration. Units: the caller's.
@@ -5720,6 +5798,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_stencil_t`. Purpose: Opaque session handle in include/rgsaddle.h.
 - `RgsaddleIndexK`. Purpose: Opaque session handle in include/rgsaddle.h.
 - `RgsaddleGrowingString`. Purpose: Opaque handle to a growing string session, ABI minor 44.
+- `RgsaddleLandscape`. Purpose: Opaque session handle in include/rgsaddle.h.
 - `rgsaddle_version_t`. Purpose: Version head carried by every wire struct.
 - `rgsaddle_status_t`. Purpose: C enum typedef in include/rgsaddle.h.
 - `rgsaddle_tangent_t`. Purpose: C enum typedef in include/rgsaddle.h.
@@ -5775,6 +5854,8 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_lineb_orbit_t`. Purpose: Opt-in observations from the rate's own surface calls.
 - `rgsaddle_lineb_turning_t`. Purpose: Return-turn agreement for the interpolated-force clock, in the caller's units.
 - `rgsaddle_lineb_rate_diagnostics_t`. Purpose: Geometry counts within the rate, and the Cartesian finite-difference displacement used at the path images (NaN for direct or path-only solves).
+- `rgsaddle_landscape_config_t`. Purpose: C struct typedef in include/rgsaddle.h.
+- `rgsaddle_landscape_report_t`. Purpose: C struct typedef in include/rgsaddle.h.
 - `rgsaddle_refine_method_t`. Purpose: Refine stepper of rgsaddle_band_set_refine, ABI minor 60.
 - `rgsaddle_geodesic_config_t`. Purpose: Geodesic interpolation controls.
 - `rgsaddle_hyperplane_emit_fn`. Purpose: Callback typedef in include/rgsaddle.h.
@@ -5782,6 +5863,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `rgsaddle_surface_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_solid_surface_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_hessian_fn`. Purpose: Callback typedef in include/rgsaddle.h.
+- `rgsaddle_hessian_at_fn`. Purpose: Geometry-aware Hessian action, ABI minor 69.
 - `rgsaddle_stencil_eval_fn`. Purpose: Callback typedef in include/rgsaddle.h.
 - `rgsaddle_geodesic_chart_fn`. Purpose: Redundant coordinate chart for geodesic interpolation.
 
@@ -5858,6 +5940,7 @@ The narrative for a session is the C and C++ how-to, not this list.
 - `RGSADDLE_NOT_EQUILIBRATED`. Purpose: Enumerator of `rgsaddle_status_t`.
 - `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES`. Purpose: Enumerator of `rgsaddle_status_t`.
 - `RGSADDLE_NOT_CONVERGED`. Purpose: Enumerator of `rgsaddle_status_t`.
+- `RGSADDLE_LANDSCAPE_BOUND`. Purpose: Enumerator of `rgsaddle_status_t`.
 - `RGSADDLE_TANGENT_SIMPLE`. Purpose: Enumerator of `rgsaddle_tangent_t`.
 - `RGSADDLE_TANGENT_IMPROVED`. Purpose: Enumerator of `rgsaddle_tangent_t`.
 - `RGSADDLE_SPRING_UNIFORM`. Purpose: Enumerator of `rgsaddle_spring_t`.

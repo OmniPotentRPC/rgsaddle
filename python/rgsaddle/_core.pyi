@@ -540,6 +540,72 @@ class SellaSaddle:
     def position(self) -> NDArray[numpy.float64]:
         """Copy of the current Cartesian position."""
 
+class CriticalPoint:
+    @property
+    def position(self) -> NDArray[numpy.float64]:
+        """Coordinates of the certified point."""
+
+    @property
+    def energy(self) -> float:
+        """Energy at that point."""
+
+    @property
+    def index(self) -> int:
+        """Saddle index: curvatures under the certificate threshold."""
+
+    @property
+    def curvatures(self) -> NDArray[numpy.float64]:
+        """Lowest certified curvatures, ascending."""
+
+    @property
+    def evaluations(self) -> int:
+        """Force evaluations spent accepting this node."""
+
+class LandscapeEdge:
+    @property
+    def parent(self) -> int:
+        """Index of the parent node."""
+
+    @property
+    def child(self) -> int:
+        """Index of the child node."""
+
+    @property
+    def direction(self) -> int:
+        """Column of the parent's unstable block."""
+
+    @property
+    def sign(self) -> int:
+        """+1 or -1, the sense of the push."""
+
+    @property
+    def evaluations(self) -> int:
+        """Force evaluations of this leg."""
+
+class PathwayMap:
+    @property
+    def nodes(self) -> list[CriticalPoint]:
+        """Certified critical points, parent first."""
+
+    @property
+    def edges(self) -> list[LandscapeEdge]:
+        """Downward connections."""
+
+    @property
+    def evaluations(self) -> int:
+        """Every force evaluation of the search."""
+
+class Landscape:
+    def __init__(self, position: numpy.typing.NDArray[numpy.float64], modes: numpy.typing.NDArray[numpy.float64] | None = None, duplicate_distance: float = 0.001, push: float = 0.1, max_nodes: int = 64, max_evaluations: int = 100000, max_steps: int = 2000, force_tol: float = 0.001, relax_force_tol: float = 0.001, max_move: float = 0.2, max_atom_move: float = 0.1, initial_step: float = 0.1, dr: float = 0.001, rotation_tol: float = 0.0001, residual_tol: float = 0.0001, max_rotations: int = 20, max_block_iterations: int = 30, method: str = 'dimer') -> None:
+        """
+        Downward pathway search from a critical point. position is 3N. modes is (3N, k) or None. method is dimer, lanczos, or lobpcg.
+        """
+
+    def run(self, surface: Callable[..., tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float64]]], hessian: Callable[..., numpy.typing.NDArray[numpy.float64]] | None = None) -> PathwayMap:
+        """
+        Follow every unstable direction down to minima. surface(x) is one image shaped (1, 3N). hessian(x, v) returns the Hessian action at geometry x, or is omitted. A node or evaluation limit raises ValueError and returns no pathway.
+        """
+
 def raise_status(code: int) -> bool:
     """
     Map an rgsaddle_status_t value. The message is the stored text, or the status name when that text is empty. The stored text is cleared. True on OK. False is not used: convergence is not a status code.

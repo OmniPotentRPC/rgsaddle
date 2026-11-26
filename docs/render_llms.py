@@ -48,6 +48,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("howto/art.org", "Phased Activation-Relaxation Technique nouveau (ArtSession)"),
             ("howto/direction-cover.org", "Signed per-atom direction cover and arm picker for saddle searches from a minimum (DirectionCover)"),
             ("howto/indexk.org", "Index-k minimum-mode searches with LOBPCG and block Lanczos"),
+            ("howto/landscape.org", "Downward pathway maps from a certified saddle to minima"),
             ("howto/solid-dimer.org", "Variable-cell solid-state dimer on atoms and strain"),
             ("howto/ssneb.org", "Generalized solid-state NEB on the joint atom-strain chart"),
             ("howto/strain-rate.org", "Elastic dipoles, multipoles, FMM fields, and strain response of a hop"),

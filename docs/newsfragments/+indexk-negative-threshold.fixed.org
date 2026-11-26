@@ -1,0 +1,2 @@
+~IndexKConfig~ adds a configurable ~negative_tol~ (default ~0.0~, keeping strict ~curvature < 0.0~ convergence for non-landscape callers), and ~LandscapeSession~ threads ~certificate.negative_tol~ (default ~NEGATIVE_CURVATURE_TOL~, 1e-3) into every child ~IndexKSession~ leg so leg convergence and certification always agree.
+~LandscapeSession~ stores a downward edge only when the certified child index is one less than the parent.
