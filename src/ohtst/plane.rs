@@ -95,13 +95,13 @@ impl<'a, S: PointSurface> MassWeighted<'a, S> {
     /// `q = M^{1/2} x`.
     pub fn to_mass_weighted(&self, x: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
         self.check(x.len())?;
-        Ok(self.metric.multiply_sqrt(x))
+        self.metric.multiply_sqrt(x)
     }
 
     /// `x = M^{-1/2} q`.
     pub fn to_cartesian(&self, q: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
         self.check(q.len())?;
-        Ok(self.metric.divide_sqrt(q))
+        self.metric.divide_sqrt(q)
     }
 
     fn check(&self, n: usize) -> Result<(), SaddleError> {
@@ -124,7 +124,7 @@ impl<S: PointSurface> PointSurface for MassWeighted<'_, S> {
                 "surface gradient length differs from the masses".into(),
             ));
         }
-        Ok((energy, self.metric.divide_sqrt(gradient.view())))
+        Ok((energy, self.metric.divide_sqrt(gradient.view())?))
     }
 
     fn hessian_vector(
@@ -134,10 +134,15 @@ impl<S: PointSurface> PointSurface for MassWeighted<'_, S> {
     ) -> Result<Option<Array1<f64>>, SaddleError> {
         let x = self.to_cartesian(q)?;
         let u = self.to_cartesian(v)?;
-        Ok(self
-            .surface
-            .hessian_vector(x.view(), u.view())?
-            .map(|hv| self.metric.divide_sqrt(hv.view())))
+        let Some(action) = self.surface.hessian_vector(x.view(), u.view())? else {
+            return Ok(None);
+        };
+        if action.len() != q.len() {
+            return Err(SaddleError::Shape(
+                "surface Hessian action length differs from the masses".into(),
+            ));
+        }
+        Ok(Some(self.metric.divide_sqrt(action.view())?))
     }
 
     fn excluded_modes(&self, q: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
@@ -149,7 +154,7 @@ impl<S: PointSurface> PointSurface for MassWeighted<'_, S> {
             ));
         }
         for mut row in modes.rows_mut() {
-            let weighted = self.metric.multiply_sqrt(row.view());
+            let weighted = self.metric.multiply_sqrt(row.view())?;
             row.assign(&weighted);
         }
         Ok(modes)
@@ -484,5 +489,64 @@ mod tests {
         let mut broken = cell;
         broken[4] = f64::NAN;
         assert!(FixedCell::new(&CellQuadratic, broken).is_err());
+    }
+
+    struct FixedHessian {
+        action: Array1<f64>,
+    }
+
+    impl PointSurface for FixedHessian {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            Ok((0.0, Array1::zeros(x.len())))
+        }
+
+        fn hessian_vector(
+            &self,
+            _x: ArrayView1<f64>,
+            _v: ArrayView1<f64>,
+        ) -> Result<Option<Array1<f64>>, SaddleError> {
+            Ok(Some(self.action.clone()))
+        }
+    }
+
+    fn assert_hessian_shape(masses: &[f64], action: Array1<f64>) {
+        let inner = FixedHessian { action };
+        let surface = MassWeighted::new(&inner, masses).unwrap();
+        let q = Array1::zeros(masses.len());
+        let result = surface.hessian_vector(q.view(), q.view());
+        assert!(
+            matches!(
+                result,
+                Err(SaddleError::Shape(ref message))
+                    if message.contains("surface Hessian action length differs from the masses")
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn mass_weighted_surface_rejects_a_short_hessian_action() {
+        assert_hessian_shape(&[4.0, 9.0], array![1.0]);
+        assert_hessian_shape(&[1.0, 1.0], array![1.0]);
+    }
+
+    #[test]
+    fn mass_weighted_surface_rejects_a_long_hessian_action() {
+        assert_hessian_shape(&[1.0, 1.0], array![1.0, 2.0, 3.0]);
+        assert_hessian_shape(&[4.0, 9.0], array![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn mass_weighted_hessian_divides_a_matched_action_by_sqrt_mass() {
+        let inner = FixedHessian {
+            action: array![2.0, 9.0],
+        };
+        let surface = MassWeighted::new(&inner, &[4.0, 9.0]).unwrap();
+        let q = array![0.1, -0.2];
+        let action = surface
+            .hessian_vector(q.view(), q.view())
+            .unwrap()
+            .expect("analytic action");
+        assert_eq!(action.as_slice(), Some(&[1.0, 3.0][..]));
     }
 }

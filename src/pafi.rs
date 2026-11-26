@@ -630,7 +630,7 @@ fn mass_weighted_path(
         ));
     }
     let metric = MassMetric::coordinates(masses, width)?;
-    let coordinate = metric.weight_point_rows(positions.view());
+    let coordinate = metric.weight_point_rows(positions.view())?;
     if !coordinate.iter().all(|value| value.is_finite()) {
         return Err(SaddleError::NonFinite("fixed-energy path positions"));
     }
