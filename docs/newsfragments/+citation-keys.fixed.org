@@ -1,0 +1,1 @@
+Corrected the bibliography records for the Nichols walking papers, the benchmark paper, the DyNEB paper, and the preconditioning paper so each key, author list, and DOI agrees with the registry, and cited the EON software paper from the AutoNEB guide.

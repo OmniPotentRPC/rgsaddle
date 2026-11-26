@@ -1,0 +1,1 @@
+Corrected the DyNEB paper DOI to =10.1021/acs.jctc.9b00633= and aligned the Dynamic NEB reference text across Rust and documentation sources.
