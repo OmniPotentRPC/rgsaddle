@@ -431,12 +431,12 @@ pub fn lanczos_lowest_modes(
             "Lanczos tolerance must be finite and non-negative, got {tol}"
         )));
     }
-    let m_max = max_iters.min(n).max(k);
-    if m_max < k {
+    if max_iters < k {
         return Err(SaddleError::Invalid(format!(
             "Lanczos iteration limit {max_iters} is smaller than requested mode count {k}"
         )));
     }
+    let m_max = max_iters.min(n);
     let mut basis: Vec<Array1<f64>> = Vec::with_capacity(m_max);
     let mut hv_cache: Vec<Array1<f64>> = Vec::with_capacity(m_max);
     let mut block = Vec::with_capacity(k);
@@ -774,5 +774,28 @@ mod tests {
             vals: array![1.0, -0.5, 3.0],
         };
         assert!(slq_logdet_ratio(&mut op_a, &mut op_b, 2, 3, 1).is_err());
+    }
+
+    #[test]
+    fn lanczos_rejects_iteration_limit_below_mode_count() {
+        let mut op = MatrixOp {
+            matrix: Array2::eye(4) * 2.5,
+        };
+        let err = lanczos_lowest_modes(&mut op, 2, 1, 1.0e-12, 3).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SaddleError::Invalid(ref message)
+                    if message.contains("smaller than requested mode count")
+            ),
+            "{err}"
+        );
+        let spec = lanczos_lowest_modes(&mut op, 2, 2, 1.0e-12, 3).unwrap();
+        assert_eq!(spec.eigenvalues.len(), 2);
+        assert!(
+            spec.eigenvalues
+                .iter()
+                .all(|value| (*value - 2.5).abs() < 1.0e-12)
+        );
     }
 }
