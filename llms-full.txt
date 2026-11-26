@@ -3489,13 +3489,13 @@ A polyline cannot be used. Its tangent is the chord, which jumps at every image,
 | `stride`      | 5                   | steps between samples                                                                    |
 | `samples`     | 200                 | recorded samples per plane, at least `2 * blocks`                                        |
 | `blocks`      | 5                   | blocks for the standard error, at least 2                                                |
-| =trajectories=| 1                   | independent trajectories per plane; with more than one, the error is the spread of their means, as in the reference code |
-| `integrator`  | `LeimkuhlerMatthews=| =PafiIntegrator::EulerMaruyama` is the direct step of the paper's Eq. (9)                |
+| `trajectories`| 1                   | independent trajectories per plane; with more than one, the error is the spread of their means, as in the reference code |
+| `integrator`  | `LeimkuhlerMatthews`| `PafiIntegrator::EulerMaruyama` is the direct step of the paper's Eq. (9)                |
 | `mean_force`  | `ReferenceCode`     | `PafiMeanForce::PublishedEquation8` adds the Jacobian term of the paper's Eq. (8)        |
 | `seed`        | 1                   | seed of the noise; trajectory `i` takes `seed + i`                                       |
 | `fix_com`     | `true`              | hold the center of mass, when the vector has at least two atoms                          |
 | `retain`      | 16                  | configurations kept per plane, evenly spaced from sample 0 through `samples` minus one; both ends are kept when this is above 1, and it must not exceed `samples` |
-| `target_error=| =None`              | stop when the barrier error is at or below this; `None` runs one pass                    |
+| `target_error`| `None`              | stop when the barrier error is at or below this; `None` runs one pass                    |
 | `max_rounds`  | 4                   | most passes, the first included, to reach `target_error`                                 |
 | `region`      | `None`              | hard region the walk must stay in, set with `with_region`; `None` leaves the plane unrestricted |
 | `max_jump`    | `Some(0.4)`         | largest per-atom displacement, in the length unit, before a plane is taken to have left the basin; `None` skips the test |

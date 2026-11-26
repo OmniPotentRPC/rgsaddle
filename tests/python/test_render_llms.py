@@ -51,13 +51,7 @@ def _post(text: str, index: int) -> bool:
     return _space(char) or char in _POST
 
 
-def mono_contents(text: str) -> list[str]:
-    """Inner text of each Org =verbatim= and ~code~ span on one line.
-
-    The closer is the first marker preceded by non-whitespace and followed
-    by whitespace, punctuation, or the end of the line. The bytes between
-    the markers are the span.
-    """
+def _mono_line(text: str) -> list[str]:
     found: list[str] = []
     index = 0
     size = len(text)
@@ -75,6 +69,22 @@ def mono_contents(text: str) -> list[str]:
                 continue
         index += 1
     return found
+
+
+def mono_contents(text: str) -> list[str]:
+    """Inner text of each Org =verbatim= and ~code~ span on one line.
+
+    The closer is the first marker preceded by non-whitespace and followed
+    by whitespace, punctuation, or the end of the line. The bytes between
+    the markers are the span. A table row is split into cells first, so the
+    end of a cell is a border. The separator is not punctuation.
+    """
+    if text.lstrip(" \t").startswith("|"):
+        found: list[str] = []
+        for cell in text.split("|"):
+            found.extend(_mono_line(cell))
+        return found
+    return _mono_line(text)
 
 
 def _pub_types(*paths: Path) -> set[str]:
@@ -109,6 +119,7 @@ def _missing(names: set[str], page: str) -> list[str]:
     [
         ("=thermal = 0.02585=", "`thermal = 0.02585`"),
         ("=nodes >= 2=", "`nodes >` 2="),
+        ("| =nodes >= 2=| =kept=|", "| `nodes >` 2=| `kept`|"),
     ],
 )
 def test_org_mono_unit_cases(src: str, want: str) -> None:
@@ -121,6 +132,32 @@ def test_code_span_keeps_comparison() -> None:
 
 def test_adjacent_verbatim_spans_stay_separate() -> None:
     assert render_llms.clean_inline_org("=foo= and =bar=") == "`foo` and `bar`"
+
+
+def test_pipe_outside_a_table_does_not_close_verbatim() -> None:
+    assert render_llms.clean_inline_org("=foo=| bar") == "=foo=| bar"
+
+
+def test_pafi_table_cells_close_at_the_separator() -> None:
+    """Rows 83, 84, and 89 of the PAFI howto have no space before `|`."""
+    org = (_REPO / "docs" / "orgmode" / "howto" / "pafi.org").read_text(encoding="utf-8")
+    lines = org.splitlines()
+    want = {
+        83: (
+            "| `trajectories`| 1                   | independent trajectories per plane; "
+            "with more than one, the error is the spread of their means, as in the reference code |"
+        ),
+        84: (
+            "| `integrator`  | `LeimkuhlerMatthews`| `PafiIntegrator::EulerMaruyama` "
+            "is the direct step of the paper's Eq. (9)                |"
+        ),
+        89: (
+            "| `target_error`| `None`              | stop when the barrier error is at or "
+            "below this; `None` runs one pass                    |"
+        ),
+    }
+    for number, expected in want.items():
+        assert render_llms.clean_inline_org(lines[number - 1]) == expected
 
 
 @pytest.mark.thread_unsafe

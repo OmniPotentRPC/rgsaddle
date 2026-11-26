@@ -235,6 +235,8 @@ def org_to_markdown(org_text: str, org_path: Path) -> str:
 # Closing punctuation of an Org emphasis marker. org-element matches
 # whitespace or one of these, or the end of the line:
 #   ! " ' ) , - . : ; ? [ \ }
+# A table separator is absent on purpose. Org splits the row into cells
+# before the scan, and the end of a cell is the border.
 _ORG_POST = frozenset("!\"'),-.:;?[\\}")
 # Characters that may precede an opening marker, besides whitespace
 # and the start of the line.
@@ -257,12 +259,12 @@ def _org_post(text: str, index: int) -> bool:
     return char.isspace() or char in _ORG_POST
 
 
-def _replace_org_mono(text: str) -> str:
+def _replace_org_mono_span(text: str) -> str:
     """Turn Org verbatim and code markers into Markdown inline code.
 
     A closing ``=`` or ``~`` is the first marker of the same kind that
     is preceded by non-whitespace and followed by whitespace, punctuation,
-    or the end of the line. Bytes between the markers are copied unchanged.
+    or the end of the text. Bytes between the markers are copied unchanged.
     """
     out: list[str] = []
     index = 0
@@ -288,6 +290,19 @@ def _replace_org_mono(text: str) -> str:
         out.append(text[index])
         index += 1
     return "".join(out)
+
+
+def _replace_org_mono(text: str) -> str:
+    """Scan ``text`` for verbatim and code spans.
+
+    Org splits a table row into cells before the emphasis scan, so each
+    cell is scanned on its own. A closer that sits against the separator
+    is then at the end of the cell. The separator is not punctuation on
+    any other line.
+    """
+    if text.lstrip(" \t").startswith("|"):
+        return "|".join(_replace_org_mono_span(cell) for cell in text.split("|"))
+    return _replace_org_mono_span(text)
 
 
 def clean_inline_org(text: str) -> str:
