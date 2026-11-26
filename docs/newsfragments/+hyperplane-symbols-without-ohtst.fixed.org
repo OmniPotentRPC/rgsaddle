@@ -1,0 +1,1 @@
+The four hyperplane C entry points stay exported when the library is built without the ~ohtst~ feature. Creation returns null, freeing is a no-op, integration returns ~RGSADDLE_INVALID_PARAMETER~, and the observable name is unchanged.

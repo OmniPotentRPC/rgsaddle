@@ -59,3 +59,54 @@ fn c_abi_smoke() {
     assert!(stdout.contains("RGSADDLE_C_ABI_OK"), "stdout: {stdout}");
     let _ = std::fs::remove_file(&out);
 }
+
+#[test]
+#[cfg_attr(not(feature = "capi"), ignore)]
+fn hyperplane_symbols_link_without_a_feature_guard() {
+    let Some(cc) = cc() else {
+        eprintln!("no C compiler; skipping");
+        return;
+    };
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let out = std::env::temp_dir().join(format!(
+        "rgsaddle_hyperplane_symbols_{}",
+        std::process::id()
+    ));
+    let libdir = cdylib_dir();
+    let build = Command::new(&cc)
+        .arg("-std=c11")
+        .arg("-Wall")
+        .arg("-Wextra")
+        .arg("-Werror")
+        .arg(root.join("tests/c/hyperplane_symbols.c"))
+        .arg("-I")
+        .arg(root.join("include"))
+        .arg("-L")
+        .arg(&libdir)
+        .arg("-lrgsaddle")
+        .arg("-lm")
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .expect("compile the hyperplane symbol test");
+    assert!(
+        build.status.success(),
+        "hyperplane symbol test failed to build: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(&out)
+        .env("LD_LIBRARY_PATH", &libdir)
+        .output()
+        .expect("run the hyperplane symbol test");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "hyperplane symbol test failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("RGSADDLE_HYPERPLANE_SYMBOLS_OK"),
+        "stdout: {stdout}"
+    );
+    let _ = std::fs::remove_file(&out);
+}
