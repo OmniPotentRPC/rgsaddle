@@ -328,7 +328,7 @@ The feature macro =RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS= advertises
 modes. Each reports =-1= for a path-only or failed solve.
 
 From minor 60, =rgsaddle_band_set_refine= installs or clears the per-step L-BFGS refine stepper, and =rgsaddle_band_is_refining= reports whether the last first-order step used it. A host checks =rgsaddle_abi_version()= for minor 60 or newer. The worked example is =tests/band_refine.rs=.
-In C, =rgsaddle_landscape_config_default=, =rgsaddle_landscape_create=, =rgsaddle_landscape_run=, =rgsaddle_landscape_node=, =rgsaddle_landscape_modes=, =rgsaddle_landscape_edge=, and =rgsaddle_landscape_free= expose the downward pathway search. =RGSADDLE_LANDSCAPE_BOUND= reports a node or evaluation limit and does not return a pathway. The worked example is =tests/landscape.rs=.
+From minor 66, =rgsaddle_landscape_config_default=, =rgsaddle_landscape_create=, =rgsaddle_landscape_run=, =rgsaddle_landscape_node=, =rgsaddle_landscape_modes=, =rgsaddle_landscape_edge=, and =rgsaddle_landscape_free= expose the downward pathway search. =RGSADDLE_LANDSCAPE_BOUND= reports a node or evaluation limit and does not return a pathway. =rgsaddle_landscape_run= takes the geometry-aware Hessian action =rgsaddle_hessian_at_fn=, which minor 66 also adds with =rgsaddle_indexk_step_at=. =rgsaddle_hessian_fn= keeps its original signature from minor 37. =rgsaddle_landscape_report_t= has =flags= after =version=. The worked example is =tests/landscape.rs=.
 The request flags are =RGSADDLE_REQ_ONE_IMAGE= (bit 0) and =RGSADDLE_REQ_CLIMBING_IMAGE= (bit 1).
 From a band config at minor 22, the refinement's one-image requests also set bit 1.
 Their =image= is then the climbing image's band index.
