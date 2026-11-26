@@ -853,6 +853,10 @@ impl ArtSession {
     }
 
     /// Last Lanczos curvature.
+    ///
+    /// A non-finite opening estimate or climb step returns
+    /// [`SaddleError::NonFinite`] and does not replace this value.
+    /// Before the first finite estimate this is NaN.
     #[must_use]
     pub fn curvature(&self) -> f64 {
         self.curvature
@@ -1016,6 +1020,12 @@ impl ArtSession {
         let estimate = self.modes.estimate_mode(&logged)?;
         match self.leg {
             Leg::Opening => {
+                // NaN and infinity fail the threshold comparison, so the
+                // event would push again or stop exhausted while carrying
+                // that value. Refuse the estimate instead of recording it.
+                if !estimate.curvature.is_finite() {
+                    return Err(SaddleError::NonFinite("ART curvature"));
+                }
                 self.mode = estimate.mode;
                 self.curvature = estimate.curvature;
                 if self.curvature < self.config.eigen_threshold {
@@ -1148,6 +1158,9 @@ impl ArtSession {
             .set_position(self.x.clone(), Some(self.gradient.clone()))?;
         self.modes.set_mode(self.mode.clone())?;
         let stepped = self.modes.step(&logged)?;
+        if !stepped.curvature.is_finite() {
+            return Err(SaddleError::NonFinite("ART curvature"));
+        }
         self.curvature = stepped.curvature;
         self.mode = self.modes.mode().to_owned();
         self.x = self.modes.position().to_owned();
@@ -1179,6 +1192,9 @@ impl ArtSession {
             Some(self.mode.view()),
             &[],
         )?;
+        if found.curvatures.iter().any(|value| !value.is_finite()) {
+            return Err(SaddleError::NonFinite("ART curvature"));
+        }
         self.saddle_index = Some(found.index);
         self.certificate_converged = found.converged;
         self.curvatures = found.curvatures;
