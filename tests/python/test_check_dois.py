@@ -8,9 +8,13 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
-_SPEC = importlib.util.spec_from_file_location(
-    "check_dois", _REPO / "docs" / "check_dois.py"
-)
+_SCRIPT = _REPO / "docs" / "check_dois.py"
+if not _SCRIPT.is_file():
+    pytest.skip(
+        "docs/check_dois.py is not available in this tree",
+        allow_module_level=True,
+    )
+_SPEC = importlib.util.spec_from_file_location("check_dois", _SCRIPT)
 if _SPEC is None or _SPEC.loader is None:
     raise RuntimeError("docs/check_dois.py could not be loaded")
 check_dois = importlib.util.module_from_spec(_SPEC)
