@@ -1853,6 +1853,8 @@ FIRE 2.0 keeps its opening timestep through the initial delay (Guénolé, Nöhri
 
 `set_cg_translate` replaces the translator with a Polak-Ribiere step perpendicular to the mode and a Newton step along it (Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008), doi:10.1063/1.2815812; Baker, J. Comput. Chem. 7, 385 (1986), doi:10.1002/jcc.540070402). `set_lbfgs_project` drops the component of each stored L-BFGS pair along the mode after a turn inside the 45 degree cone. Both are off.
 
+`set_lbfgs_rotate` chooses the dimer rotation plane by L-BFGS in the tangent space of the axis (Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008), doi:10.1063/1.2815812). The angle in that plane and the extrapolated trial gradient stay the modified Newton step, the memory restarts at each estimate, and the switch is off unless a host sets it. Lanczos does not read it.
+
 The table is twelve seeds from base 20261111, release, cap 0.2, from `examples/minmode_calls.rs`. Force calls are counted as in Goswami, AIP Advances 15, 085210 (2025), doi:10.1063/5.0283639, without the energy read after the search. A pair is the same saddle when both searches converge, the energies agree to 1e-6, and the aligned root-mean-square distance is under 1e-3. The calls and the milliseconds are the median of the matched pairs, and the bracket is the interquartile range. `validation/minmode_translator.csv` is every seed. Its Lanczos rows predate the torque window of minor 41.
 
 | System | Kind | Method | Matched | Calls off | Calls on |
