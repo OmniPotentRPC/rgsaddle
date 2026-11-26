@@ -43,6 +43,7 @@ def test_ol_fold_still_applies(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _authors(monkeypatch, "S", "So/rensen") == [["s", "sorensen"]]
     assert _authors(monkeypatch, "", "l/ukasz") == [["lukasz"]]
     assert _authors(monkeypatch, "", "O/L") == [["ol"]]
+    assert _authors(monkeypatch, "So/ren", "Larsen") == [["soren", "larsen"]]
 
 
 def test_slash_between_other_letters_is_not_folded(
@@ -50,6 +51,7 @@ def test_slash_between_other_letters_is_not_folded(
 ) -> None:
     assert _authors(monkeypatch, "A", "b/c") == [["a", "b", "c"]]
     assert _authors(monkeypatch, "Ann", "Smith/Jones") == [["ann", "smith", "jones"]]
+    assert _authors(monkeypatch, "b/c", "Ann") == [["b", "c", "ann"]]
 
 
 def test_plain_valid_doi_passes(monkeypatch: pytest.MonkeyPatch) -> None:
