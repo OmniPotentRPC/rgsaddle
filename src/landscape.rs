@@ -776,7 +776,19 @@ impl<S: PointSurface> PointSurface for Budget<'_, S> {
             });
         }
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.inner.eval(x)
+        let (energy, gradient) = self.inner.eval(x)?;
+        if gradient.len() != x.len() {
+            return Err(SaddleError::Shape(
+                "landscape gradient length does not match the coordinates".into(),
+            ));
+        }
+        if !energy.is_finite() {
+            return Err(SaddleError::NonFinite("landscape energy"));
+        }
+        if !gradient.iter().all(|component| component.is_finite()) {
+            return Err(SaddleError::NonFinite("landscape gradient"));
+        }
+        Ok((energy, gradient))
     }
 
     fn hessian_vector(
@@ -927,4 +939,82 @@ fn separation(
         return Err(SaddleError::NonFinite("critical-point distance"));
     }
     Ok(distance)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FixedEval {
+        energy: f64,
+        gradient: Array1<f64>,
+    }
+
+    impl PointSurface for FixedEval {
+        fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+            let _ = x;
+            Ok((self.energy, self.gradient.clone()))
+        }
+    }
+
+    fn session(gate: ForceGate) -> LandscapeSession {
+        LandscapeSession::new(
+            LandscapeConfig::default().with_force_gate(gate),
+            Array1::zeros(3),
+            None,
+        )
+        .expect("landscape session")
+    }
+
+    fn budget<'a, S>(surface: &'a S) -> Budget<'a, S> {
+        Budget {
+            inner: surface,
+            calls: AtomicUsize::new(0),
+            limit: 8,
+        }
+    }
+
+    #[test]
+    fn a_nan_gradient_is_not_a_converged_minimum() {
+        let surface = FixedEval {
+            energy: 0.0,
+            gradient: Array1::from_elem(3, f64::NAN),
+        };
+        let err = session(ForceGate::MaxForceOnAtom)
+            .minimize(&budget(&surface), Array1::zeros(3))
+            .expect_err("NaN gradient");
+        assert!(matches!(err, SaddleError::NonFinite(_)));
+    }
+
+    #[test]
+    fn a_short_gradient_is_a_shape_error() {
+        let surface = FixedEval {
+            energy: 0.0,
+            gradient: Array1::zeros(1),
+        };
+        let err = session(ForceGate::MaxForceOnAtom)
+            .minimize(&budget(&surface), Array1::zeros(3))
+            .expect_err("short gradient");
+        assert!(matches!(err, SaddleError::Shape(_)));
+    }
+
+    #[test]
+    fn a_non_finite_energy_or_gradient_is_refused() {
+        let energy = FixedEval {
+            energy: f64::NAN,
+            gradient: Array1::zeros(3),
+        };
+        let err = budget(&energy)
+            .eval(Array1::zeros(3).view())
+            .expect_err("NaN energy");
+        assert!(matches!(err, SaddleError::NonFinite(_)));
+        let gradient = FixedEval {
+            energy: 0.0,
+            gradient: Array1::from_elem(3, f64::INFINITY),
+        };
+        let err = budget(&gradient)
+            .eval(Array1::zeros(3).view())
+            .expect_err("infinite gradient");
+        assert!(matches!(err, SaddleError::NonFinite(_)));
+    }
 }
