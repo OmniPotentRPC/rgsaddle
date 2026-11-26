@@ -1,0 +1,2 @@
+~site_occupancy~ now finds the nearest image of every atom in any cell.
+It searched only one image past the rounded fractions, which misses the nearest image in a strongly skewed cell; the search now reaches as far as the plane spacings of the lattice require.

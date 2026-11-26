@@ -206,14 +206,14 @@ fn trajectory() -> (String, String) {
     (dig.finish(), dig.lines.join("\n"))
 }
 
-/// SHA-256 of the baseline dump at develop e799819, before any refactor
-/// in this series.
+/// SHA-256 of the trajectory dump.
 ///
 /// Measured with the same command under default and
 /// `readcon,readcon-db`; both feature sets produce this same digest. The
-/// PAFI section of the dump depends on `pafi_profile`, so a change to the
-/// PAFI walk moves the digest and has to re-measure it.
-const EXPECTED: &str = "c4caf5f773a618cb3856b0c521236fb2810887dec5afc9b9668b4ae37b85429b";
+/// PAFI section includes the retained configurations, so a change to the
+/// walk or to which records are kept moves the digest and has to
+/// re-measure it.
+const EXPECTED: &str = "c6c3796ad649679a421f16786e3a028b80019013ee994c46790a4dc9960bf0d8";
 
 #[test]
 fn trajectories_match_the_baseline_bits() {

@@ -1,0 +1,1 @@
+=ArtSession= now finishes as =ArtStatus::LostCurvature= when the climb's curvature recovery is exhausted with a non-negative rejected curvature, and =DirectionCover= records it as =ArmFailure::LostCurvature=. Exhausted recovery with a negative curvature is still =SaddleError::ArtIndexOneLost=.

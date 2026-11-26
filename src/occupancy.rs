@@ -115,6 +115,7 @@ pub fn site_occupancy(
         return Err(SaddleError::Invalid("the cell must have a volume".into()));
     }
     let inv = m3_inv(cell)?;
+    let images = Images::new(cell, [true; 3])?;
     let n_sites = sites.len() / 3;
     let widths = plane_spacings(cell, volume);
     let spacing = (volume / n_sites as f64).cbrt();
@@ -144,7 +145,7 @@ pub fn site_occupancy(
         for ring in 0..=reach {
             visit_ring(home, ring, bins, |bin| {
                 for &site in &grid[bin] {
-                    let d2 = image_distance2(s, site_frac[site], cell);
+                    let d2 = images.distance2(sub(s, site_frac[site]));
                     if d2 < best.0 || (d2 == best.0 && site < best.1) {
                         best = (d2, site);
                     }
@@ -170,6 +171,10 @@ fn fractional(r: [f64; 3], inv: M3) -> [f64; 3] {
         *value = r[0] * inv[0][i] + r[1] * inv[1][i] + r[2] * inv[2][i];
     }
     s
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
 fn wrap(s: [f64; 3]) -> [f64; 3] {
@@ -215,28 +220,178 @@ fn visit_ring(home: [usize; 3], ring: usize, bins: [usize; 3], mut visit: impl F
     }
 }
 
-fn image_distance2(a: [f64; 3], b: [f64; 3], cell: M3) -> f64 {
-    let mut ds = [0.0; 3];
-    for k in 0..3 {
-        ds[k] = a[k] - b[k];
-        ds[k] -= ds[k].round();
-    }
-    let mut best = f64::INFINITY;
-    // A skewed cell's nearest image can sit one step past the rounded one.
-    for ix in -1..=1 {
-        for iy in -1..=1 {
-            for iz in -1..=1 {
-                let f = [ds[0] + ix as f64, ds[1] + iy as f64, ds[2] + iz as f64];
-                let mut d2 = 0.0;
-                for c in 0..3 {
-                    let x = f[0] * cell[0][c] + f[1] * cell[1][c] + f[2] * cell[2][c];
-                    d2 += x * x;
-                }
-                best = best.min(d2);
+/// Shortest lattice image of a displacement, taken along the periodic axes
+/// of a cell.
+///
+/// Rounding the fractional coordinates is the minimum image only when the
+/// lattice vectors are orthogonal. In a skewed cell the nearest image can
+/// sit one or more steps past the rounded one, so the neighbouring images
+/// are searched. The search is exact: an image whose coefficient along a
+/// periodic vector `a_k` differs from the rounded one by `m` is at least
+/// `(|m| - 1/2) h_k` long, where `h_k` is the spacing of the lattice planes
+/// across `a_k`, so only offsets with `|m| <= |v| / h_k + 1/2` can beat the
+/// rounded image `v`.
+///
+/// A component along an open axis is never folded. Only the part of a
+/// displacement in the span of the periodic vectors changes between images,
+/// so the rounding and the search use the coefficients of its projection
+/// onto that span.
+pub(crate) struct Images {
+    cell: M3,
+    periodic: [bool; 3],
+    /// Inverse Gram matrix of the periodic vectors, with zero rows and
+    /// columns for the open axes.
+    gram_inv: M3,
+    /// Plane spacing `h_k` within the periodic sublattice; unused on an
+    /// open axis.
+    spacing: [f64; 3],
+    diagonal: bool,
+    orthogonal: bool,
+}
+
+impl Images {
+    /// The cell must have a volume, whichever axes are periodic.
+    pub(crate) fn new(cell: M3, periodic: [bool; 3]) -> Result<Self, SaddleError> {
+        let volume = m3_det(cell).abs();
+        if !(volume.is_finite() && volume > 0.0) {
+            return Err(SaddleError::Invalid("the cell must have a volume".into()));
+        }
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let mut gram = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                gram[i][j] = if periodic[i] && periodic[j] {
+                    dot(cell[i], cell[j])
+                } else if i == j {
+                    1.0
+                } else {
+                    0.0
+                };
             }
         }
+        let mut gram_inv = m3_inv(gram)?;
+        let mut spacing = [0.0; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                if !(periodic[i] && periodic[j]) {
+                    gram_inv[i][j] = 0.0;
+                }
+            }
+            if periodic[i] {
+                spacing[i] = 1.0 / gram_inv[i][i].sqrt();
+            }
+        }
+        let diagonal = (0..3).all(|i| (0..3).all(|j| i == j || cell[i][j] == 0.0));
+        let orthogonal = (0..3).all(|i| (0..i).all(|j| dot(cell[i], cell[j]) == 0.0));
+        Ok(Self {
+            cell,
+            periodic,
+            gram_inv,
+            spacing,
+            diagonal,
+            orthogonal,
+        })
     }
-    best
+
+    /// `d` moved by whole periodic lattice vectors to its shortest image.
+    ///
+    /// In an orthogonal cell each periodic coefficient is rounded into
+    /// `[-1/2, 1/2]`, half toward zero, so a displacement of exactly half a
+    /// cell keeps its sign. In any other cell the neighbouring images are
+    /// searched, and a tie keeps the rounded image.
+    pub(crate) fn displacement(&self, d: [f64; 3]) -> [f64; 3] {
+        if !self.periodic.iter().any(|&p| p) {
+            return d;
+        }
+        let mut whole = [0.0; 3];
+        if self.diagonal {
+            for ax in 0..3 {
+                if self.periodic[ax] {
+                    whole[ax] = shift(d[ax] / self.cell[ax][ax]);
+                }
+            }
+        } else {
+            let mut along = [0.0; 3];
+            for (k, value) in along.iter_mut().enumerate() {
+                *value = (0..3).map(|c| self.cell[k][c] * d[c]).sum();
+            }
+            let mut rest = [0.0; 3];
+            for k in 0..3 {
+                let g: f64 = (0..3).map(|j| self.gram_inv[k][j] * along[j]).sum();
+                whole[k] = shift(g);
+                rest[k] = g - whole[k];
+            }
+            if !self.orthogonal {
+                let (offset, _) = self.nearest(rest);
+                for k in 0..3 {
+                    whole[k] += offset[k];
+                }
+            }
+        }
+        let mut out = d;
+        for (c, value) in out.iter_mut().enumerate() {
+            *value -= whole[0] * self.cell[0][c]
+                + whole[1] * self.cell[1][c]
+                + whole[2] * self.cell[2][c];
+        }
+        out
+    }
+
+    /// Squared length of the shortest image of the fractional displacement
+    /// `ds`, every axis taken as periodic.
+    fn distance2(&self, ds: [f64; 3]) -> f64 {
+        self.nearest(ds.map(|s| s - shift(s))).1
+    }
+
+    /// The whole-cell offset `m` that makes `Σ (rest_k - m_k) a_k` shortest
+    /// over the periodic axes, and that squared length. `rest` holds
+    /// coefficients already rounded into `[-1/2, 1/2]`; the zero offset wins
+    /// a tie, then the first offset in lexicographic order.
+    fn nearest(&self, rest: [f64; 3]) -> ([f64; 3], f64) {
+        let length2 = |m: [f64; 3]| {
+            let mut d2 = 0.0;
+            for c in 0..3 {
+                let mut x = 0.0;
+                for k in 0..3 {
+                    if self.periodic[k] {
+                        x += (rest[k] - m[k]) * self.cell[k][c];
+                    }
+                }
+                d2 += x * x;
+            }
+            d2
+        };
+        let mut best = ([0.0; 3], length2([0.0; 3]));
+        if !best.1.is_finite() {
+            return best;
+        }
+        let length = best.1.sqrt();
+        let reach: [i64; 3] = std::array::from_fn(|k| {
+            if self.periodic[k] {
+                (length / self.spacing[k] + 0.5).floor() as i64
+            } else {
+                0
+            }
+        });
+        for mx in -reach[0]..=reach[0] {
+            for my in -reach[1]..=reach[1] {
+                for mz in -reach[2]..=reach[2] {
+                    let m = [mx as f64, my as f64, mz as f64];
+                    let d2 = length2(m);
+                    if d2 < best.1 {
+                        best = (m, d2);
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+/// Whole cells to subtract from the fraction `s`, rounding half toward zero.
+fn shift(s: f64) -> f64 {
+    let steps = (s.abs() - 0.5).ceil().max(0.0);
+    steps.copysign(s)
 }
 
 /// Distance between opposite faces of the cell, one per lattice vector.
@@ -314,11 +469,12 @@ mod tests {
         let atoms = sites.mapv(|v| v * 1.01 + 0.37);
         let occupancy = site_occupancy(sites.view(), atoms.view(), cell).unwrap();
         let inv = m3_inv(cell).unwrap();
+        let images = Images::new(cell, [true; 3]).unwrap();
         for (atom, &site_of) in occupancy.site_of.iter().enumerate() {
             let s = fractional(point(atoms.view(), atom), inv);
             let mut best = (f64::INFINITY, 0);
             for site in 0..sites.len() / 3 {
-                let d2 = image_distance2(s, fractional(point(sites.view(), site), inv), cell);
+                let d2 = images.distance2(sub(s, fractional(point(sites.view(), site), inv)));
                 if d2 < best.0 {
                     best = (d2, site);
                 }

@@ -3,6 +3,7 @@
 use ndarray::{Array1, Array2, ArrayView1};
 
 use crate::error::SaddleError;
+use crate::mass_metric::MassMetric;
 use crate::minmode::PointSurface;
 pub use crate::projector::Hyperplane;
 pub(crate) use crate::projector::orthonormal_rows;
@@ -32,10 +33,11 @@ pub fn mass_weighted_rigid_translations(
             "masses must be finite and positive".into(),
         ));
     }
+    let metric = MassMetric::atoms(ArrayView1::from(masses), 3 * n_atoms)?;
     let normalization = masses.iter().sum::<f64>().sqrt();
     let mut rows = Array2::zeros((3, 3 * n_atoms));
-    for (atom, mass) in masses.iter().enumerate() {
-        let weight = mass.sqrt() / normalization;
+    for atom in 0..n_atoms {
+        let weight = metric.sqrt_at(3 * atom) / normalization;
         let base = 3 * atom;
         rows[(0, base)] = weight;
         rows[(1, base + 1)] = weight;
@@ -58,21 +60,24 @@ impl Hyperplane {
 
 /// A Cartesian surface in mass-weighted coordinates `q = M^{1/2} x`.
 ///
-/// The energy is `V(M^{-1/2} q)` and the gradient `M^{-1/2} ∇V`. Unit mass
-/// in these coordinates is the Cartesian dynamics with masses `M`, so the
-/// plane sampler and the shooting step take mass 1 here. Hessian actions
-/// and excluded modes are mapped when the wrapped surface has them.
+/// The square-root weights are a [`MassMetric`]. A point is multiplied by
+/// them and a gradient, which is a covector, is divided by them. The energy
+/// is `V(M^{-1/2} q)` and the gradient `M^{-1/2} ∇V`. Unit mass in these
+/// coordinates is the Cartesian dynamics with masses `M`, so the plane
+/// sampler and the shooting step take mass 1 here. Hessian actions and
+/// excluded modes are mapped when the wrapped surface has them.
 pub struct MassWeighted<'a, S> {
     surface: &'a S,
-    sqrt_mass: Array1<f64>,
+    metric: MassMetric,
 }
 
 impl<'a, S: PointSurface> MassWeighted<'a, S> {
     /// One mass per coordinate.
     pub fn new(surface: &'a S, masses: &[f64]) -> Result<Self, SaddleError> {
+        let sqrt_mass = sqrt_masses(masses, masses.len())?;
         Ok(Self {
             surface,
-            sqrt_mass: sqrt_masses(masses, masses.len())?,
+            metric: MassMetric::from_square_roots(sqrt_mass.view())?,
         })
     }
 
@@ -84,23 +89,23 @@ impl<'a, S: PointSurface> MassWeighted<'a, S> {
 
     /// Masses, one per coordinate.
     pub fn masses(&self) -> Array1<f64> {
-        self.sqrt_mass.mapv(|r| r * r)
+        self.metric.sqrt_vector().mapv(|root| root * root)
     }
 
     /// `q = M^{1/2} x`.
     pub fn to_mass_weighted(&self, x: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
         self.check(x.len())?;
-        Ok(&x * &self.sqrt_mass)
+        Ok(self.metric.multiply_sqrt(x))
     }
 
     /// `x = M^{-1/2} q`.
     pub fn to_cartesian(&self, q: ArrayView1<f64>) -> Result<Array1<f64>, SaddleError> {
         self.check(q.len())?;
-        Ok(&q / &self.sqrt_mass)
+        Ok(self.metric.divide_sqrt(q))
     }
 
     fn check(&self, n: usize) -> Result<(), SaddleError> {
-        if n == self.sqrt_mass.len() {
+        if n == self.metric.len() {
             Ok(())
         } else {
             Err(SaddleError::Shape(
@@ -119,7 +124,7 @@ impl<S: PointSurface> PointSurface for MassWeighted<'_, S> {
                 "surface gradient length differs from the masses".into(),
             ));
         }
-        Ok((energy, gradient / &self.sqrt_mass))
+        Ok((energy, self.metric.divide_sqrt(gradient.view())))
     }
 
     fn hessian_vector(
@@ -132,7 +137,7 @@ impl<S: PointSurface> PointSurface for MassWeighted<'_, S> {
         Ok(self
             .surface
             .hessian_vector(x.view(), u.view())?
-            .map(|hv| hv / &self.sqrt_mass))
+            .map(|hv| self.metric.divide_sqrt(hv.view())))
     }
 
     fn excluded_modes(&self, q: ArrayView1<f64>) -> Result<Array2<f64>, SaddleError> {
@@ -144,7 +149,8 @@ impl<S: PointSurface> PointSurface for MassWeighted<'_, S> {
             ));
         }
         for mut row in modes.rows_mut() {
-            row *= &self.sqrt_mass;
+            let weighted = self.metric.multiply_sqrt(row.view());
+            row.assign(&weighted);
         }
         Ok(modes)
     }
@@ -393,6 +399,43 @@ mod tests {
                 .is_none()
         );
         assert!(MassWeighted::new(&Quadratic, &[1.0, 0.0]).is_err());
+    }
+
+    #[test]
+    fn mass_weighted_maps_match_direct_square_roots() {
+        let masses = [2.0, 0.5];
+        let surface = MassWeighted::new(&Quadratic, &masses).unwrap();
+        let cartesian = array![0.3, -0.7];
+        let sqrt_mass = array![masses[0].sqrt(), masses[1].sqrt()];
+        let weighted = &cartesian * &sqrt_mass;
+        let mapped = surface.to_mass_weighted(cartesian.view()).unwrap();
+        for (actual, expected) in mapped.iter().zip(weighted.iter()) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        let back = surface.to_cartesian(weighted.view()).unwrap();
+        for (actual, expected) in back.iter().zip(cartesian.iter()) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        let (_, gradient) = Quadratic.eval(cartesian.view()).unwrap();
+        let expected_gradient = &gradient / &sqrt_mass;
+        let (_, actual_gradient) = surface.eval(weighted.view()).unwrap();
+        for (actual, expected) in actual_gradient.iter().zip(expected_gradient.iter()) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        let modes = surface.excluded_modes(weighted.view()).unwrap();
+        assert_eq!(modes[(0, 0)].to_bits(), sqrt_mass[0].to_bits());
+        assert_eq!(modes[(0, 1)].to_bits(), sqrt_mass[1].to_bits());
+
+        let atom_masses = [1.0, 4.0, 9.0];
+        let rows = mass_weighted_rigid_translations(&atom_masses, atom_masses.len()).unwrap();
+        let normalization = atom_masses.iter().sum::<f64>().sqrt();
+        for (atom, mass) in atom_masses.iter().enumerate() {
+            let weight = mass.sqrt() / normalization;
+            assert_eq!(rows[(0, 3 * atom)].to_bits(), weight.to_bits());
+            assert_eq!(rows[(1, 3 * atom + 1)].to_bits(), weight.to_bits());
+            assert_eq!(rows[(2, 3 * atom + 2)].to_bits(), weight.to_bits());
+            assert_eq!(rows[(0, 3 * atom + 1)].to_bits(), 0.0_f64.to_bits());
+        }
     }
 
     /// Energy `½|x|² + c₀₀`, gradient `x`: the first cell entry stands in

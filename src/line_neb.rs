@@ -47,6 +47,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rgmin::{Control, Method, Oracle, Solver};
 
+use crate::mass_metric::{MassMetric, MetricCovector, MetricPoint, MetricTangent};
 use crate::{BandSurface, SaddleError};
 
 /// Policy for an LI-NEB session endpoint below the fixed energy.
@@ -285,9 +286,8 @@ fn validate_inputs(
     Ok(())
 }
 
-fn mass_scaled(positions: ArrayView2<'_, f64>, masses: ArrayView1<'_, f64>) -> Array2<f64> {
-    let sqrt_masses = masses.mapv(f64::sqrt);
-    &positions * &sqrt_masses
+fn mass_scaled(metric: &MassMetric, positions: ArrayView2<'_, f64>) -> Array2<f64> {
+    metric.weight_point_rows(positions)
 }
 
 /// How an endpoint below the fixed energy enters the action weights.
@@ -403,16 +403,17 @@ pub fn fixed_energy_action(
     reduced_planck: f64,
 ) -> Result<f64, SaddleError> {
     validate_inputs(positions, energies, masses, energy, reduced_planck)?;
+    let metric = MassMetric::coordinates(masses, masses.len())?;
     let xi = action_weights(energies, energy, reduced_planck, BelowEndpoint::Refuse)?;
-    trapezoid_action(positions, masses, &xi)
+    trapezoid_action(positions, &metric, &xi)
 }
 
 fn trapezoid_action(
     positions: ArrayView2<'_, f64>,
-    masses: ArrayView1<'_, f64>,
+    metric: &MassMetric,
     xi: &Array1<f64>,
 ) -> Result<f64, SaddleError> {
-    let q = mass_scaled(positions, masses);
+    let q = mass_scaled(metric, positions);
     let (_, lengths) = segments(q.view())?;
     let mut action = 0.0;
     for i in 0..lengths.len() {
@@ -481,12 +482,12 @@ pub fn fixed_energy_action_force(
     if !gradients.iter().all(|v| v.is_finite()) {
         return Err(SaddleError::NonFinite("LI-NEB gradients"));
     }
-    let sqrt_masses = masses.mapv(f64::sqrt);
-    let q = &positions * &sqrt_masses;
-    let force_q = -&gradients / &sqrt_masses;
+    let metric = MassMetric::coordinates(masses, masses.len())?;
+    let q = metric.weight_point_rows(positions);
+    let force_q = metric.weight_force_rows(gradients);
     let xi = action_weights(energies, energy, reduced_planck, BelowEndpoint::Refuse)?;
     let force = action_force_q(q.view(), &xi, force_q.view(), reduced_planck)?;
-    Ok(force * &sqrt_masses)
+    Ok(metric.unweight_covector_rows(force.view()))
 }
 
 fn store<T>(mutex: &Mutex<T>, value: T) -> bool {
@@ -563,13 +564,12 @@ fn improved_tangent(
 
 fn evaluate(
     config: &LineNebConfig,
-    masses: ArrayView1<'_, f64>,
+    metric: &MassMetric,
     surface: &impl BandSurface,
     q: ArrayView2<'_, f64>,
     step: usize,
 ) -> Result<Evaluation, SaddleError> {
-    let sqrt_masses = masses.mapv(f64::sqrt);
-    let positions = &q / &sqrt_masses;
+    let positions = metric.unweight_point_rows(q);
     let mut energies = Array1::zeros(q.nrows());
     let mut gradients = Array2::zeros(q.raw_dim());
     surface.eval(positions.view(), &mut energies, &mut gradients)?;
@@ -584,8 +584,8 @@ fn evaluate(
         EndpointBelowEnergy::Strict => BelowEndpoint::Strict { step },
     };
     let xi = action_weights(energies.view(), config.energy, config.reduced_planck, below)?;
-    let action = trapezoid_action(positions.view(), masses, &xi)?;
-    let force_q = -&gradients / &sqrt_masses;
+    let action = trapezoid_action(positions.view(), metric, &xi)?;
+    let force_q = metric.weight_force_rows(gradients.view());
     let action_force = action_force_q(q, &xi, force_q.view(), config.reduced_planck)?;
     let (_, lengths) = segments(q)?;
     let mut optimization_force = Array2::zeros(q.raw_dim());
@@ -713,13 +713,13 @@ fn level_distance(
     surface: &impl BandSurface,
     start_q: ArrayView1<'_, f64>,
     direction: ArrayView1<'_, f64>,
-    sqrt_masses: ArrayView1<'_, f64>,
+    metric: &MassMetric,
     level: f64,
     budget: &mut usize,
 ) -> Result<f64, SaddleError> {
     let mut energy_at = |distance: f64| -> Result<f64, SaddleError> {
         let trial_q = start_q.to_owned() + distance * &direction;
-        let trial = &trial_q / &sqrt_masses;
+        let trial = metric.unweight_point(MetricPoint::new(trial_q.view()))?;
         charge(budget)?;
         Ok(one_surface(surface, trial.view())?.0)
     };
@@ -767,18 +767,22 @@ fn level_distance(
 fn energy_slice(
     surface: &impl BandSurface,
     q: ArrayView1<'_, f64>,
-    sqrt_masses: ArrayView1<'_, f64>,
+    metric: &MassMetric,
     target: f64,
     spacing: f64,
     budget: &mut usize,
 ) -> Result<Array1<f64>, SaddleError> {
-    let position = &q / &sqrt_masses;
+    let position = metric.unweight_point(MetricPoint::new(q))?;
     charge(budget)?;
     let (energy, gradient) = one_surface(surface, position.view())?;
     if energy <= target {
         return Ok(q.to_owned());
     }
-    let force_q = -gradient / sqrt_masses;
+    let mut negated = gradient.clone();
+    for value in negated.iter_mut() {
+        *value = -*value;
+    }
+    let force_q = metric.weight_covector(MetricCovector::new(negated.view()))?;
     let force_norm = force_q.dot(&force_q).sqrt();
     if force_norm <= 0.0 || force_norm.is_nan() {
         return Err(SaddleError::Invalid(
@@ -793,7 +797,7 @@ fn energy_slice(
     let mut upper = opening_step(spacing)?;
     loop {
         let trial_q = q.to_owned() + upper * &direction;
-        let trial = &trial_q / &sqrt_masses;
+        let trial = metric.unweight_point(MetricPoint::new(trial_q.view()))?;
         charge(budget)?;
         if one_surface(surface, trial.view())?.0 <= target {
             break;
@@ -812,7 +816,7 @@ fn energy_slice(
             break;
         }
         let trial_q = q.to_owned() + middle * &direction;
-        let trial = &trial_q / &sqrt_masses;
+        let trial = metric.unweight_point(MetricPoint::new(trial_q.view()))?;
         charge(budget)?;
         if one_surface(surface, trial.view())?.0 > target {
             lower = middle;
@@ -908,9 +912,9 @@ pub fn fixed_energy_mep_seed(
             "fixed-energy MEP seed input is inconsistent".into(),
         ));
     }
-    let sqrt_masses = masses.mapv(f64::sqrt);
-    let saddle_q = &saddle * &sqrt_masses;
-    let mode_q = &mode * &sqrt_masses;
+    let metric = MassMetric::coordinates(masses, masses.len())?;
+    let saddle_q = metric.weight_point(MetricPoint::new(saddle))?;
+    let mode_q = metric.weight_tangent(MetricTangent::new(mode))?;
     let mode_norm = mode_q.dot(&mode_q).sqrt();
     if mode_norm <= 0.0 || mode_norm.is_nan() {
         return Err(SaddleError::Invalid(
@@ -931,7 +935,7 @@ pub fn fixed_energy_mep_seed(
             surface,
             saddle_q.view(),
             branch_direction.view(),
-            sqrt_masses.view(),
+            &metric,
             scale_level,
             &mut budget,
         )?;
@@ -942,14 +946,7 @@ pub fn fixed_energy_mep_seed(
         for slice in 1..seed.images {
             let fraction = slice as f64 / (seed.images - 1) as f64;
             let level = seed.saddle_energy + fraction * (seed.target_energy - seed.saddle_energy);
-            let next = energy_slice(
-                surface,
-                q.view(),
-                sqrt_masses.view(),
-                level,
-                spacing,
-                &mut budget,
-            )?;
+            let next = energy_slice(surface, q.view(), &metric, level, spacing, &mut budget)?;
             let step = &next - &branch[slice - 1];
             let moved = step.dot(&step).sqrt();
             if moved > 0.0 {
@@ -992,14 +989,14 @@ pub fn fixed_energy_mep_seed(
                 .assign(&(&joined[left] + fraction * (&joined[right] - &joined[left])));
         }
     }
-    Ok(result_q / &sqrt_masses)
+    Ok(metric.unweight_point_rows(result_q.view()))
 }
 
 /// Fixed-image-count LI-NEB session using rgmin's global eOn
 /// quick-min velocity projection with a fixed time step.
 pub struct LineNebSession {
     config: LineNebConfig,
-    masses: Array1<f64>,
+    metric: MassMetric,
     q: Array2<f64>,
     solver: Solver,
     iteration: usize,
@@ -1016,14 +1013,18 @@ impl LineNebSession {
     /// [`SaddleError::NonFinite`] when a position or mass is not finite.
     pub fn new(config: LineNebConfig, positions: Array2<f64>) -> Result<Self, SaddleError> {
         let energies = Array1::zeros(positions.nrows());
-        let masses = config
-            .masses
-            .clone()
-            .unwrap_or_else(|| Array1::ones(positions.ncols()));
+        let masses_buf;
+        let masses = match config.masses.as_ref() {
+            Some(masses) => masses.view(),
+            None => {
+                masses_buf = Array1::ones(positions.ncols());
+                masses_buf.view()
+            }
+        };
         validate_inputs(
             positions.view(),
             energies.view(),
-            masses.view(),
+            masses,
             config.energy,
             config.reduced_planck,
         )?;
@@ -1039,7 +1040,11 @@ impl LineNebSession {
                 )));
             }
         }
-        let q = mass_scaled(positions.view(), masses.view());
+        let metric = match config.masses.as_ref() {
+            Some(masses) => MassMetric::coordinates(masses.view(), masses.len())?,
+            None => MassMetric::unit(positions.ncols())?,
+        };
+        let q = mass_scaled(&metric, positions.view());
         segments(q.view())?;
         let dim = q.len();
         let mut solver = Solver::new(
@@ -1055,7 +1060,7 @@ impl LineNebSession {
         solver.set_atom_maxmove(0.0);
         Ok(Self {
             config,
-            masses,
+            metric,
             q,
             solver,
             iteration: 0,
@@ -1065,7 +1070,7 @@ impl LineNebSession {
 
     /// Current physical positions, including the movable endpoints.
     pub fn positions(&self) -> Array2<f64> {
-        &self.q / &self.masses.mapv(f64::sqrt)
+        self.metric.unweight_point_rows(self.q.view())
     }
 
     /// Controls this session was built with. Unset masses stay `None`;
@@ -1102,7 +1107,7 @@ impl LineNebSession {
         self.endpoint_violation = None;
         let shape = self.q.raw_dim();
         let config = &self.config;
-        let masses = self.masses.view();
+        let metric = &self.metric;
         let step = self
             .iteration
             .checked_add(1)
@@ -1119,7 +1124,7 @@ impl LineNebSession {
                 }
             };
             rows.fetch_add(q.nrows(), Ordering::Relaxed);
-            match evaluate(config, masses, surface, q.view(), step) {
+            match evaluate(config, metric, surface, q.view(), step) {
                 Ok(evaluation) => {
                     let gradient =
                         -Array1::from_iter(evaluation.optimization_force.iter().copied());
@@ -1178,7 +1183,7 @@ impl LineNebSession {
         };
         let evaluation = match cached {
             Some((evaluated, evaluation)) if evaluated == accepted => evaluation,
-            _ => match evaluate(config, masses, surface, accepted_q.view(), step) {
+            _ => match evaluate(config, metric, surface, accepted_q.view(), step) {
                 Ok(evaluation) => {
                     rows.fetch_add(accepted_q.nrows(), Ordering::Relaxed);
                     evaluation
@@ -1328,6 +1333,7 @@ mod opening_step_tests {
 #[cfg(test)]
 mod level_distance_tests {
     use super::level_distance;
+    use crate::MassMetric;
     use crate::{BandSurface, SaddleError};
     use ndarray::{Array1, Array2, ArrayView2, array};
 
@@ -1358,7 +1364,7 @@ mod level_distance_tests {
             &Cup { offset, width },
             array![offset].view(),
             array![1.0].view(),
-            array![1.0].view(),
+            &MassMetric::unit(1).unwrap(),
             level,
             &mut budget,
         )
@@ -1407,7 +1413,7 @@ mod level_distance_tests {
             &Hill,
             array![0.0].view(),
             array![1.0].view(),
-            array![1.0].view(),
+            &MassMetric::unit(1).unwrap(),
             -1.0,
             &mut budget,
         );
@@ -1420,7 +1426,7 @@ mod level_distance_tests {
             &Hill,
             array![0.0].view(),
             array![1.0].view(),
-            array![1.0].view(),
+            &MassMetric::unit(1).unwrap(),
             2.0,
             &mut budget,
         );
@@ -1440,7 +1446,7 @@ mod level_distance_tests {
             },
             array![0.0].view(),
             array![1.0].view(),
-            array![1.0].view(),
+            &MassMetric::unit(1).unwrap(),
             0.5,
             &mut budget,
         );

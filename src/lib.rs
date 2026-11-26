@@ -75,6 +75,7 @@ pub mod capi;
 pub mod capi_hyperplane;
 pub mod connect;
 pub mod defect_pair;
+pub mod direction_cover;
 pub mod elastic_dipole;
 pub mod error;
 pub mod geodesic;
@@ -84,6 +85,7 @@ pub mod indexk;
 pub mod lammps;
 pub mod line_neb;
 pub mod lineb;
+pub mod mass_metric;
 pub mod minmode;
 pub mod nichols;
 pub mod npt;
@@ -93,6 +95,7 @@ pub mod ocineb;
 pub mod ohtst;
 pub mod pafi;
 pub mod pair_network;
+pub mod placement;
 pub mod prfo;
 pub mod projection;
 pub mod projector;
@@ -157,6 +160,11 @@ pub use defect_pair::{
     seeded_saddles, segment_band, shell_pair_factor, smoluchowski_rate, sphere_hit_probability,
     spherical_return_probability, volume_from_frequency,
 };
+pub use direction_cover::{
+    ArmFailure, ArmId, ArmOutcome, ArmPolicy, ArmRecord, ArmSuggestion, ArmTrial, AtomCoverage,
+    CoverBudget, CoverageReport, DirectionCover, DirectionCoverConfig, ProductState, SaddleEntry,
+    covering_radius_s2, sphere_cover,
+};
 pub use elastic::{
     ElasticMultipole, LocalField, Octupole, Quadrupole, StrainGradient, quadrupole_energy,
 };
@@ -200,6 +208,7 @@ pub use lineb::{
     cartesian_image_hessian, hqtst_rate_from_image_hessians, hqtst_rate_interpolated_hessian,
     hqtst_rate_interpolated_hessian_observed, hqtst_rate_interpolated_hessian_with_step,
 };
+pub use mass_metric::{MassMetric, MetricCovector, MetricPoint, MetricTangent};
 pub use minmode::{
     ArtNConfig, FiniteDifference, MinModeConfig, MinModeKind, MinModeReport, MinModeSession,
     MinModeStatus, ModeEstimate, PointSurface, RaisedStep, halve_raised_energy,
@@ -248,6 +257,7 @@ pub use pair_network::{
     PairTarget, SensitivityCover, SurrogateCalibration, Vec3i, calibrate_surrogate, cubic_group,
     sensitivity_cover,
 };
+pub use placement::{SitePlacement, push_past, translate_onto_sites};
 pub use prfo::{PrfoKind, partitioned_rfo_eigen, restricted_prfo_displacement};
 pub use projection::ProjectionKind;
 pub use projector::{

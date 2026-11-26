@@ -1,0 +1,1 @@
+~rgsaddle.ase.AutoNEB(remove_rotation_and_translation=True)~ removes the rigid rotation as well as the translation. A free, non-periodic band without ~FixAtoms~ fits each image onto the one before it by the Kabsch rotation before and after the search, the fit of ASE's ~minimize_rotation_and_translation~.

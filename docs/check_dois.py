@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Check every cited DOI against the registry and verify .bib titles."""
+"""Check cited DOIs, bibliography titles and authors, and nearby names."""
 
 from __future__ import annotations
 
+import fnmatch
 import html
 import json
 import re
@@ -368,6 +369,255 @@ def check_bib_titles(paths: list[Path]) -> tuple[int, list[str]]:
     return len(records), errors
 
 
+CITE_RE = re.compile(r"cite:`([^`]+)`")
+DOI_THEN_CITE_RE = re.compile(
+    r"(?:doi:|https://doi\.org/)(10\.\d{4,9}/[^\s,;@]+?)[.,;)\s]*"
+    r"@@rst::cite:`([^`]+)`@@",
+    flags=re.IGNORECASE,
+)
+PROSE_DOI_RE = re.compile(r"\b(10\.\d{4,9}/\S+)", flags=re.IGNORECASE)
+FOLD_LETTERS = str.maketrans(
+    {
+        "ø": "o",
+        "Ø": "O",
+        "æ": "ae",
+        "Æ": "AE",
+        "ł": "l",
+        "Ł": "L",
+        "ß": "ss",
+        "đ": "d",
+    }
+)
+
+
+def prose_roots() -> tuple[Path, Path]:
+    """Return the Rust sources and the org guides scanned for nearby authors."""
+    return (ROOT / "src", ROOT / "docs" / "orgmode")
+
+
+def canonicalize_doi(raw: str) -> str | None:
+    """Return a lowercase DOI, or None when *raw* is not a DOI."""
+    doi = raw.strip().strip("`~\"'")
+    doi = doi.removeprefix("doi:").removeprefix("DOI:")
+    while doi and not doi[-1].isalnum():
+        doi = doi[:-1]
+    while doi and not doi[0].isalnum():
+        doi = doi[1:]
+    if not doi.lower().startswith("10.") or "/" not in doi:
+        return None
+    return doi.lower()
+
+
+def references_bib() -> dict[str, dict[str, str]]:
+    """Return cite key to fields for `docs/source/references.bib`."""
+    path = ROOT / "docs" / "source" / "references.bib"
+    return {key: fields for key, fields in parse_bib_entries(path)}
+
+
+def check_cites(records: dict[str, dict[str, str]]) -> list[str]:
+    """Fail when an org cite key is missing or disagrees with the printed DOI."""
+    errors: list[str] = []
+    for path in sorted((ROOT / "docs" / "orgmode").rglob("*.org")):
+        try:
+            label = str(path.resolve().relative_to(ROOT))
+        except ValueError:
+            label = str(path)
+        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            for match in CITE_RE.finditer(line):
+                for key in match.group(1).split(","):
+                    key = key.strip()
+                    if key and key not in records:
+                        errors.append(f"{label}:{line_no}: cite key {key} is not in the bibliography")
+            for match in DOI_THEN_CITE_RE.finditer(line):
+                doi = canonicalize_doi(match.group(1))
+                if doi is None:
+                    continue
+                for key in (item.strip() for item in match.group(2).split(",")):
+                    if not key:
+                        continue
+                    bib_doi = records.get(key, {}).get("doi")
+                    if bib_doi is not None and bib_doi.lower() != doi:
+                        errors.append(
+                            f"{label}:{line_no}: text cites {doi} beside {key}, "
+                            f"but the bibliography has {bib_doi}"
+                        )
+    return errors
+
+
+def name_tokens(text: str) -> list[str]:
+    """Fold a name to ASCII tokens. Undecodable characters become `?` wildcards."""
+    text = re.sub(r"[\u2010-\u2015]", " ", text)
+    text = re.sub(r"\\(ae|AE|ss|[oOlL])(?![A-Za-z])", r"\1", text)
+    text = re.sub(r"\\[`'^\"~=.cvuHkr]\s*\{?([A-Za-z])\}?", r"\1", text)
+    text = text.replace("{", "").replace("}", "").replace("\ufffd", "?")
+    text = unicodedata.normalize("NFKD", text.translate(FOLD_LETTERS)).casefold()
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    text = text.encode("ascii", "replace").decode()
+    return [tok for tok in re.split(r"[^0-9a-z?]+", text) if tok]
+
+
+def tokens_match(local: list[str], remote: list[str]) -> bool:
+    """Every token of the shorter name must match a distinct token of the longer.
+
+    A token matches when it is equal, or when one side is a bare initial.
+    """
+    short, long_ = sorted((local, remote), key=len)
+    unused = list(long_)
+    pending: list[str] = []
+    for tok in short:
+        for other in unused:
+            if fnmatch.fnmatchcase(tok, other) or fnmatch.fnmatchcase(other, tok):
+                unused.remove(other)
+                break
+        else:
+            pending.append(tok)
+    for tok in pending:
+        for other in unused:
+            if (len(tok) == 1 or len(other) == 1) and tok[0] == other[0]:
+                unused.remove(other)
+                break
+        else:
+            return False
+    return True
+
+
+def bib_authors(author_field: str) -> list[list[str]]:
+    """Split a BibTeX author field into token lists, one person at a time."""
+    return [name_tokens(name) for name in re.split(r"\s+and\s+", author_field)]
+
+
+def doi_registry(doi: str) -> str | None:
+    """Return the registration agency name, lowercased, when doi.org knows it."""
+    url = "https://doi.org/doiRA/" + urllib.parse.quote(doi, safe="/:")
+    try:
+        status, payload = fetch_json(url)
+    except RuntimeError:
+        return None
+    if status != 200 or not isinstance(payload, list) or not payload:
+        return None
+    row = payload[0]
+    if not isinstance(row, dict):
+        return None
+    agency = row.get("RA")
+    if isinstance(agency, str) and agency:
+        return agency.lower()
+    return None
+
+
+def crossref_authors(doi: str) -> list[list[str]] | None:
+    """Return Crossref author token lists, or None when the record has none."""
+    url = "https://api.crossref.org/works/" + urllib.parse.quote(doi, safe="")
+    try:
+        status, payload = fetch_json(url)
+    except RuntimeError:
+        return None
+    if status != 200:
+        return None
+    message = payload.get("message") if isinstance(payload, dict) else None
+    rows = message.get("author") if isinstance(message, dict) else None
+    if not isinstance(rows, list):
+        return None
+    parsed: list[list[str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        given = row.get("given", "")
+        family = row.get("family", "")
+        if not isinstance(given, str):
+            given = ""
+        if not isinstance(family, str):
+            family = ""
+        # Older Crossref deposits spell a slashed letter as `o/`, as in `So/rensen`.
+        given = re.sub(r"(?<=[A-Za-z])/", "", given)
+        family = re.sub(r"(?<=[A-Za-z])/", "", family)
+        parsed.append(name_tokens(f"{given} {family}"))
+    return parsed
+
+
+def check_authors(records: dict[str, dict[str, str]]) -> list[str]:
+    """Compare bibliography authors with Crossref, name by name and in order."""
+    errors: list[str] = []
+    registry: dict[str, str | None] = {}
+    for key, fields in records.items():
+        doi, author = fields.get("doi"), fields.get("author")
+        if not doi or not author:
+            continue
+        doi_norm = doi.lower()
+        if doi_norm not in registry:
+            registry[doi_norm] = doi_registry(doi_norm)
+        if registry[doi_norm] != "crossref":
+            continue
+        remote = crossref_authors(doi_norm)
+        if not remote:
+            continue
+        local = bib_authors(author)
+        if len(local) != len(remote) or not all(
+            tokens_match(left, right) for left, right in zip(local, remote)
+        ):
+            errors.append(
+                f"{key}: author mismatch for {doi_norm}\n"
+                f"  bib:      {author}\n"
+                f"  crossref: {'; '.join(' '.join(person) for person in remote)}"
+            )
+    return errors
+
+
+def prose_files() -> list[Path]:
+    """Return Rust and org files whose nearby prose must name a cited author."""
+    files: list[Path] = []
+    for root in prose_roots():
+        files.extend(sorted(root.rglob("*.rs")))
+        files.extend(sorted(root.rglob("*.org")))
+    return files
+
+
+def check_prose_authors() -> list[str]:
+    """Fail when prose cites a Crossref DOI without naming its first author."""
+    errors: list[str] = []
+    files = prose_files()
+    hits: dict[str, list[tuple[str, int]]] = {}
+    texts: dict[str, list[str]] = {}
+    for path in files:
+        try:
+            label = str(path.resolve().relative_to(ROOT))
+        except ValueError:
+            label = str(path)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        texts[label] = lines
+        for line_no, line in enumerate(lines, start=1):
+            for match in PROSE_DOI_RE.finditer(line):
+                doi = canonicalize_doi(match.group(1))
+                if doi is None:
+                    continue
+                hits.setdefault(doi, []).append((label, line_no))
+
+    unique = sorted(hits)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        agencies = dict(zip(unique, pool.map(doi_registry, unique)))
+    crossref_dois = [doi for doi in unique if agencies.get(doi) == "crossref"]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        authors = dict(zip(crossref_dois, pool.map(crossref_authors, crossref_dois)))
+
+    for doi in crossref_dois:
+        people = authors.get(doi)
+        if not people or not people[0]:
+            continue
+        family = people[0][-1].replace("?", "*")
+        for label, line_no in hits[doi]:
+            lines = texts[label]
+            window = " ".join(lines[max(0, line_no - 7) : line_no + 1])
+            if any(
+                fnmatch.fnmatchcase(tok, family) or fnmatch.fnmatchcase(family, tok)
+                for tok in name_tokens(window)
+            ):
+                continue
+            errors.append(
+                f"{label}:{line_no}: {doi} is by {' '.join(people[0])} "
+                "but the nearby text does not name that author"
+            )
+    return errors
+
+
 def main(argv: list[str]) -> int:
     only_bibs = [Path(arg) for arg in argv] if argv else None
     citations = cited_dois(only_bibs)
@@ -383,9 +633,24 @@ def main(argv: list[str]) -> int:
     for message in title_errors:
         print(message, file=sys.stderr)
 
-    if failed or title_errors:
+    alignment: list[str] = []
+    if only_bibs is None:
+        records = references_bib()
+        alignment.extend(check_cites(records))
+        alignment.extend(check_authors(records))
+        alignment.extend(check_prose_authors())
+        for message in alignment:
+            print(message, file=sys.stderr)
+
+    if failed or title_errors or alignment:
         return 1
-    print(f"doi links ok ({len(citations)}), bib titles ok ({checked_titles})")
+    if only_bibs is None:
+        print(
+            f"doi links ok ({len(citations)}), bib titles ok ({checked_titles}), "
+            "cite keys, authors, and nearby names ok"
+        )
+    else:
+        print(f"doi links ok ({len(citations)}), bib titles ok ({checked_titles})")
     return 0
 
 

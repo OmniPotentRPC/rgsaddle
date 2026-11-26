@@ -3,11 +3,12 @@
 use ndarray::{Array1, ArrayView1};
 
 use crate::error::SaddleError;
+use crate::mass_metric::{MassMetric, MetricCovector, MetricPoint};
 
 /// Per-coordinate masses, and the atom count when the system is a molecule.
 #[derive(Clone, Debug)]
 pub struct Masses {
-    pub(crate) sqrt_mass: Array1<f64>,
+    metric: MassMetric,
     /// `Some(atoms)` turns on quaternion alignment. The three coordinates
     /// of an atom share one atomic mass.
     pub(crate) atoms: Option<usize>,
@@ -23,17 +24,15 @@ impl Masses {
                 "a tunneling path needs a coordinate".into(),
             ));
         }
-        let mut sqrt_mass = Array1::zeros(mass.len());
-        for (i, &m) in mass.iter().enumerate() {
-            if !(m.is_finite() && m > 0.0) {
+        for &value in mass {
+            if !(value.is_finite() && value > 0.0) {
                 return Err(SaddleError::Invalid(
                     "coordinate masses must be finite and positive".into(),
                 ));
             }
-            sqrt_mass[i] = m.sqrt();
         }
         Ok(Self {
-            sqrt_mass,
+            metric: MassMetric::coordinates(mass, mass.len())?,
             atoms: None,
             adjacent: false,
         })
@@ -47,20 +46,18 @@ impl Masses {
                 "quaternion alignment needs at least two atoms".into(),
             ));
         }
-        let mut sqrt_mass = Array1::zeros(3 * atom_mass.len());
-        for (atom, &m) in atom_mass.iter().enumerate() {
-            if !(m.is_finite() && m > 0.0) {
+        for &value in atom_mass {
+            if !(value.is_finite() && value > 0.0) {
                 return Err(SaddleError::Invalid(
                     "atomic masses must be finite and positive".into(),
                 ));
             }
-            let root = m.sqrt();
-            for axis in 0..3 {
-                sqrt_mass[3 * atom + axis] = root;
-            }
         }
+        let cartesian_len = atom_mass.len().checked_mul(3).ok_or_else(|| {
+            SaddleError::Shape("atom count does not fit in a coordinate length".into())
+        })?;
         Ok(Self {
-            sqrt_mass,
+            metric: MassMetric::atoms(Array1::from(atom_mass.to_vec()).view(), cartesian_len)?,
             atoms: Some(atom_mass.len()),
             adjacent: false,
         })
@@ -81,7 +78,23 @@ impl Masses {
     }
 
     pub(crate) fn dof(&self) -> usize {
-        self.sqrt_mass.len()
+        self.metric.len()
+    }
+
+    pub(crate) fn metric(&self) -> &MassMetric {
+        &self.metric
+    }
+
+    pub(crate) fn sqrt_at(&self, index: usize) -> f64 {
+        self.metric.sqrt_at(index)
+    }
+
+    pub(crate) fn inv_sqrt_at(&self, index: usize) -> f64 {
+        self.metric.inv_sqrt_at(index)
+    }
+
+    pub(crate) fn sqrt_vector(&self) -> Array1<f64> {
+        self.metric.sqrt_vector()
     }
 
     pub(crate) fn to_weighted(
@@ -93,11 +106,7 @@ impl Masses {
                 "Cartesian vector length must match the masses".into(),
             ));
         }
-        let mut q = cartesian.to_owned();
-        for (value, &root) in q.iter_mut().zip(self.sqrt_mass.iter()) {
-            *value *= root;
-        }
-        Ok(q)
+        self.metric.weight_point(MetricPoint::new(cartesian))
     }
 
     pub(crate) fn to_cartesian(
@@ -109,11 +118,7 @@ impl Masses {
                 "mass-weighted vector length must match the masses".into(),
             ));
         }
-        let mut x = weighted.to_owned();
-        for (value, &root) in x.iter_mut().zip(self.sqrt_mass.iter()) {
-            *value /= root;
-        }
-        Ok(x)
+        self.metric.unweight_point(MetricPoint::new(weighted))
     }
 
     /// Mass-weighted force `−M^{−1/2} ∇_x V` from a Cartesian gradient.
@@ -127,9 +132,10 @@ impl Masses {
             ));
         }
         let mut force = gradient.to_owned();
-        for (value, &root) in force.iter_mut().zip(self.sqrt_mass.iter()) {
-            *value = -*value / root;
+        for value in force.iter_mut() {
+            *value = -*value;
         }
-        Ok(force)
+        self.metric
+            .weight_covector(MetricCovector::new(force.view()))
     }
 }
