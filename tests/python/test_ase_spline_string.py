@@ -23,7 +23,6 @@ from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
 from ase.mep import NEB as AseNeb
 from ase.optimize import BFGS
-
 from rgsaddle.ase import NEB
 
 
@@ -59,7 +58,9 @@ def _band(initial, final, n_interior: int = 3):
 
 
 def _energies(images) -> np.ndarray:
-    return np.array([float(image.get_potential_energy()) for image in images], dtype=np.float64)
+    return np.array(
+        [float(image.get_potential_energy()) for image in images], dtype=np.float64
+    )
 
 
 @pytest.mark.parametrize("method", ["spline", "string"])
@@ -85,7 +86,9 @@ def test_method_matches_ase_329_emt(method: str) -> None:
         nudged[0, 0] += 0.03
         ase.set_positions(nudged)
         ours.set_positions(np.array(nudged, copy=True))
-        np.testing.assert_allclose(ours.get_positions(), ase.get_positions(), atol=1e-9, rtol=0.0)
+        np.testing.assert_allclose(
+            ours.get_positions(), ase.get_positions(), atol=1e-9, rtol=0.0
+        )
         # Restore the interpolated band for the optimizer comparison.
         ase_images = _band(initial, final)
         our_images = _band(initial, final)
@@ -99,7 +102,9 @@ def test_method_matches_ase_329_emt(method: str) -> None:
     # 1e-5 eV, not 1e-9: both runs stop when the largest force is under
     # 0.05 eV/Angstrom, so the energy is not fixed more tightly than that
     # residual along the path.
-    np.testing.assert_allclose(_energies(ours.images), _energies(ase.images), atol=1e-5, rtol=0.0)
+    np.testing.assert_allclose(
+        _energies(ours.images), _energies(ase.images), atol=1e-5, rtol=0.0
+    )
 
 
 @pytest.mark.parametrize("method", ["spline", "string"])
@@ -133,4 +138,6 @@ def test_climb_variable_k_and_three_images(
         nudged[0, 0] += 0.03
         ase.set_positions(nudged)
         ours.set_positions(np.array(nudged, copy=True))
-        np.testing.assert_allclose(ours.get_positions(), ase.get_positions(), atol=1e-9, rtol=0.0)
+        np.testing.assert_allclose(
+            ours.get_positions(), ase.get_positions(), atol=1e-9, rtol=0.0
+        )
