@@ -29,6 +29,7 @@ from rgsaddle._core import (
     lineb_solve as lineb_solve,
     raise_status as raise_status,
     reparametrize as reparametrize,
+    spline_resample as spline_resample,
     saddle_index as saddle_index,
     version as _version,
 )
@@ -130,4 +131,5 @@ __all__ = [
     "raise_status",
     "reparametrize",
     "saddle_index",
+    "spline_resample",
 ]
