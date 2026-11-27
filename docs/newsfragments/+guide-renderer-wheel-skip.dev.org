@@ -1,0 +1,1 @@
+Guide renderer unit tests skip collection when the renderer script is outside the tree, so a wheel test that only ships the Python tests can collect.
