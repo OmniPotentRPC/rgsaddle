@@ -59,6 +59,7 @@ rgsaddle is system-agnostic and unit-agnostic: surfaces supply energies, gradien
 - [Use the C and C++ interfaces](https://omnipotentrpc.github.io/rgsaddle/howto/c-abi.html): Stepping bands, minimum-mode sessions, Sella, IRC, and strings from C and C++ (`docs/orgmode/howto/c-abi.org`)
 - [Use the headers from a meson project](https://omnipotentrpc.github.io/rgsaddle/howto/meson.html): Consuming rgsaddle headers from Meson wrap-git or pkg-config (`docs/orgmode/howto/meson.org`)
 - [Python package](https://omnipotentrpc.github.io/rgsaddle/howto/python.html): Python nanobind surface, SurfaceAdapter, and ASE drop-in classes (`docs/orgmode/howto/python.org`)
+- [Drive an ASE band with NEBOptimizer](https://omnipotentrpc.github.io/rgsaddle/howto/neb-optimizer.html): Drive an ASE NEB band with NEBOptimizer, the ODE12r step and the fixed step (`docs/orgmode/howto/neb-optimizer.org`)
 - [Move a search from ASE or eOn](https://omnipotentrpc.github.io/rgsaddle/howto/migrate.html): Migrating NEB, dimer, and Sella workflows from ASE or eOn (`docs/orgmode/howto/migrate.org`)
 - [Step a point stencil](https://omnipotentrpc.github.io/rgsaddle/howto/stencil.html): Unified point stencil builder across Rust, C, C++, and Python (`docs/orgmode/howto/stencil.org`)
 - [Formal stencil](https://omnipotentrpc.github.io/rgsaddle/howto/formal.html): Lean 4 formal proofs and MPFR differential verification (`docs/orgmode/howto/formal.org`)

@@ -1,0 +1,1 @@
+~rgsaddle.ase.NEBOptimizer~ drives an ASE band with the adaptive ODE12r step (~method='ODE'~) or a fixed step (~method='static'~). The stop is ~NEB.get_residual~, the largest absolute force component on the interior images other than the climbing image.

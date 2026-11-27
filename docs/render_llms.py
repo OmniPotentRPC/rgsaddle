@@ -97,6 +97,10 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("howto/c-abi.org", "Stepping bands, minimum-mode sessions, Sella, IRC, and strings from C and C++"),
             ("howto/meson.org", "Consuming rgsaddle headers from Meson wrap-git or pkg-config"),
             ("howto/python.org", "Python nanobind surface, SurfaceAdapter, and ASE drop-in classes"),
+            (
+                "howto/neb-optimizer.org",
+                "Drive an ASE NEB band with NEBOptimizer, the ODE12r step and the fixed step",
+            ),
             ("howto/migrate.org", "Migrating NEB, dimer, and Sella workflows from ASE or eOn"),
             ("howto/stencil.org", "Unified point stencil builder across Rust, C, C++, and Python"),
             ("howto/formal.org", "Lean 4 formal proofs and MPFR differential verification"),

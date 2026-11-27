@@ -1,0 +1,55 @@
+#+TITLE: Drive an ASE band with NEBOptimizer
+#+OPTIONS: toc:nil num:nil
+
+=rgsaddle.ase.NEB= already takes a list of ASE =Atoms= images, each with its own calculator, and the ASE keywords =k=, =climb=, =method=, =interpolate=, and =idpp=. =NEBOptimizer= is the missing driver: the object ASE scripts construct around that band.
+
+Replace
+
+#+begin_src python
+from ase.mep import NEB
+from ase.mep.neb import NEBOptimizer
+#+end_src
+
+with
+
+#+begin_src python
+from rgsaddle.ase import NEB, NEBOptimizer
+#+end_src
+
+The rest of the call stays:
+
+#+begin_src python
+band = NEB(images, k=0.1, climb=True, method="improvedtangent")
+band.interpolate()  # or band.interpolate(method="idpp")
+finished = NEBOptimizer(band, method="ODE", logfile=None).run(fmax=0.05, steps=300)
+#+end_src
+
+=images= is the list of ASE images. Lengths and energies are the calculator's. =precon= still raises =NotImplementedError= on =NEB=. =DyNEB= stays opt-in and is not this class.
+
+* Constructor
+~NEBOptimizer(neb, restart=None, logfile='-', trajectory=None, master=None, append_trajectory=False, method='ODE', alpha=0.01, verbose=0, rtol=0.1, C1=1e-2, C2=2.0)~.
+
+=method= is lowercased and stored. The accepted names are =ode=, =static=, and =krylov=. Anything else raises =ValueError= with the text =method must be one of= and the list of those three names. =krylov= is stored. =run= then raises =ValueError=.
+
+=logfile=, =trajectory=, =append_trajectory=, =master=, and =restart= are passed to ASE's =Optimizer=. ~logfile='-'~ is stdout. ~logfile=None~ writes nothing. An observer attached with =attach= runs from the step callback, and it sees =nsteps= before the callback increments it. A =restart= path that names an existing file raises =NotImplementedError=. A missing path does not.
+
+Importing =rgsaddle.ase= does not import ASE. The first =NEBOptimizer= call does.
+
+* run
+~run(fmax=0.05, steps=100000000, method=None)~ returns a bool. =steps= defaults to ASE's =DEFAULT_MAX_STEPS=, 100000000. =method= selects =ode= or =static= and is not lowercased. Omitted, it is the stored name. ~run(method='ODE')~ on a solver stored as =ode= raises =ValueError= whose text is =unknown method: ode=. ~run(method='ode')~ is the call that selects the ODE solver. ~run(method='static')~ selects the fixed step even when the constructor stored =ode=.
+
+~method='ode'~ calls ASE's =ode12r= on the band force. =rtol=, =C1=, =C2=, and =verbose= are the arguments of that solver. The step is the adaptive ODE12r integrator of Makri, Ortner, and Kermode, J. Chem. Phys. 150, 094109 (2019), doi:10.1063/1.5064465 @@rst::cite:`makriPreconditioningScheme2019`@@. This path returns false only when that solver raises =OptimizerConvergenceError=. A run that spends =steps= without converging still returns true, because ASE's wrapper does.
+
+~method='static'~ adds =alpha= times the band force and returns true when ~neb.get_residual() <= fmax~. It returns false when =steps= is spent. =alpha= 0 leaves the images where they are.
+
+* Residual
+=NEB.get_residual= and =NEBOptimizer.get_residual= are the same number. =get_forces= stores it. A call before =get_forces= raises =RuntimeError= with the text =get_residual() called before get_forces()=.
+
+The value is the largest absolute component of the projected force on the interior images other than the climbing image. With ~climb=True~ the highest interior image is omitted, which is ASE's rule, so a converged climb can still have a climbing-image force above =fmax=. With one interior image and ~climb=True~ the stored list is empty and the maximum raises =ValueError=. Use at least two interior images when climbing.
+
+=ase.optimize= drivers (=BFGS=, =FIRE=, =MDMin=) do not use this residual. They stop on the largest per-atom force of every interior image, through =__ase_optimizable__=.
+
+* Al adatom hop
+=tests/python/test_ase_neb_optimizer.py= runs one hop both ways. An Al adatom sits in a hollow of a three-layer Al(100) slab (two by two), EMT calculator, bottom layers fixed with =FixAtoms=. The product is the same slab with the adatom moved by half the x cell vector, and both ends are relaxed. Five images, ~k=0.1~, ~climb=True~, ~method='improvedtangent'~, linear =interpolate=, then ~NEBOptimizer(..., method='ODE', logfile=None).run(fmax=0.05, steps=300)~.
+
+The test first checks that the band forces match within 1e-9 eV/Å. It then asserts that the barriers and the climbing-image energies agree within 1e-9 eV. On this hop the two ODE runs reproduce those energies to about 1e-14 eV. The 1e-9 eV bound stays far inside the 0.05 eV/Å force stop: both runs halt on the same residual, and the energy comparison is between those two runs.

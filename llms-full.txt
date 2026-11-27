@@ -241,6 +241,9 @@ A host that climbs with its own optimizer keeps one session for the whole search
 
 From C, `rgsaddle_index1_create` / `rgsaddle_index1_step` follow the same loop. The vector length is `3 * n_atoms`; a bead polymer passes `n_atoms * n_beads`. A host that owns the Hessian calls `rgsaddle_prfo_step`. `rgsaddle_nichols_step` is the i-PI shift on a spectrum (`nmode` may be smaller than `n` when external modes were dropped). `rgsaddle_hessian_bofill` or `rgsaddle_hessian_powell` updates the Hessian. The gradient on the wire is dE/dx.
 
+## Drive an ASE band with NEBOptimizer
+`howto/neb-optimizer` is `rgsaddle.ase.NEBOptimizer`. It takes the band of ASE images and the ASE keywords `method`, `alpha`, `rtol`, `C1`, `C2`, and `verbose`. `method='ODE'` is the adaptive ODE12r step. `method='static'` is the fixed step. `run(fmax, steps)` stops on `NEB.get_residual`.
+
 ## Do not keep solver history across a potential change
 Call `reset` after any model update. That is the documented boundary. A host that skips it mixes two surfaces in one L-BFGS memory. `restart` is the optimizer-only reset for the same surface; it keeps the cached endpoint energies and the last evaluation.
 
@@ -642,7 +645,8 @@ The importable package is `rgsaddle`. `rgsaddle._core` is the nanobind extension
 | `rgsaddle.ase.SimplifiedString` | ASE `Optimizer` driver and `Optimizable` for the simplified string method over `list[Atoms]` (`attach`, `interpolate`, `get_positions`, `set_positions`, `get_potential_energy`, `get_forces`, `run`, `saddle_index`), with `FixAtoms` and optional climbing image |
 | `rgsaddle.ase.GrowingString` | ASE driver for the growing string method over `list[Atoms]` (`attach`, `run`, `saddle_index`), preserving image IDs and batched calculator evaluation |
 | `rgsaddle.ase.Point` | ASE `Optimizer` driver for one point preset (`attach`, `run`). `run(fmax, steps)` is ASE's own loop |
-| `rgsaddle.ase.NEB` | ASE's band call. `k` is a scalar or one value per spring. `method` is `improvedtangent`, `aseneb`, `eb`, `dneb`, `spline`, or `string`. `spline` is the cubic-spline tangent and curvature spring. `string` uses that tangent with no spring and redistributes interior images on `set_positions`. `precon` and the DyNEB keywords `dynamic_relaxation`, `fmax`, and `scale_fmax` raise `NotImplementedError`. `interpolate(method='idpp')` and `idpp_interpolate` run `idpp_path` |
+| `rgsaddle.ase.NEB` | ASE's band call. `k` is a scalar or one value per spring. `method` is `improvedtangent`, `aseneb`, `eb`, `dneb`, `spline`, or `string`. `spline` is the cubic-spline tangent and curvature spring. `string` uses that tangent with no spring and redistributes interior images on `set_positions`. `precon` and the DyNEB keywords `dynamic_relaxation`, `fmax`, and `scale_fmax` raise `NotImplementedError`. `interpolate(method='idpp')` and `idpp_interpolate` run `idpp_path`. `get_residual` is the largest absolute force component on the interior images other than the climbing image |
+| `rgsaddle.ase.NEBOptimizer` | ASE's band optimizer. `method` is `ODE` (adaptive ODE12r), `static` (step `alpha`), or `krylov` (stored, and `run` raises `ValueError`). The constructor lowercases `method`. `run` does not. `run(fmax, steps)` stops on `NEB.get_residual`. The static loop returns false when `steps` is spent. The ODE path returns false only on `OptimizerConvergenceError` |
 | `rgsaddle.ase.SingleCalculatorNEB` | ASE's deprecated shared-calculator band. Constructing it warns with ASE's `FutureWarning` and is `NEB(allow_shared_calculator=True)` |
 | `rgsaddle.ase.DyNEB` | ASE 3.29 dynamic NEB. `dynamic_relaxation` (default true) leaves an image in place once its per-atom force is below `fmax`. `scale_fmax` scales that test by the distance from the highest-energy image. `dynamic_relaxation` false is the ordinary band |
 | `rgsaddle.idpp_path` | Image-dependent pair-potential path, endpoints included, shape `(n_images, 3N)`. `cell` is the 3x3 row-major lattice |
@@ -5582,7 +5586,7 @@ A calculator exception, including `KeyboardInterrupt`, propagates out of `__call
 
 `lineb_solve(surface, positions, atom_masses, energy, opt_tol, perp_tol, molecular=False, max_steps=1000, beads=0, ...)` runs a fixed-energy LI-NEB path to completion and optionally the harmonic quantum TST rate (`howto/lineb`). `positions` is `(n_images, 3N)`. `atom_masses` holds one positive mass per atom: with `molecular=False` each mass expands to three coordinates, and with `molecular=True` the free molecule is quaternion-aligned. `surface(x)` is the same one-image callback as `connect`. The GIL is released around `rgsaddle_lineb_solve` and taken again inside the trampoline. A calculator exception propagates unchanged. `beads=0` skips the rate and leaves `log_rate_over_reactant` as NaN. An unconverged search raises with the existing non-success C status. `LinebResult` holds `positions`, `action`, both half periods and temperatures, `log_rate_over_reactant`, `iterations`, and the `optimizer_calls`, `measure_calls`, `dynamics_calls`, and `rate_calls` tallies.
 
-`rgsaddle.ase.NEB`, `AutoNEB`, `SimplifiedString`, `GrowingString`, `MinModeAtoms`, and `Sella` are the ASE-shaped calls. `AutoNEB` runs `autoneb_run`, and its `run()` returns an `AutoNEBReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`, `images`): a `status` of 0 means the last stage spent its steps before it met the force stop. `NEB`, `SimplifiedString`, and `GrowingString` read `FixAtoms` from the images into the band's fixed-atom mask: those atoms get zero force rows, `interpolate` leaves them on the first image, and every image must fix the same atoms. `NEB.interpolate` takes `method` `linear` or `idpp` and `mic`. `idpp` calls `idpp_path`. `DyNEB` freezes images that are already under `fmax`; `NEB` does not, unless `dynamic_relaxation=True` is passed and the `FutureWarning` is accepted. `DimerControl` and `MinModeTranslate` are the dimer parameter object and the optimizer that takes one `MinMode.step`. `SimplifiedString` runs the simplified string method of E, Ren, and Vanden-Eijnden [eSimplifiedImprovedString2007] with `'not-a-knot'` (or `'spline'`) or `'linear'` equal-arc-length reparametrization and an optional climbing image (`run(fmax, steps)` drives `rgsaddle.Band` under an ASE `Optimizer` subclass so `logfile`, `trajectory`, and attached observers run per step). `GrowingString` runs the growing string method of Peters, Heyden, Bell, and Chakraborty [petersGrowingStringMethod2004] from the endpoint images, handing off to `StringSession` once the fragments join. The migration page says where `NEB` follows ASE and where the endpoint-slope climb, the `aseneb` name, and the plain `eb` projection do not. IRC stays on the Rust and C sessions.
+`rgsaddle.ase.NEB`, `AutoNEB`, `SimplifiedString`, `GrowingString`, `MinModeAtoms`, and `Sella` are the ASE-shaped calls. `AutoNEB` runs `autoneb_run`, and its `run()` returns an `AutoNEBReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`, `images`): a `status` of 0 means the last stage spent its steps before it met the force stop. `NEB`, `SimplifiedString`, and `GrowingString` read `FixAtoms` from the images into the band's fixed-atom mask: those atoms get zero force rows, `interpolate` leaves them on the first image, and every image must fix the same atoms. `NEB.interpolate` takes `method` `linear` or `idpp` and `mic`. `idpp` calls `idpp_path`. `DyNEB` freezes images that are already under `fmax`; `NEB` does not, unless `dynamic_relaxation=True` is passed and the `FutureWarning` is accepted. `DimerControl` and `MinModeTranslate` are the dimer parameter object and the optimizer that takes one `MinMode.step`. `SimplifiedString` runs the simplified string method of E, Ren, and Vanden-Eijnden [eSimplifiedImprovedString2007] with `'not-a-knot'` (or `'spline'`) or `'linear'` equal-arc-length reparametrization and an optional climbing image (`run(fmax, steps)` drives `rgsaddle.Band` under an ASE `Optimizer` subclass so `logfile`, `trajectory`, and attached observers run per step). `GrowingString` runs the growing string method of Peters, Heyden, Bell, and Chakraborty [petersGrowingStringMethod2004] from the endpoint images, handing off to `StringSession` once the fragments join. The migration page says where `NEB` follows ASE and where the endpoint-slope climb, the `aseneb` name, and the plain `eb` projection do not. `NEBOptimizer` drives that band with ASE's ODE12r step or a fixed step (`howto/neb-optimizer`). IRC stays on the Rust and C sessions.
 
 `_core.halve_raised_energy(previous, trial, step)` returns `(raised, new_step)`. A trial more than 1e-4 above `previous` halves `step`. `_core.trust_update(radius, predicted, actual, step_norm, sigma_inc, sigma_dec, rho_inc, rho_dec, delta_min)` is the Sella radius after those energy changes. A prediction below 1e-14 in absolute value returns `radius`. Neither call evaluates a surface.
 
@@ -5614,6 +5618,63 @@ The adapter does not start threads. The caller passes request rows and the adapt
 
 There is no global mutable state. The last-error string is thread-local. Arrays are float64 and C contiguous. Wrong dtype or order is `TypeError`. Wrong shape is `ValueError` that names the argument and both shapes. Outputs are new arrays. `-0.0`, NaN and subnormals pass through. Sub-interpreters are unsupported.
 
+# Drive an ASE band with NEBOptimizer (`docs/orgmode/howto/neb-optimizer.org`)
+
+> Drive an ASE NEB band with NEBOptimizer, the ODE12r step and the fixed step
+
+`rgsaddle.ase.NEB` already takes a list of ASE `Atoms` images, each with its own calculator, and the ASE keywords `k`, `climb`, `method`, `interpolate`, and `idpp`. `NEBOptimizer` is the missing driver: the object ASE scripts construct around that band.
+
+Replace
+
+```python
+from ase.mep import NEB
+from ase.mep.neb import NEBOptimizer
+```
+
+with
+
+```python
+from rgsaddle.ase import NEB, NEBOptimizer
+```
+
+The rest of the call stays:
+
+```python
+band = NEB(images, k=0.1, climb=True, method="improvedtangent")
+band.interpolate()  # or band.interpolate(method="idpp")
+finished = NEBOptimizer(band, method="ODE", logfile=None).run(fmax=0.05, steps=300)
+```
+
+`images` is the list of ASE images. Lengths and energies are the calculator's. `precon` still raises `NotImplementedError` on `NEB`. `DyNEB` stays opt-in and is not this class.
+
+## Constructor
+`NEBOptimizer(neb, restart=None, logfile='-', trajectory=None, master=None, append_trajectory=False, method='ODE', alpha=0.01, verbose=0, rtol=0.1, C1=1e-2, C2=2.0)`.
+
+`method` is lowercased and stored. The accepted names are `ode`, `static`, and `krylov`. Anything else raises `ValueError` with the text `method must be one of` and the list of those three names. `krylov` is stored. `run` then raises `ValueError`.
+
+`logfile`, `trajectory`, `append_trajectory`, `master`, and `restart` are passed to ASE's `Optimizer`. `logfile='-'` is stdout. `logfile=None` writes nothing. An observer attached with `attach` runs from the step callback, and it sees `nsteps` before the callback increments it. A `restart` path that names an existing file raises `NotImplementedError`. A missing path does not.
+
+Importing `rgsaddle.ase` does not import ASE. The first `NEBOptimizer` call does.
+
+## run
+`run(fmax=0.05, steps=100000000, method=None)` returns a bool. `steps` defaults to ASE's `DEFAULT_MAX_STEPS`, 100000000. `method` selects `ode` or `static` and is not lowercased. Omitted, it is the stored name. `run(method='ODE')` on a solver stored as `ode` raises `ValueError` whose text is `unknown method: ode`. `run(method='ode')` is the call that selects the ODE solver. `run(method='static')` selects the fixed step even when the constructor stored `ode`.
+
+`method='ode'` calls ASE's `ode12r` on the band force. `rtol`, `C1`, `C2`, and `verbose` are the arguments of that solver. The step is the adaptive ODE12r integrator of Makri, Ortner, and Kermode, J. Chem. Phys. 150, 094109 (2019), doi:10.1063/1.5064465 [makriPreconditioningScheme2019]. This path returns false only when that solver raises `OptimizerConvergenceError`. A run that spends `steps` without converging still returns true, because ASE's wrapper does.
+
+`method='static'` adds `alpha` times the band force and returns true when `neb.get_residual() <= fmax`. It returns false when `steps` is spent. `alpha` 0 leaves the images where they are.
+
+## Residual
+`NEB.get_residual` and `NEBOptimizer.get_residual` are the same number. `get_forces` stores it. A call before `get_forces` raises `RuntimeError` with the text `get_residual() called before get_forces()`.
+
+The value is the largest absolute component of the projected force on the interior images other than the climbing image. With `climb=True` the highest interior image is omitted, which is ASE's rule, so a converged climb can still have a climbing-image force above `fmax`. With one interior image and `climb=True` the stored list is empty and the maximum raises `ValueError`. Use at least two interior images when climbing.
+
+`ase.optimize` drivers (`BFGS`, `FIRE`, `MDMin`) do not use this residual. They stop on the largest per-atom force of every interior image, through `__ase_optimizable__`.
+
+## Al adatom hop
+`tests/python/test_ase_neb_optimizer.py` runs one hop both ways. An Al adatom sits in a hollow of a three-layer Al(100) slab (two by two), EMT calculator, bottom layers fixed with `FixAtoms`. The product is the same slab with the adatom moved by half the x cell vector, and both ends are relaxed. Five images, `k=0.1`, `climb=True`, `method='improvedtangent'`, linear `interpolate`, then `NEBOptimizer(..., method='ODE', logfile=None).run(fmax=0.05, steps=300)`.
+
+The test first checks that the band forces match within 1e-9 eV/Å. It then asserts that the barriers and the climbing-image energies agree within 1e-9 eV. On this hop the two ODE runs reproduce those energies to about 1e-14 eV. The 1e-9 eV bound stays far inside the 0.05 eV/Å force stop: both runs halt on the same residual, and the energy comparison is between those two runs.
+
 # Move a search from ASE or eOn (`docs/orgmode/howto/migrate.org`)
 
 > Migrating NEB, dimer, and Sella workflows from ASE or eOn
@@ -5631,7 +5692,7 @@ The C ABI introduced the saddle-check structs and functions at minor 40; a confi
 Python's `_core.MinMode` enables the check by default and returns it through `SessionReport.saddle_index` and `MinMode.saddle_index()`.
 
 ## From ASE's NEB
-`rgsaddle.ase.NEB(images, k=0.1, climb=False)` takes the same list of `Atoms` with calculators. `k` is one spring or one constant per segment. `interpolate()` places the interior images on the straight line between the ends, and `interpolate(method='idpp')` then runs `idpp_path`. `mic` uses the minimum image for the straight line. `get_positions` and `get_forces` are the interior images only, and `ase.optimize` (`BFGS`, `FIRE`, `MDMin`) drives them through `__ase_optimizable__`. `get_potential_energy` is the highest interior energy.
+`rgsaddle.ase.NEB(images, k=0.1, climb=False)` takes the same list of `Atoms` with calculators. `k` is one spring or one constant per segment. `interpolate()` places the interior images on the straight line between the ends, and `interpolate(method='idpp')` then runs `idpp_path`. `mic` uses the minimum image for the straight line. `get_positions` and `get_forces` are the interior images only, and `ase.optimize` (`BFGS`, `FIRE`, `MDMin`) drives them through `__ase_optimizable__`. `get_potential_energy` is the highest interior energy. `NEB.get_residual` is the largest absolute component of the projected force on the interior images other than the climbing image, stored by `get_forces`. A call before `get_forces` raises `RuntimeError`. One interior image with `climb=True` leaves that list empty and the maximum raises `ValueError`. `NEBOptimizer` (`howto/neb-optimizer`) stops on that residual.
 
 The spring constant defaults to 0.1, ASE's value. A `BandSession` still defaults to 5, eOn's value. Pass the number you mean.
 
