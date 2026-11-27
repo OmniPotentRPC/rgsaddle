@@ -1,1 +1,6 @@
-~rgsaddle.ase.NEBOptimizer~ drives an ASE band with the adaptive ODE12r step (~method='ODE'~) or a fixed step (~method='static'~). The stop is ~NEB.get_residual~, the largest absolute force component on the interior images other than the climbing image.
+~rgsaddle.ase.NEBOptimizer~ drives an ASE band with the adaptive ODE12r step (~method='ODE'~) or a fixed step (~method='static'~).
+The stop is ~NEB.get_residual~.
+~get_forces~ stores that residual as the infinity norm of the projected force on each interior image, and ~get_residual~ returns the largest of those norms.
+A call to ~get_residual~ before ~get_forces~ raises ~RuntimeError~.
+The climbing image is left out of the maximum only when one was chosen.
+On an exact tie of interior energies the omitted image is the first maximum, while ASE omits ~1 + argsort~ of the interior energies.

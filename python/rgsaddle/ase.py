@@ -12,6 +12,7 @@ raw force.
 
 from __future__ import annotations
 
+import threading
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -613,7 +614,8 @@ class NEB:
 
     ``climb=True`` does not climb an interior image when a higher
     endpoint slopes down into the band. ASE's ``NEB`` climbs the highest
-    image on every call, including that slope.
+    image on every call, including that slope. With no climbing image the
+    residual keeps every interior image.
 
     ``remove_rotation_and_translation=True`` aligns each free, non-periodic
     image to the previous one with ASE's rigid fit, and otherwise removes
@@ -897,6 +899,9 @@ class NEB:
         self.energies = np.asarray(energies, dtype=np.float64).reshape(-1)
         interior = self.energies[1:-1]
         if interior.size:
+            # First maximum, the image ``project_band`` climbs. ASE's
+            # ``imax`` is ``1 + np.argsort(interior)[-1]``. On an exact
+            # tie those indices differ.
             self.imax = 1 + int(np.argmax(interior))
             self.emax = float(interior[self.imax - 1])
         else:
@@ -911,12 +916,17 @@ class NEB:
         return interior
 
     def _remember_residual(self, interior: Float64) -> None:
-        """Store ASE's per-image infinity norms, omitting the climbing image."""
+        """Store one infinity norm per interior image.
+
+        Omit the climbing image only when ``ci`` is set. With ``climb``
+        set and no chosen image, every interior norm stays, the same
+        residual as ``climb=False``.
+        """
         natoms = len(self.images[0]) if self.images else 0
         blocks = np.asarray(interior, dtype=np.float64).reshape(-1, natoms, 3)
         values: list[float] = []
         for offset, imgforce in enumerate(blocks):
-            if self.climb and self.imax is not None and self.imax == offset + 1:
+            if self.ci is not None and self.ci == offset + 1:
                 continue
             # Flatten first. On a (natoms, 3) array the infinity norm is the
             # matrix norm, the largest per-atom L1, not the largest component.
@@ -925,14 +935,19 @@ class NEB:
         self._residuals = values
 
     def get_residual(self) -> float:
-        """Largest absolute force component, excluding the climbing image.
+        """Largest absolute component of the projected interior force.
 
-        This is the residual ``ase.mep.NEB.get_residual`` returns: the
-        maximum infinity norm of the projected force on each interior
-        image other than the climbing image. ``get_forces`` stores it.
-        A call before that raises ``RuntimeError``. With ``climb=True``
-        and one interior image the stored list is empty, and the maximum
-        raises ``ValueError``.
+        ``get_forces`` stores one infinity norm per interior image and
+        this returns their maximum. The climbing image is omitted only
+        when one was chosen (``ci`` is not ``None``). A call before
+        ``get_forces`` raises ``RuntimeError``. One interior image that
+        does climb leaves the stored list empty, and the maximum raises
+        ``ValueError``.
+
+        The omitted image is the first interior maximum (``np.argmax``),
+        the image ``project_band`` climbs. ASE omits
+        ``1 + np.argsort(interior)[-1]``. On an exact energy tie those
+        indices differ.
         """
         if self._residuals is None:
             raise RuntimeError("get_residual() called before get_forces()")
@@ -1096,26 +1111,34 @@ class SingleCalculatorNEB(NEB):
         super().__init__(images, *args, **kwargs)
 
 
+_NEB_OPTIMIZER_TYPE_LOCK = threading.Lock()
+
+
 def _neb_optimizer_type() -> type:
     """Optimizer subclass created on the first ``NEBOptimizer`` call.
 
     Importing this module does not import ASE. The instance type adds
     ASE's ``Optimizer`` to the MRO so logfile, trajectory, and observers
-    are the ones ASE's ``NEBOptimizer`` uses.
+    are the ones ASE's ``NEBOptimizer`` uses. Creation and publication
+    of that class sit under ``_NEB_OPTIMIZER_TYPE_LOCK``.
     """
     cached = getattr(_neb_optimizer_type, "cls", None)
     if cached is not None:
         return cast(type, cached)
-    from ase.optimize.optimize import Optimizer
+    with _NEB_OPTIMIZER_TYPE_LOCK:
+        cached = getattr(_neb_optimizer_type, "cls", None)
+        if cached is not None:
+            return cast(type, cached)
+        from ase.optimize.optimize import Optimizer
 
-    class Bound(NEBOptimizer, Optimizer):
-        pass
+        class Bound(NEBOptimizer, Optimizer):
+            pass
 
-    Bound.__name__ = "NEBOptimizer"
-    Bound.__qualname__ = "NEBOptimizer"
-    Bound.__doc__ = NEBOptimizer.__doc__
-    _neb_optimizer_type.cls = Bound  # type: ignore[attr-defined]
-    return Bound
+        Bound.__name__ = "NEBOptimizer"
+        Bound.__qualname__ = "NEBOptimizer"
+        Bound.__doc__ = NEBOptimizer.__doc__
+        _neb_optimizer_type.cls = Bound  # type: ignore[attr-defined]
+        return Bound
 
 
 class NEBOptimizer:
@@ -1132,10 +1155,11 @@ class NEBOptimizer:
     ``ValueError`` whose text is ``unknown method:`` plus the stored name.
 
     The stop is ``neb.get_residual``, the largest absolute component of
-    the projected force on the interior images other than the climbing
-    image. The static loop returns true when that residual is at or
-    under ``fmax`` and false when ``steps`` is spent. The ODE solver
-    returns false only when it raises ``OptimizerConvergenceError``.
+    the projected force on the interior images. The climbing image is
+    omitted only when one was chosen. The static loop returns true when
+    that residual is at or under ``fmax`` and false when ``steps`` is
+    spent. The ODE solver returns false only when it raises
+    ``OptimizerConvergenceError``.
     An ODE run that uses its step budget without converging still
     returns true, as ASE's wrapper does. ``logfile``, ``trajectory``,
     ``append_trajectory``, ``master``, and ``restart`` are ASE's

@@ -1,7 +1,7 @@
 #+TITLE: Drive an ASE band with NEBOptimizer
 #+OPTIONS: toc:nil num:nil
 
-=rgsaddle.ase.NEB= already takes a list of ASE =Atoms= images, each with its own calculator, and the ASE keywords =k=, =climb=, =method=, =interpolate=, and =idpp=. =NEBOptimizer= is the missing driver: the object ASE scripts construct around that band.
+=rgsaddle.ase.NEB= already takes a list of ASE =Atoms= images, each with its own calculator, and the ASE keywords =k=, =climb=, and =method=. =interpolate= and =idpp_interpolate= are methods. =NEBOptimizer= is the missing driver: the object ASE scripts construct around that band.
 
 Replace
 
@@ -43,9 +43,9 @@ Importing =rgsaddle.ase= does not import ASE. The first =NEBOptimizer= call does
 ~method='static'~ adds =alpha= times the band force and returns true when ~neb.get_residual() <= fmax~. It returns false when =steps= is spent. =alpha= 0 leaves the images where they are.
 
 * Residual
-=NEB.get_residual= and =NEBOptimizer.get_residual= are the same number. =get_forces= stores it. A call before =get_forces= raises =RuntimeError= with the text =get_residual() called before get_forces()=.
+=NEB.get_residual= and =NEBOptimizer.get_residual= are the same number. =get_forces= stores one infinity norm per interior image, the largest absolute component of that image's projected force. A call before =get_forces= raises =RuntimeError= with the text =get_residual() called before get_forces()=.
 
-The value is the largest absolute component of the projected force on the interior images other than the climbing image. With ~climb=True~ the highest interior image is omitted, which is ASE's rule, so a converged climb can still have a climbing-image force above =fmax=. With one interior image and ~climb=True~ the stored list is empty and the maximum raises =ValueError=. Use at least two interior images when climbing.
+The value is the largest of those norms. The climbing image is omitted only when one was chosen. With ~climb=True~ and no climbing image, every interior image stays in the maximum, the same residual as ~climb=False~. When an image does climb it is omitted, so a converged climb can still have a climbing-image force above =fmax=. On an exact tie of interior energies the omitted image is the first maximum (~np.argmax~). ASE omits ~1 + np.argsort(interior)[-1]~. With one interior image that climbs, the stored list is empty and the maximum raises =ValueError=. One interior image that does not climb has a residual, and =run= does not raise.
 
 =ase.optimize= drivers (=BFGS=, =FIRE=, =MDMin=) do not use this residual. They stop on the largest per-atom force of every interior image, through =__ase_optimizable__=.
 

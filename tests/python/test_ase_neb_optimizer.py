@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
+import sys
+import textwrap
 
 import numpy as np
 import pytest
@@ -69,6 +72,45 @@ def _chain(xs: list[float], calc: type[Calculator] = Bowl) -> list[Atoms]:
     return images
 
 
+def _image(x: float, y: float, calc: type[Calculator] = Bowl) -> Atoms:
+    atoms = Atoms("H", positions=[[x, y, 0.0]], cell=[8.0, 8.0, 8.0], pbc=False)
+    atoms.calc = calc()
+    return atoms
+
+
+def _inf_norms(forces: np.ndarray, natoms: int) -> list[float]:
+    blocks = np.asarray(forces, dtype=np.float64).reshape(-1, natoms, 3)
+    return [float(np.linalg.norm(block.reshape(-1), ord=np.inf)) for block in blocks]
+
+
+class ShallowBowl(Calculator):
+    """V = x^2 / 2 + 2 y^2. The endpoints sit above the interior images."""
+
+    implemented_properties = ["energy", "forces"]
+
+    def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
+        Calculator.calculate(self, atoms, properties, system_changes)
+        x = float(atoms.positions[0, 0])
+        y = float(atoms.positions[0, 1])
+        self.results = {"energy": 0.5 * x * x + 2.0 * y * y, "forces": np.array([[-x, -4.0 * y, 0.0]])}
+
+
+class TiedEnergy(Calculator):
+    """Two interior sites share an energy and carry different forces."""
+
+    implemented_properties = ["energy", "forces"]
+
+    def calculate(self, atoms, properties, system_changes):  # type: ignore[no-untyped-def]
+        Calculator.calculate(self, atoms, properties, system_changes)
+        x = float(atoms.positions[0, 0])
+        y = float(atoms.positions[0, 1])
+        forces = np.zeros_like(atoms.positions)
+        forces[0, 0] = -x
+        forces[0, 1] = -3.0 * y
+        energy = 1.0 if x in (1.0, 2.0) else 0.0
+        self.results = {"energy": energy, "forces": forces}
+
+
 def test_keywords_and_the_ase_residual(tmp_path) -> None:  # type: ignore[no-untyped-def]
     images = _chain([-1.0, -0.3, 0.4, 1.0])
     neb = NEB(images, k=0.1, climb=False, method="improvedtangent")
@@ -98,10 +140,12 @@ def test_keywords_and_the_ase_residual(tmp_path) -> None:  # type: ignore[no-unt
     with pytest.raises(NotImplementedError):
         NEBOptimizer(neb, restart=str(present), logfile=None)
 
+    # Endpoints of this bowl sit above the only interior image, so no
+    # image climbs. ASE still climbs that image and its residual is empty.
     climb = NEB(_chain([-1.0, 0.2, 1.0]), k=0.1, climb=True, method="improvedtangent")
-    climb.get_forces()
-    with pytest.raises(ValueError):
-        climb.get_residual()
+    climb_forces = climb.get_forces()
+    assert climb.ci is None
+    assert climb.get_residual() == pytest.approx(_inf_norms(climb_forces, 1)[0])
     ase_climb = AseNeb(_chain([-1.0, 0.2, 1.0]), k=0.1, climb=True, method="improvedtangent")
     ase_climb.get_forces()
     with pytest.raises(ValueError):
@@ -121,6 +165,143 @@ def test_residual_matches_ase_329(method: str) -> None:
     np.testing.assert_allclose(ours.get_residual(), ase.get_residual(), atol=1e-9, rtol=0.0)
     opt = NEBOptimizer(ours, logfile=None)
     assert opt.get_residual() == pytest.approx(ours.get_residual())
+
+
+def test_residual_keeps_every_image_when_no_climber_is_chosen() -> None:
+    """A blocked climb must not drop the highest interior image.
+
+    The bowl endpoints lie above the interior, so ``ci`` stays none and
+    the projected force matches ``climb=False``. The per-image infinity
+    norms are about 0.033 and 1.054. Dropping the large one reports a
+    residual under 0.05 and the ODE solver returns without moving.
+    """
+    points = [(0.0, 0.0), (0.02, 0.0), (0.4, 0.25), (1.6, 0.0)]
+    climbed = NEB(
+        [_image(*xy, ShallowBowl) for xy in points], k=0.1, climb=True, method="improvedtangent"
+    )
+    plain = NEB(
+        [_image(*xy, ShallowBowl) for xy in points], k=0.1, climb=False, method="improvedtangent"
+    )
+    climbed_forces = climbed.get_forces()
+    plain_forces = plain.get_forces()
+    assert climbed.ci is None
+    np.testing.assert_allclose(climbed_forces, plain_forces, atol=1e-12, rtol=0.0)
+    norms = _inf_norms(climbed_forces, 1)
+    assert norms == pytest.approx([0.033, 1.054], abs=1.5e-3)
+    assert float(climbed.get_residual()) == pytest.approx(max(norms))
+    assert float(plain.get_residual()) == pytest.approx(max(norms))
+    ase = AseNeb(
+        [_image(*xy, ShallowBowl) for xy in points], k=0.1, climb=False, method="improvedtangent"
+    )
+    ase.get_forces()
+    assert float(climbed.get_residual()) == pytest.approx(float(ase.get_residual()))
+    before = np.array(climbed.get_positions(), copy=True)
+    NEBOptimizer(climbed, logfile=None).run(fmax=0.05, steps=5)
+    assert not np.allclose(climbed.get_positions(), before)
+
+
+def test_one_interior_image_without_a_climber_has_a_residual() -> None:
+    """``ci`` none must not make ``np.max`` reduce an empty residual."""
+    neb = NEB(_chain([-1.0, 0.2, 1.0]), k=0.1, climb=True, method="improvedtangent")
+    forces = neb.get_forces()
+    assert neb.ci is None
+    assert neb.get_residual() == pytest.approx(_inf_norms(forces, 1)[0])
+    plain = NEB(_chain([-1.0, 0.2, 1.0]), k=0.1, climb=False, method="improvedtangent")
+    plain.get_forces()
+    assert neb.get_residual() == pytest.approx(plain.get_residual())
+    assert isinstance(NEBOptimizer(neb, logfile=None).run(fmax=0.05, steps=1), bool)
+
+
+def test_one_climbing_interior_image_still_has_an_empty_residual() -> None:
+    """A lone climbing image is omitted, and the maximum raises."""
+    neb = NEB(_chain([-1.0, 0.0, 1.0], DoubleWell), k=0.1, climb=True, method="improvedtangent")
+    neb.get_forces()
+    assert neb.ci == 1
+    with pytest.raises(ValueError, match="zero-size array"):
+        neb.get_residual()
+    with pytest.raises(ValueError, match="zero-size array"):
+        NEBOptimizer(neb, logfile=None).run(fmax=0.05, steps=1)
+    ase = AseNeb(_chain([-1.0, 0.0, 1.0], DoubleWell), k=0.1, climb=True, method="improvedtangent")
+    ase.get_forces()
+    with pytest.raises(ValueError, match="zero-size array"):
+        ase.get_residual()
+
+
+def test_tied_interior_energies_omit_the_first_maximum() -> None:
+    """The climbed image is the first maximum, not ASE's argsort index."""
+    points = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.5), (3.0, 0.0)]
+    ours = NEB([_image(*xy, TiedEnergy) for xy in points], k=0.1, climb=True, method="improvedtangent")
+    ase = AseNeb([_image(*xy, TiedEnergy) for xy in points], k=0.1, climb=True, method="improvedtangent")
+    ours.get_forces()
+    ase.get_forces()
+    interior = np.asarray(ours.energies[1:-1], dtype=np.float64)
+    assert interior[0] == pytest.approx(interior[1])
+    assert ours.ci == 1 + int(np.argmax(interior))
+    assert ours.imax == ours.ci
+    assert int(ase.imax) == 1 + int(np.argsort(interior)[-1])
+    assert ours.ci != int(ase.imax)
+    norms = _inf_norms(ours.get_forces(), 1)
+    kept = [norm for index, norm in enumerate(norms, start=1) if index != ours.ci]
+    assert ours.get_residual() == pytest.approx(max(kept))
+
+
+def test_optimizer_type_is_unique_across_threads() -> None:
+    """Constructors in a fresh process publish one ``NEBOptimizer`` type."""
+    script = textwrap.dedent(
+        r"""
+        import threading
+
+        import numpy as np
+        from ase import Atoms
+        from ase.calculators.calculator import Calculator
+
+        from rgsaddle.ase import NEB, NEBOptimizer
+
+        class Flat(Calculator):
+            implemented_properties = ["energy", "forces"]
+
+            def calculate(self, atoms, properties, system_changes):
+                Calculator.calculate(self, atoms, properties, system_changes)
+                self.results = {"energy": 0.0, "forces": np.zeros_like(atoms.positions)}
+
+        bands = []
+        for _ in range(16):
+            images = []
+            for x in (-1.0, 0.0, 1.0):
+                atoms = Atoms("H", positions=[[x, 0.0, 0.0]])
+                atoms.calc = Flat()
+                images.append(atoms)
+            bands.append(NEB(images, k=0.1, climb=False, method="improvedtangent"))
+        barrier = threading.Barrier(16)
+        found = []
+        errors = []
+
+        def build(neb):
+            try:
+                barrier.wait()
+                found.append(type(NEBOptimizer(neb, logfile=None)))
+            except Exception as exc:
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=build, args=(neb,)) for neb in bands]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if errors:
+            raise SystemExit("\n".join(errors))
+        kinds = {id(kind) for kind in found}
+        if len(kinds) != 1:
+            raise SystemExit("distinct types: %s" % len(kinds))
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr + completed.stdout
 
 
 def test_static_step_alpha_logfile_and_observers() -> None:
