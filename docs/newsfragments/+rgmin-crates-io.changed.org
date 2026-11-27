@@ -1,0 +1,3 @@
+The Rust manifests require ~rgmin~ 0.8.0 from crates.io.
+~LevelSetConstraint~ comes from that release, so the git pin is gone.
+~rgpot-pair~ is a versionless git dev-dependency, so packaging omits it, and ~examples/rgpot_howto.rs~ is excluded from the published crate.

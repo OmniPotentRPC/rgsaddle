@@ -4,7 +4,9 @@ version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-exclude = ["/*.md", "!/README.md", "!/CHANGELOG.md"]
+# examples/rgpot_howto.rs imports rgpot-pair. Packaging omits that
+# dev-dependency, so the example file stays out of the crate.
+exclude = ["/*.md", "!/README.md", "!/CHANGELOG.md", "examples/rgpot_howto.rs"]
 description = "Band, minimum-mode, and index-1 Newton saddle mechanics."
 repository = "https://github.com/OmniPotentRPC/rgsaddle"
 authors = ["Rohit Goswami <rgoswami@ieee.org>"]
@@ -54,7 +56,7 @@ dlpk = { version = "0.1.5", features = ["ndarray"] }
 readcon-core = { version = "=0.17.1", optional = true }
 readcon-db = { version = "=0.2.0", optional = true }
 # Free-end bands retract their terminal image through rgmin’s LevelSetConstraint.
-rgmin = { version = "=0.7.0", git = "https://github.com/OmniPotentRPC/rgmin", rev = "f2527782713dcf4b4d5d91af9da1bba80c32bc0c" }
+rgmin = { version = "0.8.0" }
 eindir-core = { version = "0.6.0", features = ["capi"] }
 ndarray = "0.17"
 faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "linalg"] }
@@ -97,10 +99,14 @@ approx = "0.5"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 faer = { version = "0.24.4", default-features = false, features = ["std", "linalg"] }
 sha2 = "0.10"
-# Tag v3.6.0. Zero dependencies of its own, so it adds no second copy of
-# eindir-core, dlpk or rgmin. Rev 97ebba0b of rgpot-pair pins cc to
-# =1.4.2, which cannot share cc 1.x with the other build dependencies.
-rgpot-pair = { version = "=3.6.0", git = "https://github.com/OmniPotentRPC/rgpot", rev = "20c58fe5a2859cd0a79a3e06d64d567f96d0ccbe" }
+# Tag v3.6.0 at the rev below. No version key: packaging removes git
+# from a versioned dev-dependency and then requires that version on
+# crates.io, and this package is not published. A versionless git
+# dev-dependency is omitted from the packaged manifest. It has no
+# dependencies of its own, so it adds no second copy of eindir-core,
+# dlpk or rgmin. Rev 97ebba0b of rgpot-pair pins cc to =1.4.2, which
+# cannot share cc 1.x with the other build dependencies.
+rgpot-pair = { git = "https://github.com/OmniPotentRPC/rgpot", rev = "20c58fe5a2859cd0a79a3e06d64d567f96d0ccbe" }
 
 [[example]]
 name = "ohtst_skewed_well"
