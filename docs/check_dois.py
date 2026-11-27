@@ -309,7 +309,9 @@ def _retry_after_seconds(error: urllib.error.HTTPError) -> float | None:
         return None
     if when.tzinfo is None:
         when = when.replace(tzinfo=datetime.timezone.utc)
-    return (when - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+    # time.time is the clock a test can freeze. The difference is then the
+    # parsed Retry-After delay, with no second read of the wall clock.
+    return when.timestamp() - time.time()
 
 
 def _rate_limit_delay(
@@ -431,7 +433,8 @@ def fetch_registered_titles(doi: str) -> tuple[str, list[str]]:
 def check_bib_titles(paths: list[Path]) -> tuple[int, list[str], int]:
     """Compare every DOI-bearing `.bib` entry's title against Crossref/DataCite.
 
-    The third value counts entries skipped after a rate limit.
+    The first value counts entries whose titles were compared. The third
+    value counts entries skipped after a rate limit.
     """
     records: list[tuple[str, str, str, str]] = []
     errors: list[str] = []
@@ -464,6 +467,7 @@ def check_bib_titles(paths: list[Path]) -> tuple[int, list[str], int]:
     with ThreadPoolExecutor(max_workers=4) as pool:
         fetched = dict(zip(unique_dois, pool.map(lookup, unique_dois)))
 
+    compared = 0
     title_warnings = 0
     for label, key, doi, bib_title in records:
         source, candidates, err = fetched[doi.lower()]
@@ -474,6 +478,7 @@ def check_bib_titles(paths: list[Path]) -> tuple[int, list[str], int]:
         if err is not None or not candidates:
             errors.append(f"{label}:{key} ({doi}): {err}")
             continue
+        compared += 1
         bib_norm = normalize_title(bib_title)
         cand_norms = [normalize_title(candidate) for candidate in candidates]
         if not bib_norm or bib_norm not in cand_norms:
@@ -483,7 +488,7 @@ def check_bib_titles(paths: list[Path]) -> tuple[int, list[str], int]:
                 f"  bib: {bib_title}\n"
                 f"  {source}: {clean_cr}"
             )
-    return len(records), errors, title_warnings
+    return compared, errors, title_warnings
 
 
 CITE_RE = re.compile(r"cite:`([^`]+)`")
@@ -603,13 +608,24 @@ def bib_authors(author_field: str) -> list[list[str]]:
     return [name_tokens(name) for name in re.split(r"\s+and\s+", author_field)]
 
 
-def doi_registry(doi: str) -> str | None:
-    """Return the registration agency name, lowercased, when doi.org knows it."""
+def _report_rate_limit(doi: str, error: RateLimited, limited: list[str] | None) -> None:
+    """Print a rate-limit warning and record *doi* when the caller is counting."""
+    print(f"{WARNING_PREFIX}{doi}: {error}", file=sys.stderr)
+    if limited is not None:
+        limited.append(doi)
+
+
+def doi_registry(doi: str, limited: list[str] | None = None) -> str | None:
+    """Return the registration agency name, lowercased, when doi.org knows it.
+
+    A rate limit is printed. When *limited* is set, the DOI is appended there
+    so the summary can name the skip.
+    """
     url = "https://doi.org/doiRA/" + urllib.parse.quote(doi, safe="/:")
     try:
         status, payload = fetch_json(url)
     except RateLimited as error:
-        print(f"{WARNING_PREFIX}{doi}: {error}", file=sys.stderr)
+        _report_rate_limit(doi, error, limited)
         return None
     except RuntimeError:
         return None
@@ -624,13 +640,19 @@ def doi_registry(doi: str) -> str | None:
     return None
 
 
-def crossref_authors(doi: str) -> list[list[str]] | None:
-    """Return Crossref author token lists, or None when the record has none."""
+def crossref_authors(
+    doi: str, limited: list[str] | None = None
+) -> list[list[str]] | None:
+    """Return Crossref author token lists, or None when the record has none.
+
+    A rate limit is printed. When *limited* is set, the DOI is appended there
+    so the summary can name the skip.
+    """
     url = "https://api.crossref.org/works/" + urllib.parse.quote(doi, safe="")
     try:
         status, payload = fetch_json(url)
     except RateLimited as error:
-        print(f"{WARNING_PREFIX}{doi}: {error}", file=sys.stderr)
+        _report_rate_limit(doi, error, limited)
         return None
     except RuntimeError:
         return None
@@ -657,9 +679,13 @@ def crossref_authors(doi: str) -> list[list[str]] | None:
     return parsed
 
 
-def check_authors(records: dict[str, dict[str, str]]) -> list[str]:
-    """Compare bibliography authors with Crossref, name by name and in order."""
+def check_authors(records: dict[str, dict[str, str]]) -> tuple[list[str], int]:
+    """Compare bibliography authors with Crossref, name by name and in order.
+
+    The second value counts DOIs skipped because a lookup stayed rate limited.
+    """
     errors: list[str] = []
+    limited: list[str] = []
     registry: dict[str, str | None] = {}
     for key, fields in records.items():
         doi, author = fields.get("doi"), fields.get("author")
@@ -667,10 +693,10 @@ def check_authors(records: dict[str, dict[str, str]]) -> list[str]:
             continue
         doi_norm = doi.lower()
         if doi_norm not in registry:
-            registry[doi_norm] = doi_registry(doi_norm)
+            registry[doi_norm] = doi_registry(doi_norm, limited)
         if registry[doi_norm] != "crossref":
             continue
-        remote = crossref_authors(doi_norm)
+        remote = crossref_authors(doi_norm, limited)
         if not remote:
             continue
         local = bib_authors(author)
@@ -682,7 +708,7 @@ def check_authors(records: dict[str, dict[str, str]]) -> list[str]:
                 f"  bib:      {author}\n"
                 f"  crossref: {'; '.join(' '.join(person) for person in remote)}"
             )
-    return errors
+    return errors, len(limited)
 
 
 def prose_files() -> list[Path]:
@@ -694,9 +720,13 @@ def prose_files() -> list[Path]:
     return files
 
 
-def check_prose_authors() -> list[str]:
-    """Fail when prose cites a Crossref DOI without naming its first author."""
+def check_prose_authors() -> tuple[list[str], int]:
+    """Fail when prose cites a Crossref DOI without naming its first author.
+
+    The second value counts DOIs skipped because a lookup stayed rate limited.
+    """
     errors: list[str] = []
+    limited: list[str] = []
     files = prose_files()
     hits: dict[str, list[tuple[str, int]]] = {}
     texts: dict[str, list[str]] = {}
@@ -715,11 +745,18 @@ def check_prose_authors() -> list[str]:
                 hits.setdefault(doi, []).append((label, line_no))
 
     unique = sorted(hits)
+
+    def agency_of(doi: str) -> str | None:
+        return doi_registry(doi, limited)
+
+    def people_of(doi: str) -> list[list[str]] | None:
+        return crossref_authors(doi, limited)
+
     with ThreadPoolExecutor(max_workers=8) as pool:
-        agencies = dict(zip(unique, pool.map(doi_registry, unique)))
+        agencies = dict(zip(unique, pool.map(agency_of, unique)))
     crossref_dois = [doi for doi in unique if agencies.get(doi) == "crossref"]
     with ThreadPoolExecutor(max_workers=8) as pool:
-        authors = dict(zip(crossref_dois, pool.map(crossref_authors, crossref_dois)))
+        authors = dict(zip(crossref_dois, pool.map(people_of, crossref_dois)))
 
     for doi in crossref_dois:
         people = authors.get(doi)
@@ -738,7 +775,7 @@ def check_prose_authors() -> list[str]:
                 f"{label}:{line_no}: {doi} is by {' '.join(people[0])} "
                 "but the nearby text does not name that author"
             )
-    return errors
+    return errors, len(limited)
 
 
 def main(argv: list[str]) -> int:
@@ -769,24 +806,32 @@ def main(argv: list[str]) -> int:
         print(message, file=sys.stderr)
 
     alignment: list[str] = []
+    author_limited = 0
     if only_bibs is None:
         records = references_bib()
         alignment.extend(check_cites(records))
-        alignment.extend(check_authors(records))
-        alignment.extend(check_prose_authors())
+        author_errors, author_limited = check_authors(records)
+        prose_errors, prose_limited = check_prose_authors()
+        alignment.extend(author_errors)
+        alignment.extend(prose_errors)
+        author_limited += prose_limited
         for message in alignment:
             print(message, file=sys.stderr)
 
     if failed or title_errors or alignment:
         return 1
-    limited = bool(warned or title_warnings)
+    limited = bool(warned or title_warnings or author_limited)
+    if title_warnings:
+        titles = f"bib titles ok ({checked_titles}, {title_warnings} rate limited)"
+    else:
+        titles = f"bib titles ok ({checked_titles})"
     if only_bibs is None:
         summary = (
-            f"doi links ok ({len(citations)}), bib titles ok ({checked_titles}), "
+            f"doi links ok ({len(citations)}), {titles}, "
             "cite keys, authors, and nearby names ok"
         )
     else:
-        summary = f"doi links ok ({len(citations)}), bib titles ok ({checked_titles})"
+        summary = f"doi links ok ({len(citations)}), {titles}"
     if limited:
         summary += " with rate-limit warnings"
     print(summary)

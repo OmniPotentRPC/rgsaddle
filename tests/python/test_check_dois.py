@@ -6,7 +6,6 @@ import email.utils
 import importlib.util
 import io
 import json
-from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
 from urllib.error import HTTPError
@@ -177,6 +176,8 @@ def test_rate_limit_then_success(
     assert delays == [1.0]
     assert "warning:" not in captured.err
     assert "doi links ok" in captured.out
+    assert "bib titles ok (1)" in captured.out
+    assert "rate limited" not in captured.out
     assert "rate-limit" not in captured.out
 
 
@@ -216,6 +217,7 @@ def test_persistent_rate_limit_warns(
     }
     assert "warning:" in captured.err
     assert f"HTTP {status} (rate limited)" in captured.err
+    assert "bib titles ok (0, 1 rate limited)" in captured.out
     assert "with rate-limit warnings" in captured.out
 
 
@@ -243,13 +245,16 @@ def test_long_retry_after_warns_without_stalling(
     assert "warning:" in captured.err
 
 
+@pytest.mark.parametrize("frozen", [1_700_000_000.0, 1_700_000_000.5, 1_700_000_000.7])
 def test_retry_after_http_date_is_honoured(
+    frozen: float,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    moment = datetime.now(timezone.utc) + timedelta(seconds=3)
-    header = email.utils.formatdate(moment.timestamp(), usegmt=True)
+    header = email.utils.formatdate(frozen + 3, usegmt=True)
+    parsed = email.utils.parsedate_to_datetime(header)
+    expected = parsed.timestamp() - frozen
     doi_calls = 0
 
     def urlopen(request: object, timeout: int = 30) -> _JSONResponse:
@@ -265,11 +270,12 @@ def test_retry_after_http_date_is_honoured(
         return _crossref_ok()
 
     delays = _install_transport(monkeypatch, urlopen)
+    monkeypatch.setattr(check_dois.time, "time", lambda: frozen)
     code = check_dois.main([str(_sample_bib(tmp_path))])
     captured = capsys.readouterr()
     assert code == 0
-    assert delays[0] == pytest.approx(3.0, abs=0.5)
-    assert delays[0] <= check_dois.RATE_LIMIT_BUDGET_S
+    assert delays == [expected]
+    assert expected <= check_dois.RATE_LIMIT_BUDGET_S
     assert "warning:" not in captured.err
 
 
@@ -330,3 +336,172 @@ def test_other_http_error_still_fails(
     assert delays[0] == pytest.approx(1.5)
     assert "HTTP 500" in captured.err
     assert "warning:" not in captured.err
+
+
+def test_client_error_fails_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    doi_calls = 0
+
+    def urlopen(request: object, timeout: int = 30) -> _JSONResponse:
+        del timeout
+        url = _url_of(request)
+        host = check_dois.urllib.parse.urlsplit(url).hostname or ""
+        if host.endswith("doi.org"):
+            nonlocal doi_calls
+            doi_calls += 1
+            raise _http_error(url, 403)
+        return _crossref_ok()
+
+    delays = _install_transport(monkeypatch, urlopen)
+    code = check_dois.main([str(_sample_bib(tmp_path))])
+    captured = capsys.readouterr()
+    assert code != 0
+    assert doi_calls == 1
+    assert delays == []
+    assert "HTTP 403" in captured.err
+    assert "warning:" not in captured.err
+
+
+def test_retry_after_inside_budget_then_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    doi_calls = 0
+
+    def urlopen(request: object, timeout: int = 30) -> _JSONResponse:
+        del timeout
+        url = _url_of(request)
+        host = check_dois.urllib.parse.urlsplit(url).hostname or ""
+        if host.endswith("doi.org"):
+            nonlocal doi_calls
+            doi_calls += 1
+            raise _http_error(url, 429, retry_after="5")
+        return _crossref_ok()
+
+    delays = _install_transport(monkeypatch, urlopen)
+    code = check_dois.main([str(_sample_bib(tmp_path))])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert delays == [5.0]
+    assert doi_calls == 2
+    assert "warning:" in captured.err
+    assert "with rate-limit warnings" in captured.out
+
+
+def _stub_repo_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check_dois, "cited_dois", lambda _only: {})
+    monkeypatch.setattr(check_dois, "bib_files", lambda: [])
+    monkeypatch.setattr(check_dois, "check_cites", lambda _records: [])
+
+
+def test_registry_rate_limit_qualifies_author_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    doi = _sample_doi()
+    _stub_repo_scan(monkeypatch)
+    monkeypatch.setattr(
+        check_dois,
+        "references_bib",
+        lambda: {"ada": {"doi": doi, "author": "Ada Lovelace"}},
+    )
+    monkeypatch.setattr(check_dois, "check_prose_authors", lambda: ([], 0))
+
+    def urlopen(request: object, timeout: int = 30) -> _JSONResponse:
+        del timeout
+        raise _http_error(_url_of(request), 429)
+
+    _install_transport(monkeypatch, urlopen)
+    code = check_dois.main([])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "authors, and nearby names ok with rate-limit warnings" in captured.out
+    assert "warning:" in captured.err
+
+
+def test_crossref_author_rate_limit_qualifies_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    doi = _sample_doi()
+    _stub_repo_scan(monkeypatch)
+    monkeypatch.setattr(
+        check_dois,
+        "references_bib",
+        lambda: {"ada": {"doi": doi, "author": "Ada Lovelace"}},
+    )
+    monkeypatch.setattr(check_dois, "check_prose_authors", lambda: ([], 0))
+
+    def urlopen(request: object, timeout: int = 30) -> _JSONResponse:
+        del timeout
+        url = _url_of(request)
+        if "doiRA" in url:
+            return _JSONResponse([{"RA": "Crossref"}])
+        raise _http_error(url, 429)
+
+    _install_transport(monkeypatch, urlopen)
+    code = check_dois.main([])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "authors, and nearby names ok with rate-limit warnings" in captured.out
+    assert "warning:" in captured.err
+
+
+def test_matched_authors_do_not_qualify_as_rate_limited(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    doi = _sample_doi()
+    _stub_repo_scan(monkeypatch)
+    monkeypatch.setattr(
+        check_dois,
+        "references_bib",
+        lambda: {"ada": {"doi": doi, "author": "Ada Lovelace"}},
+    )
+    monkeypatch.setattr(check_dois, "check_prose_authors", lambda: ([], 0))
+
+    def urlopen(request: object, timeout: int = 30) -> _JSONResponse:
+        del timeout
+        url = _url_of(request)
+        if "doiRA" in url:
+            return _JSONResponse([{"RA": "Crossref"}])
+        return _JSONResponse(
+            {"message": {"author": [{"given": "Ada", "family": "Lovelace"}]}}
+        )
+
+    _install_transport(monkeypatch, urlopen)
+    code = check_dois.main([])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "authors, and nearby names ok" in captured.out
+    assert "rate-limit" not in captured.out
+    assert "warning:" not in captured.err
+
+
+def test_prose_rate_limit_qualifies_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    doi = _sample_doi()
+    note = tmp_path / "note.org"
+    note.write_text("Work " + doi + " is cited here.\n", encoding="utf-8")
+    _stub_repo_scan(monkeypatch)
+    monkeypatch.setattr(check_dois, "references_bib", lambda: {})
+    monkeypatch.setattr(check_dois, "check_authors", lambda _records: ([], 0))
+    monkeypatch.setattr(check_dois, "prose_files", lambda: [note])
+
+    def urlopen(request: object, timeout: int = 30) -> _JSONResponse:
+        del timeout
+        raise _http_error(_url_of(request), 429)
+
+    _install_transport(monkeypatch, urlopen)
+    code = check_dois.main([])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "authors, and nearby names ok with rate-limit warnings" in captured.out
+    assert "warning:" in captured.err
