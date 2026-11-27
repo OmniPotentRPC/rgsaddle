@@ -1,0 +1,1 @@
+~BandSession::reset~ drops the free-end cut count, peak stability, cut baseline, and initial fixed endpoint energy, so a new surface starts those records empty.

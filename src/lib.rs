@@ -76,6 +76,8 @@ pub mod bennett;
 pub mod capi;
 #[cfg(all(feature = "capi", feature = "ohtst"))]
 pub mod capi_hyperplane;
+#[cfg(all(feature = "capi", not(feature = "ohtst")))]
+mod capi_hyperplane_stub;
 pub mod connect;
 pub mod defect_pair;
 pub mod direction_cover;

@@ -1,0 +1,1 @@
+~MinModeSession::reset~ clears the FIRE stall latch, so the next translation on a new surface matches a new session.

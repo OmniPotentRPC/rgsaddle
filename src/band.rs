@@ -4045,13 +4045,15 @@ impl BandSession {
     /// Drop optimizer history and keep the climbing image, its
     /// baseline, and the cached surface values. A hand-off that moved
     /// an image outside the solver uses this so the next band step
-    /// does not inherit a stale quasi-Newton pair.
+    /// does not inherit a stale quasi-Newton pair. The ODE12r
+    /// rejection count restarts with the stepper.
     pub(crate) fn forget_optimizer(&mut self) {
         self.forget_solver_state();
         self.clear_string_state();
         self.free_end_state.endpoint_dt = None;
         self.free_end_state.prev_end_pos = None;
         self.free_end_state.prev_end_force = None;
+        self.unmoved = 0;
         if let Some(rtr) = &mut self.rtr {
             let gate = self.state.force_gate;
             *rtr = crate::rtr::BandRtr::new(rtr.config, false);
@@ -4117,17 +4119,63 @@ impl BandSession {
     }
 
     /// The model-update boundary: drop quasi-Newton history, the
-    /// climbing baseline, the armed climbing image, and every cached
-    /// surface value (endpoint energies, the last evaluation, and the
-    /// dynamic NEB image answers, step and origin). The next
-    /// evaluation carries the whole band. Use it when the surface
-    /// itself changed (a surrogate refit, a new calculator setting).
+    /// climbing baseline, the armed climbing image, the ODE12r
+    /// rejection count, the Zoom-NEB stability record, the free-end
+    /// cut memory and initial fixed energy, and every cached surface
+    /// value (endpoint energies, the last evaluation, and the dynamic
+    /// NEB image answers, step and origin). The stepper is built
+    /// again, so the FIRE time step returns to the configured start,
+    /// and the iteration count returns to zero. The exponential metric
+    /// returns to the empty one a new session holds: an energy scale
+    /// estimated from the previous surface, and the matrices built
+    /// with it, are dropped. The next evaluation carries the whole
+    /// band. Use it when the surface itself changed (a surrogate
+    /// refit, a new calculator setting).
     pub fn reset(&mut self) {
         self.restart();
+        self.rebuild_steppers();
+        self.iteration = 0;
         self.state.set_endpoints(None);
-        self.free_end_state.forget_fixed_endpoint();
+        self.free_end_state = free_end::FreeEndState::default();
+        self.zoom = zoom::ZoomState::default();
         self.state.drop_last();
         self.state.dynamic_run().clear_answers();
+        self.restore_constructed_exp();
+    }
+
+    /// Install the exponential metric a new session builds from the
+    /// current configuration. The surface-derived scale and matrices
+    /// go, and the next build takes the same metric id a new session
+    /// would.
+    fn restore_constructed_exp(&mut self) {
+        match self.config.exp_precon {
+            Some(precon) => {
+                self.set_exp_precon(precon)
+                    .expect("reset restores an exponential metric the session already accepted");
+            }
+            None => self.exp = None,
+        }
+        self.state.next_metric_id.store(1, Ordering::Relaxed);
+    }
+
+    /// Replace both steppers with the ones a new session builds.
+    /// `forget` keeps the FIRE time step it has grown, so a surface
+    /// change builds the stepper again. A HiGHS selection is applied
+    /// to the new steppers.
+    fn rebuild_steppers(&mut self) {
+        let method = if self.config.quickmin {
+            Method::QuickMin
+        } else {
+            self.config.method.clone()
+        };
+        let dof = self.positions.ncols();
+        let segment = if self.solid.is_some() { dof + 9 } else { dof };
+        let interior_dof = (self.positions.nrows() - 2) * segment;
+        self.solver = build_solver(&self.config, &method, interior_dof);
+        self.step_switch = build_step_switch(&self.config, &method, interior_dof);
+        if self.highs {
+            self.set_highs(true);
+        }
     }
 
     /// Set the force tolerance without dropping quasi-Newton pairs.
@@ -6201,5 +6249,160 @@ mod tests {
             assert_abs_diff_eq!(last.energies[i + 1], *want, epsilon = 1e-12);
             assert_abs_diff_eq!(last.gradients[(i + 1, 0)], scale, epsilon = 1e-12);
         }
+    }
+
+    /// `E = 20 y^2`. The opening ODE12r step of length 1 overshoots and
+    /// the trial is rejected, so the band stays where it was.
+    struct StiffValley;
+
+    impl BandSurface for StiffValley {
+        fn eval(
+            &self,
+            positions: ArrayView2<f64>,
+            energies: &mut Array1<f64>,
+            gradients: &mut Array2<f64>,
+        ) -> Result<(), SaddleError> {
+            for (i, row) in positions.outer_iter().enumerate() {
+                let y = row[1];
+                energies[i] = 20.0 * y * y;
+                gradients[(i, 0)] = 0.0;
+                gradients[(i, 1)] = 40.0 * y;
+                gradients[(i, 2)] = 0.0;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reset_then_step_matches_a_fresh_session_after_ode12r_rejections() {
+        let band = array![[0.0, 0.0, 0.0], [1.0, 0.5, 0.0], [2.0, 0.0, 0.0]];
+        let config = BandConfig::default()
+            .with_spring(SpringKind::Uniform { k: 0.0 })
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_max_move(0.0)
+            .with_method(Method::Ode12r);
+        let mut aged = BandSession::new(config.clone(), band.clone()).unwrap();
+        aged.unmoved = 64;
+        aged.reset();
+        let mut fresh = BandSession::new(config, band).unwrap();
+        assert_eq!(aged.unmoved, fresh.unmoved);
+        let aged_step = aged.step(&StiffValley).expect("reset session steps");
+        let fresh_step = fresh.step(&StiffValley).expect("fresh session steps");
+        assert_eq!(aged_step.status, fresh_step.status);
+        assert_eq!(aged_step.status, BandStatus::Running);
+        assert_eq!(aged.positions(), fresh.positions());
+        assert_eq!(aged.unmoved, fresh.unmoved);
+    }
+
+    /// Five downhill FIRE steps grow the time step (`n_min` is 5).
+    /// `forget` keeps that step, so reset has to build the stepper
+    /// again before the next move can match a new session.
+    #[test]
+    fn reset_then_step_matches_a_fresh_session_after_fire_grows_dt() {
+        struct Well;
+
+        impl BandSurface for Well {
+            fn eval(
+                &self,
+                positions: ArrayView2<f64>,
+                energies: &mut Array1<f64>,
+                gradients: &mut Array2<f64>,
+            ) -> Result<(), SaddleError> {
+                for (i, row) in positions.outer_iter().enumerate() {
+                    let (x, y, z) = (row[0], row[1], row[2]);
+                    energies[i] = (x * x - 1.0).powi(2) + 2.0 * y * y + 2.0 * z * z;
+                    gradients[(i, 0)] = 4.0 * x * (x * x - 1.0);
+                    gradients[(i, 1)] = 4.0 * y;
+                    gradients[(i, 2)] = 4.0 * z;
+                }
+                Ok(())
+            }
+        }
+
+        let band = Array2::from_shape_fn((9, 3), |(i, c)| {
+            let t = i as f64 / 8.0;
+            [-1.0 + 2.0 * t, 0.3 * (std::f64::consts::PI * t).sin(), 0.0][c]
+        });
+        let config = BandConfig::default()
+            .with_max_move(0.1)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_climbing(None);
+        let mut aged = BandSession::new(config.clone(), band).unwrap();
+        for _ in 0..6 {
+            let report = aged.step(&Well).unwrap();
+            assert_eq!(report.status, BandStatus::Running);
+        }
+        aged.reset();
+        let mut fresh = BandSession::new(config, aged.positions().to_owned()).unwrap();
+        assert_eq!(aged.iteration(), fresh.iteration());
+        let aged_step = aged.step(&Well).unwrap();
+        let fresh_step = fresh.step(&Well).unwrap();
+        assert_eq!(aged_step.status, fresh_step.status);
+        assert_eq!(aged.positions(), fresh.positions());
+        assert_eq!(aged.iteration(), fresh.iteration());
+    }
+
+    /// No configured energy scale: the first step estimates `mu` from
+    /// the surface. That scale and the matrices built with it belong
+    /// to that surface. A new session holds none of them.
+    #[test]
+    fn reset_drops_the_surface_derived_exp_scale() {
+        struct Well;
+
+        impl BandSurface for Well {
+            fn eval(
+                &self,
+                positions: ArrayView2<f64>,
+                energies: &mut Array1<f64>,
+                gradients: &mut Array2<f64>,
+            ) -> Result<(), SaddleError> {
+                for (i, row) in positions.outer_iter().enumerate() {
+                    energies[i] = 0.0;
+                    gradients.row_mut(i).fill(0.0);
+                    for atom in 0..2 {
+                        let x = row[3 * atom];
+                        let y = row[3 * atom + 1];
+                        energies[i] += 0.5 * (x * x + y * y);
+                        gradients[(i, 3 * atom)] = x;
+                        gradients[(i, 3 * atom + 1)] = y;
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        let positions = array![
+            [0.0, 0.0, 0.0, 1.4, 0.0, 0.0],
+            [0.2, 0.3, 0.0, 1.6, 0.1, 0.0],
+            [0.4, 0.1, 0.0, 1.8, -0.2, 0.0],
+            [0.1, 0.0, 0.0, 1.5, 0.4, 0.0]
+        ];
+        let config = BandConfig::default()
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_max_move(0.05)
+            .with_exp_precon(ExpBandPrecon::default());
+        let mut aged = BandSession::new(config.clone(), positions).unwrap();
+        assert!(aged.exp_scale().is_none());
+        aged.step(&Well).unwrap();
+        let derived = aged.exp_scale().expect("the first step estimates mu");
+        assert!(derived.is_finite() && derived > 0.0);
+        aged.reset();
+        let mut fresh = BandSession::new(config, aged.positions().to_owned()).unwrap();
+        assert_eq!(aged.exp_scale(), fresh.exp_scale());
+        let aged_step = aged.step(&Well).unwrap();
+        let fresh_step = fresh.step(&Well).unwrap();
+        assert_eq!(
+            aged.exp_scale().map(f64::to_bits),
+            fresh.exp_scale().map(f64::to_bits)
+        );
+        assert_eq!(aged_step.surface_rows, fresh_step.surface_rows);
+        assert_eq!(aged_step.status, fresh_step.status);
+        assert_eq!(aged.positions(), fresh.positions());
     }
 }

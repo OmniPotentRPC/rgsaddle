@@ -1,0 +1,1 @@
+~MinModeSession::reset~ restores the FIRE time step to the configured opening value, so a step the integrator has grown does not carry onto the next surface.

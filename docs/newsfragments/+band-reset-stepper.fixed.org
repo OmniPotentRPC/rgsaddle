@@ -1,0 +1,1 @@
+~BandSession::reset~ builds the stepper again and returns the iteration count to zero, so the next FIRE step matches a new session.

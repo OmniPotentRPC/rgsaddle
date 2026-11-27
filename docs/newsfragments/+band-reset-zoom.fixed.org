@@ -1,0 +1,1 @@
+~BandSession::reset~ clears the Zoom-NEB stability count, previous climbing index, and placed window, so the same index does not zoom early on the next surface.

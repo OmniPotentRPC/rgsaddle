@@ -310,6 +310,7 @@ typedef struct {
 /**
  * Create a callback sampler. The callback is required; context is passed
  * through unchanged and may be NULL. Returns NULL for a null callback.
+ * Returns NULL in a library built without the ohtst Cargo feature.
  */
 RgsaddleHyperplaneSampler *rgsaddle_hyperplane_sampler_create(
     void *context, rgsaddle_sample_hyperplane_fn sample);
@@ -317,6 +318,7 @@ RgsaddleHyperplaneSampler *rgsaddle_hyperplane_sampler_create(
 /**
  * Free a callback sampler. NULL is accepted. A non-null pointer must have
  * come from rgsaddle_hyperplane_sampler_create and be freed exactly once.
+ * No-op in a library built without the ohtst Cargo feature.
  */
 void rgsaddle_hyperplane_sampler_free(RgsaddleHyperplaneSampler *);
 
@@ -324,13 +326,18 @@ void rgsaddle_hyperplane_sampler_free(RgsaddleHyperplaneSampler *);
  * Integrate V_full - V_harmonic over lambda on a fixed hyperplane.
  * point and normal each hold dimension doubles. config is read and result
  * is written during the call; sampler must remain live. Added in ABI minor
- * 42; stamp config->version with rgsaddle_abi_stamp.
+ * 42; stamp config->version with rgsaddle_abi_stamp. Returns
+ * RGSADDLE_INVALID_PARAMETER in a library built without the ohtst Cargo
+ * feature.
  */
 int32_t rgsaddle_hyperplane_thermodynamic_integration(
     RgsaddleHyperplaneSampler *, const double *, const double *, size_t,
     const rgsaddle_hyperplane_ti_config_t *,
     rgsaddle_hyperplane_ti_result_t *);
-/** Stable observable name `potential.full_minus_harmonic` for TI records. */
+/**
+ * Stable observable name `potential.full_minus_harmonic` for TI records.
+ * Exported in a library built without the ohtst Cargo feature as well.
+ */
 const char *rgsaddle_thermodynamic_derivative_observable(void);
 
 /**

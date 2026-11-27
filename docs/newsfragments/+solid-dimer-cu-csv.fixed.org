@@ -1,0 +1,1 @@
+The copper dumbbell search writes its table under the system temp directory unless ~RGSADDLE_WRITE_SOLID_DIMER_CU~ names a path, so the tracked benchmark file stays untouched.
