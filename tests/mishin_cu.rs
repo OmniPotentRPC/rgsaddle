@@ -1473,9 +1473,20 @@ fn dumbbell_searches_start_at_the_sheared_minimum() {
     for pair in barriers.windows(2) {
         assert!(pair[1] < pair[0], "fixed barriers {barriers:?}");
     }
-    // The tracked benchmark is not a test output. Set
-    // RGSADDLE_WRITE_SOLID_DIMER_CU to a path to keep a copy.
-    let path = std::env::var_os("RGSADDLE_WRITE_SOLID_DIMER_CU").map_or_else(
+    let path = solid_dimer_cu_table();
+    let mut file = File::create(&path).expect("create copper csv");
+    for line in &lines {
+        writeln!(file, "{line}").expect("write copper csv");
+    }
+    eprintln!("wrote {} rows to {}", lines.len() - 1, path.display());
+}
+
+/// Where the copper dumbbell table is written.
+///
+/// The tracked file under `benchmarks/` is not a test output. Set
+/// `RGSADDLE_WRITE_SOLID_DIMER_CU` to keep a copy at that path.
+fn solid_dimer_cu_table() -> PathBuf {
+    std::env::var_os("RGSADDLE_WRITE_SOLID_DIMER_CU").map_or_else(
         || {
             std::env::temp_dir().join(format!(
                 "rgsaddle-solid-dimer-cu-{}.csv",
@@ -1483,12 +1494,23 @@ fn dumbbell_searches_start_at_the_sheared_minimum() {
             ))
         },
         PathBuf::from,
+    )
+}
+
+#[test]
+fn copper_dumbbell_table_stays_out_of_the_benchmark_tree() {
+    assert!(
+        std::env::var_os("RGSADDLE_WRITE_SOLID_DIMER_CU").is_none(),
+        "RGSADDLE_WRITE_SOLID_DIMER_CU is set, so the default path is hidden"
     );
-    let mut file = File::create(&path).expect("create copper csv");
-    for line in &lines {
-        writeln!(file, "{line}").expect("write copper csv");
-    }
-    eprintln!("wrote {} rows to {}", lines.len() - 1, path.display());
+    let path = solid_dimer_cu_table();
+    let tracked = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmarks/solid_dimer_cu.csv");
+    assert_ne!(path, tracked);
+    assert!(
+        path.starts_with(std::env::temp_dir()),
+        "default copper table path {}",
+        path.display()
+    );
 }
 
 /// At 5% variable cell the search from the nudged <100> minimum ends on
