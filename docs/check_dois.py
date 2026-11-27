@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import datetime
+import email.utils
 import fnmatch
 import html
 import json
 import re
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -19,6 +22,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 USER_AGENT = "rgsaddle-documentation-link-check/0.6 (mailto:rgoswami@ieee.org)"
+# doi.org answers 429 when a documentation build resolves many handles at
+# once. Retry those, and 503, inside a short budget, then warn.
+RATE_LIMIT_CODES = frozenset({429, 503})
+TRANSIENT_HTTP_CODES = frozenset({408, 500, 502, 504})
+RATE_LIMIT_BUDGET_S = 8.0
+RATE_LIMIT_BASE_S = 0.25
+DOI_LOOKUP_GAP_S = 0.2
+FETCH_ATTEMPTS = 5
+WARNING_PREFIX = "warning: "
 DOI_URL = re.compile(
     r"https://doi\.org/(10\.\d{4,9}/[-._;()/:A-Z0-9%]+)",
     re.IGNORECASE,
@@ -254,11 +266,88 @@ def cited_dois(only_bibs: list[Path] | None = None) -> dict[str, list[str]]:
     return citations
 
 
+class RateLimited(RuntimeError):
+    """The host stayed on 429 or 503 after the retry budget."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"HTTP {status} (rate limited)")
+        self.status = status
+
+
+_doi_pace_lock = threading.Lock()
+_doi_not_before = 0.0
+
+
+def _pace_doi(url: str) -> None:
+    """Leave a short gap between successive doi.org lookups."""
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if host not in {"doi.org", "www.doi.org"}:
+        return
+    global _doi_not_before
+    with _doi_pace_lock:
+        now = time.monotonic()
+        wait = _doi_not_before - now
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _doi_not_before = now + DOI_LOOKUP_GAP_S
+
+
+def _retry_after_seconds(error: urllib.error.HTTPError) -> float | None:
+    """Return a Retry-After delay in seconds, when the header is usable."""
+    if not error.headers:
+        return None
+    raw = error.headers.get("Retry-After")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if text.isdigit():
+        return float(text)
+    try:
+        when = email.utils.parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return (when - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+
+
+def _rate_limit_delay(
+    error: urllib.error.HTTPError, attempt: int, waited: float
+) -> float | None:
+    """Return the next sleep, or None when another try would exceed the budget.
+
+    A Retry-After value is the delay when it fits in the time still left.
+    A longer value ends the retries: waiting it out would stall the build,
+    and a shorter wait would ignore the server.
+    """
+    remaining = RATE_LIMIT_BUDGET_S - waited
+    if remaining <= 0:
+        return None
+    header = _retry_after_seconds(error)
+    if header is None:
+        delay = RATE_LIMIT_BASE_S * (2**attempt)
+    else:
+        delay = max(0.0, header)
+    if delay > remaining:
+        return None
+    return delay
+
+
 def fetch_json(url: str) -> tuple[int, dict]:
-    """Fetch JSON from *url* with retries on transient errors and rate limits."""
+    """Fetch JSON from *url* with retries on transient errors and rate limits.
+
+    Statuses 429 and 503 use exponential backoff, or a Retry-After delay
+    when that header is present. The waits for one call stay inside a short
+    budget. When the budget is spent, RateLimited is raised and the caller
+    reports a warning. The build continues. 404 and other statuses keep
+    their existing results.
+    """
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     last_error = ""
-    for attempt in range(5):
+    waited = 0.0
+    for attempt in range(FETCH_ATTEMPTS):
+        _pace_doi(url)
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return response.status, json.load(response)
@@ -266,9 +355,21 @@ def fetch_json(url: str) -> tuple[int, dict]:
             if error.code == 404:
                 return 404, {}
             last_error = f"HTTP {error.code}"
+            if error.code in RATE_LIMIT_CODES:
+                delay = _rate_limit_delay(error, attempt, waited)
+                if delay is None or attempt + 1 == FETCH_ATTEMPTS:
+                    raise RateLimited(error.code) from error
+                if delay > 0:
+                    time.sleep(delay)
+                waited += delay
+                continue
             retry_after = error.headers.get("Retry-After") if error.headers else None
-            delay = float(retry_after) if retry_after and retry_after.isdigit() else 1.5 * (attempt + 1)
-            if error.code in {408, 429, 500, 502, 503, 504}:
+            delay = (
+                float(retry_after)
+                if retry_after and str(retry_after).isdigit()
+                else 1.5 * (attempt + 1)
+            )
+            if error.code in TRANSIENT_HTTP_CODES:
                 time.sleep(delay)
                 continue
             raise RuntimeError(last_error) from error
@@ -279,10 +380,16 @@ def fetch_json(url: str) -> tuple[int, dict]:
 
 
 def registry_check(doi: str) -> str | None:
-    """Return an error when the DOI handle registry does not know *doi*."""
+    """Return an error when the DOI handle registry does not know *doi*.
+
+    A 429 or 503 that survives the retry budget returns a warning string.
+    The build prints that string and continues.
+    """
     url = "https://doi.org/api/handles/" + urllib.parse.quote(doi, safe="/")
     try:
         status, payload = fetch_json(url)
+    except RateLimited as error:
+        return f"{WARNING_PREFIX}{doi}: {error}"
     except RuntimeError as error:
         return str(error)
     if status == 200 and payload.get("responseCode") == 1 and payload.get("values"):
@@ -321,8 +428,11 @@ def fetch_registered_titles(doi: str) -> tuple[str, list[str]]:
     raise RuntimeError("DOI not found in Crossref or DataCite")
 
 
-def check_bib_titles(paths: list[Path]) -> tuple[int, list[str]]:
-    """Compare every DOI-bearing `.bib` entry's title against Crossref/DataCite."""
+def check_bib_titles(paths: list[Path]) -> tuple[int, list[str], int]:
+    """Compare every DOI-bearing `.bib` entry's title against Crossref/DataCite.
+
+    The third value counts entries skipped after a rate limit.
+    """
     records: list[tuple[str, str, str, str]] = []
     errors: list[str] = []
     for path in paths:
@@ -346,14 +456,21 @@ def check_bib_titles(paths: list[Path]) -> tuple[int, list[str]]:
         try:
             source, titles = fetch_registered_titles(doi)
             return source, titles, None
+        except RateLimited as error:
+            return "", None, f"{WARNING_PREFIX}{doi}: {error}"
         except RuntimeError as error:
             return "", None, str(error)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         fetched = dict(zip(unique_dois, pool.map(lookup, unique_dois)))
 
+    title_warnings = 0
     for label, key, doi, bib_title in records:
         source, candidates, err = fetched[doi.lower()]
+        if err is not None and err.startswith(WARNING_PREFIX):
+            title_warnings += 1
+            print(f"{err} ({label}:{key})", file=sys.stderr)
+            continue
         if err is not None or not candidates:
             errors.append(f"{label}:{key} ({doi}): {err}")
             continue
@@ -366,7 +483,7 @@ def check_bib_titles(paths: list[Path]) -> tuple[int, list[str]]:
                 f"  bib: {bib_title}\n"
                 f"  {source}: {clean_cr}"
             )
-    return len(records), errors
+    return len(records), errors, title_warnings
 
 
 CITE_RE = re.compile(r"cite:`([^`]+)`")
@@ -491,6 +608,9 @@ def doi_registry(doi: str) -> str | None:
     url = "https://doi.org/doiRA/" + urllib.parse.quote(doi, safe="/:")
     try:
         status, payload = fetch_json(url)
+    except RateLimited as error:
+        print(f"{WARNING_PREFIX}{doi}: {error}", file=sys.stderr)
+        return None
     except RuntimeError:
         return None
     if status != 200 or not isinstance(payload, list) or not payload:
@@ -509,6 +629,9 @@ def crossref_authors(doi: str) -> list[list[str]] | None:
     url = "https://api.crossref.org/works/" + urllib.parse.quote(doi, safe="")
     try:
         status, payload = fetch_json(url)
+    except RateLimited as error:
+        print(f"{WARNING_PREFIX}{doi}: {error}", file=sys.stderr)
+        return None
     except RuntimeError:
         return None
     if status != 200:
@@ -622,14 +745,26 @@ def main(argv: list[str]) -> int:
     only_bibs = [Path(arg) for arg in argv] if argv else None
     citations = cited_dois(only_bibs)
     with ThreadPoolExecutor(max_workers=12) as pool:
-        errors = dict(zip(citations, pool.map(registry_check, citations)))
-    failed = {doi: error for doi, error in errors.items() if error is not None}
+        results = dict(zip(citations, pool.map(registry_check, citations)))
+    warned = {
+        doi: error
+        for doi, error in results.items()
+        if error is not None and error.startswith(WARNING_PREFIX)
+    }
+    failed = {
+        doi: error
+        for doi, error in results.items()
+        if error is not None and not error.startswith(WARNING_PREFIX)
+    }
+    for doi, error in sorted(warned.items()):
+        sources = ", ".join(sorted(set(citations[doi])))
+        print(f"{error} ({sources})", file=sys.stderr)
     for doi, error in sorted(failed.items()):
         sources = ", ".join(sorted(set(citations[doi])))
         print(f"{doi}: {error} ({sources})", file=sys.stderr)
 
     target_bibs = only_bibs if only_bibs is not None else bib_files()
-    checked_titles, title_errors = check_bib_titles(target_bibs)
+    checked_titles, title_errors, title_warnings = check_bib_titles(target_bibs)
     for message in title_errors:
         print(message, file=sys.stderr)
 
@@ -644,13 +779,17 @@ def main(argv: list[str]) -> int:
 
     if failed or title_errors or alignment:
         return 1
+    limited = bool(warned or title_warnings)
     if only_bibs is None:
-        print(
+        summary = (
             f"doi links ok ({len(citations)}), bib titles ok ({checked_titles}), "
             "cite keys, authors, and nearby names ok"
         )
     else:
-        print(f"doi links ok ({len(citations)}), bib titles ok ({checked_titles})")
+        summary = f"doi links ok ({len(citations)}), bib titles ok ({checked_titles})"
+    if limited:
+        summary += " with rate-limit warnings"
+    print(summary)
     return 0
 
 
