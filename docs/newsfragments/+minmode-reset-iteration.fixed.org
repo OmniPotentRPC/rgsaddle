@@ -1,0 +1,1 @@
+~MinModeSession::reset~ returns the iteration count to zero, so the next step reports the same count as a new session.

@@ -4125,9 +4125,12 @@ impl BandSession {
     /// value (endpoint energies, the last evaluation, and the dynamic
     /// NEB image answers, step and origin). The stepper is built
     /// again, so the FIRE time step returns to the configured start,
-    /// and the iteration count returns to zero. The next evaluation
-    /// carries the whole band. Use it when the surface itself changed
-    /// (a surrogate refit, a new calculator setting).
+    /// and the iteration count returns to zero. The exponential metric
+    /// returns to the empty one a new session holds: an energy scale
+    /// estimated from the previous surface, and the matrices built
+    /// with it, are dropped. The next evaluation carries the whole
+    /// band. Use it when the surface itself changed (a surrogate
+    /// refit, a new calculator setting).
     pub fn reset(&mut self) {
         self.restart();
         self.rebuild_steppers();
@@ -4137,6 +4140,22 @@ impl BandSession {
         self.zoom = zoom::ZoomState::default();
         self.state.drop_last();
         self.state.dynamic_run().clear_answers();
+        self.restore_constructed_exp();
+    }
+
+    /// Install the exponential metric a new session builds from the
+    /// current configuration. The surface-derived scale and matrices
+    /// go, and the next build takes the same metric id a new session
+    /// would.
+    fn restore_constructed_exp(&mut self) {
+        match self.config.exp_precon {
+            Some(precon) => {
+                self.set_exp_precon(precon)
+                    .expect("reset restores an exponential metric the session already accepted");
+            }
+            None => self.exp = None,
+        }
+        self.state.next_metric_id.store(1, Ordering::Relaxed);
     }
 
     /// Replace both steppers with the ones a new session builds.
@@ -6324,5 +6343,66 @@ mod tests {
         assert_eq!(aged_step.status, fresh_step.status);
         assert_eq!(aged.positions(), fresh.positions());
         assert_eq!(aged.iteration(), fresh.iteration());
+    }
+
+    /// No configured energy scale: the first step estimates `mu` from
+    /// the surface. That scale and the matrices built with it belong
+    /// to that surface. A new session holds none of them.
+    #[test]
+    fn reset_drops_the_surface_derived_exp_scale() {
+        struct Well;
+
+        impl BandSurface for Well {
+            fn eval(
+                &self,
+                positions: ArrayView2<f64>,
+                energies: &mut Array1<f64>,
+                gradients: &mut Array2<f64>,
+            ) -> Result<(), SaddleError> {
+                for (i, row) in positions.outer_iter().enumerate() {
+                    energies[i] = 0.0;
+                    gradients.row_mut(i).fill(0.0);
+                    for atom in 0..2 {
+                        let x = row[3 * atom];
+                        let y = row[3 * atom + 1];
+                        energies[i] += 0.5 * (x * x + y * y);
+                        gradients[(i, 3 * atom)] = x;
+                        gradients[(i, 3 * atom + 1)] = y;
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        let positions = array![
+            [0.0, 0.0, 0.0, 1.4, 0.0, 0.0],
+            [0.2, 0.3, 0.0, 1.6, 0.1, 0.0],
+            [0.4, 0.1, 0.0, 1.8, -0.2, 0.0],
+            [0.1, 0.0, 0.0, 1.5, 0.4, 0.0]
+        ];
+        let config = BandConfig::default()
+            .with_climbing(None)
+            .with_min_mode(None)
+            .with_saddle_check(None)
+            .with_remove_translation(false)
+            .with_max_move(0.05)
+            .with_exp_precon(ExpBandPrecon::default());
+        let mut aged = BandSession::new(config.clone(), positions).unwrap();
+        assert!(aged.exp_scale().is_none());
+        aged.step(&Well).unwrap();
+        let derived = aged.exp_scale().expect("the first step estimates mu");
+        assert!(derived.is_finite() && derived > 0.0);
+        aged.reset();
+        let mut fresh = BandSession::new(config, aged.positions().to_owned()).unwrap();
+        assert_eq!(aged.exp_scale(), fresh.exp_scale());
+        let aged_step = aged.step(&Well).unwrap();
+        let fresh_step = fresh.step(&Well).unwrap();
+        assert_eq!(
+            aged.exp_scale().map(f64::to_bits),
+            fresh.exp_scale().map(f64::to_bits)
+        );
+        assert_eq!(aged_step.surface_rows, fresh_step.surface_rows);
+        assert_eq!(aged_step.status, fresh_step.status);
+        assert_eq!(aged.positions(), fresh.positions());
     }
 }

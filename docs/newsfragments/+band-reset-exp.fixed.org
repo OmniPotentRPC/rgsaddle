@@ -1,0 +1,1 @@
+~BandSession::reset~ drops the energy scale and matrices the exponential metric built from the surface, and installs the empty metric a new session holds.

@@ -2374,18 +2374,24 @@ impl MinModeSession {
     /// Drop optimizer history, dimer rotation history, carried
     /// curvature, the FIRE stall latch, the Lanczos Krylov block, and
     /// the cached centre gradient at a surface-epoch boundary. The
-    /// mode stays as the next seed. The saddle-index certificate and
-    /// the escape count go too.
+    /// iteration count returns to zero. The FIRE time step returns to
+    /// the configured opening value: `forget` keeps a step the
+    /// integrator has grown, and a retreated step is restored the same
+    /// way. The mode stays as the next seed. The saddle-index
+    /// certificate and the escape count go too.
     pub fn reset(&mut self) {
         self.forget_search();
+        self.iteration = 0;
         self.saddle.certified = None;
         self.saddle.attempts = 0;
     }
 
     fn forget_search(&mut self) {
         self.solver.forget();
-        if self.fire_dt != self.config.time_step {
-            // Only a FIRE session lowers fire_dt, so the restore cannot fail.
+        if matches!(self.config.method, Method::Fire { .. }) {
+            // `forget` keeps the time step FIRE has grown. A FIRE
+            // session accepts this restore, including after a retreat
+            // lowered `fire_dt`.
             let _ = self.set_fire_dt(self.config.time_step);
         }
         self.dimer_rotation.clear();
@@ -3924,8 +3930,8 @@ impl MinModeSession {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtNConfig, MinModeConfig, MinModeKind, MinModeSession, PointSurface, SaddleIndexCheck,
-        rotation_force_converged, rotation_force_error, translated_gradient,
+        ArtNConfig, MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface,
+        SaddleIndexCheck, rotation_force_converged, rotation_force_error, translated_gradient,
     };
     use crate::error::SaddleError;
     use approx::assert_abs_diff_eq;
@@ -4607,6 +4613,73 @@ mod tests {
         assert_eq!(aged.position(), fresh.position());
         assert_eq!(aged.mode(), fresh.mode());
         assert_eq!(aged.krylov_block(), fresh.krylov_block());
+        assert_abs_diff_eq!(aged.curvature(), fresh.curvature(), epsilon = 0.0);
+    }
+
+    #[test]
+    fn reset_returns_the_iteration_count_to_zero() {
+        let surface = DiagonalQuadratic(array![-1.0, 4.0, 8.0]);
+        let start = array![0.4, 0.2, 0.1];
+        let mode = array![1.0, 0.0, 0.0];
+        let config = MinModeConfig::default().with_saddle_check(None);
+        let mut aged = MinModeSession::new(config.clone(), start, mode).unwrap();
+        let first = aged.step(&surface).unwrap();
+        assert!(first.iteration >= 1);
+        aged.reset();
+        let mut fresh =
+            MinModeSession::new(config, aged.position().to_owned(), aged.mode().to_owned())
+                .unwrap();
+        assert_eq!(aged.iteration, fresh.iteration);
+        let aged_step = aged.step(&surface).unwrap();
+        let fresh_step = fresh.step(&surface).unwrap();
+        assert_eq!(aged_step.iteration, fresh_step.iteration);
+        assert_eq!(aged.position(), fresh.position());
+        assert_eq!(aged.mode(), fresh.mode());
+        assert_abs_diff_eq!(aged.curvature(), fresh.curvature(), epsilon = 0.0);
+    }
+
+    /// Eight downhill translations grow the FIRE time step (`n_min` is
+    /// 5, and the opening step has no velocity, so it does not count).
+    /// `forget` keeps that step, so the next move differs from a new
+    /// session until reset restores the configured opening value.
+    #[test]
+    fn reset_restores_the_fire_time_step_a_new_session_opens_with() {
+        let surface = DiagonalQuadratic(array![-0.2, 4.0, 8.0]);
+        let start = array![0.4, 0.0, 0.0];
+        let mode = array![1.0, 0.0, 0.0];
+        let config = MinModeConfig::default()
+            .with_saddle_check(None)
+            .with_time_step(0.25)
+            .with_max_move(0.0)
+            .with_force_tol(0.0);
+        let mut aged = MinModeSession::new(config.clone(), start, mode).unwrap();
+        for _ in 0..8 {
+            let report = aged.step(&surface).unwrap();
+            assert_eq!(report.status, MinModeStatus::Running);
+        }
+        aged.reset();
+        let mut fresh =
+            MinModeSession::new(config, aged.position().to_owned(), aged.mode().to_owned())
+                .unwrap();
+        assert_eq!(aged.fire_dt, fresh.fire_dt);
+        aged.solver.start_fire_trace();
+        fresh.solver.start_fire_trace();
+        let aged_step = aged.step(&surface).unwrap();
+        let fresh_step = fresh.step(&surface).unwrap();
+        let aged_trace = aged.solver.take_fire_trace();
+        let fresh_trace = fresh.solver.take_fire_trace();
+        assert!(
+            !aged_trace.is_empty(),
+            "the reset session did not step with FIRE"
+        );
+        assert!(
+            !fresh_trace.is_empty(),
+            "the new session did not step with FIRE"
+        );
+        assert_eq!(aged_trace[0].dt.to_bits(), fresh_trace[0].dt.to_bits());
+        assert_eq!(aged_step.status, fresh_step.status);
+        assert_eq!(aged.position(), fresh.position());
+        assert_eq!(aged.mode(), fresh.mode());
         assert_abs_diff_eq!(aged.curvature(), fresh.curvature(), epsilon = 0.0);
     }
 
