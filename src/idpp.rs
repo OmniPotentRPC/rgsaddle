@@ -13,6 +13,13 @@
 //! and Jonsson, J. Chem. Theory Comput. 20, 155 (2024),
 //! doi:10.1021/acs.jctc.3c01111. It grows the band from both endpoints
 //! on the same objective instead of starting from the straight line.
+//!
+//! [`sidpp_alternating_path`] grows a path by inserting images from both
+//! ends at a fixed fraction of the open gap, then places that path at
+//! equal arc length. [`sidpp_alternating_inverse_distance_path`] is that growth with
+//! inverse-distance pair targets and a last per-image pull.
+//! [`sidpp_path`] is unchanged. [`idpp_path_fixed`] is [`idpp_path`]
+//! with a frozen-atom mask.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
@@ -755,6 +762,75 @@ fn relax_image(
     Ok(())
 }
 
+/// Fraction of a frontier gap, collective stops, and the optional pull.
+///
+/// Non-exhaustive: start from [`SidppAlternatingConfig::default`] and
+/// chain the `with_*` setters.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct SidppAlternatingConfig {
+    /// Fraction of the open gap taken from the current frontier.
+    /// Finite and inside (0, 1). Default 0.33.
+    pub alpha: f64,
+    /// Quick-min steps after each insertion. Zero skips that stage.
+    /// Default 250.
+    pub short_iterations: usize,
+    /// Quick-min steps after the equal arc length placement. Zero skips
+    /// that stage. Default 5000.
+    pub final_iterations: usize,
+    /// Largest absolute component of the free collective force that ends
+    /// a stage early. Finite and non-negative. Default `1e-3`.
+    pub force_tol: f64,
+    /// Largest per-atom quick-min displacement. Finite and positive.
+    /// Default 0.1.
+    pub max_move: f64,
+    /// Spring along the simple tangent. Finite and non-negative.
+    /// Default 5.
+    pub spring: f64,
+    /// Place the band at equal minimum-image arc length before the final
+    /// relaxation. Default true.
+    pub reparametrize: bool,
+    /// Interpolate target pair distances in inverse distance.
+    /// Default false, which is the linear blend.
+    pub inverse_distance: bool,
+    /// After the final collective relaxation, minimize each interior
+    /// image on its finished-path target. Default false.
+    pub pull_to_target: bool,
+    /// L-BFGS stop used when [`Self::pull_to_target`] is set.
+    /// Default [`IdppConfig::default`].
+    pub pull: IdppConfig,
+}
+
+with_setters!(SidppAlternatingConfig {
+    with_alpha => alpha: val f64,
+    with_short_iterations => short_iterations: val usize,
+    with_final_iterations => final_iterations: val usize,
+    with_force_tol => force_tol: val f64,
+    with_max_move => max_move: val f64,
+    with_spring => spring: val f64,
+    with_reparametrize => reparametrize: val bool,
+    with_inverse_distance => inverse_distance: val bool,
+    with_pull_to_target => pull_to_target: val bool,
+    with_pull => pull: val IdppConfig,
+});
+
+impl Default for SidppAlternatingConfig {
+    fn default() -> Self {
+        Self {
+            alpha: 0.33,
+            short_iterations: 250,
+            final_iterations: 5000,
+            force_tol: 1e-3,
+            max_move: 0.1,
+            spring: 5.0,
+            reparametrize: true,
+            inverse_distance: false,
+            pull_to_target: false,
+            pull: IdppConfig::default(),
+        }
+    }
+}
+
 /// IDPP path with a frozen-atom mask.
 ///
 /// `fixed` is empty when every atom moves. `true` keeps that atom at
@@ -819,8 +895,245 @@ pub fn idpp_path_fixed(
     Ok(path)
 }
 
+/// Alternating IDPP path. This is not [`sidpp_path`].
+///
+/// Images are inserted from both ends, starting at the reactant. A new
+/// image takes [`SidppAlternatingConfig::alpha`] of the minimum-image
+/// step from the current frontier toward the other side of the open
+/// gap. Frozen components of that step are zero, so a frozen atom keeps
+/// the frontier coordinates, and the interior rows are then pinned to
+/// the reactant. Each insertion is followed by at most
+/// [`SidppAlternatingConfig::short_iterations`] quick-min steps. There is
+/// no further stage before the next insertion.
+///
+/// The collective force on an interior image is the part of the IDPP
+/// force perpendicular to the simple tangent, plus `spring` times the
+/// difference of the distances to the next and previous images along
+/// that tangent. The tangent is the unit minimum-image vector from the
+/// previous image to the next. The quick-min time step is 0.1, with one
+/// velocity projection over the whole interior and a per-atom cap of
+/// `max_move`. A stage stops early when the largest absolute component
+/// of the free force is under `force_tol`.
+///
+/// When every slot is filled and `reparametrize` is set, the band is
+/// placed at equal minimum-image arc length on the polyline. That
+/// placement runs for every path of at least three images, including a
+/// path with one interior image. A final quick-min of at most
+/// `final_iterations` steps follows. When `pull_to_target` is set, each
+/// interior image is then minimized on the IDPP objective at its
+/// fraction of the finished path. `inverse_distance` selects the
+/// inverse-distance blend for every target, including that pull.
+///
+/// `n_images` counts the endpoints. `fixed` is empty when every atom
+/// moves. The endpoints are copied through.
+///
+/// # Errors
+///
+/// [`SaddleError::Invalid`] when `alpha` is not inside (0, 1), a stop is
+/// non-finite, `max_move` is not positive, `spring` is negative, a fixed
+/// atom differs between the endpoints, or the pull settings are unusable
+/// while the pull is on. Also the shape and non-finite errors of
+/// [`linear_path`].
+///
+/// # Examples
+///
+/// ```
+/// use ndarray::array;
+/// use rgsaddle::idpp::{SidppAlternatingConfig, sidpp_alternating_path};
+///
+/// let reactant = array![0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+/// let product = array![0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+/// let config = SidppAlternatingConfig::default()
+///     .with_short_iterations(1)
+///     .with_final_iterations(1);
+/// let path = sidpp_alternating_path(
+///     reactant.view(),
+///     product.view(),
+///     4,
+///     None,
+///     &[],
+///     &config,
+/// )?;
+/// assert_eq!(path.dim(), (4, 6));
+/// assert_eq!(path.row(0), reactant);
+/// assert_eq!(path.row(3), product);
+/// # Ok::<(), rgsaddle::SaddleError>(())
+/// ```
+pub fn sidpp_alternating_path(
+    reactant: ArrayView1<f64>,
+    product: ArrayView1<f64>,
+    n_images: usize,
+    cell: Option<&Cell>,
+    fixed: &[bool],
+    config: &SidppAlternatingConfig,
+) -> Result<Array2<f64>, SaddleError> {
+    check_alternating(config)?;
+    check_ends(reactant, product, n_images)?;
+    check_fixed_mask(reactant, product, cell, fixed)?;
+    let d_init = distance_matrix(reactant, cell)?;
+    let d_final = distance_matrix(product, cell)?;
+    let mut images = vec![reactant.to_owned(), product.to_owned()];
+    let mut n_left = 0usize;
+    let mut n_right = 0usize;
+    let mut from_left = true;
+    while images.len() < n_images {
+        if from_left {
+            let image = interpolate(
+                images[n_left].view(),
+                images[n_left + 1].view(),
+                config.alpha,
+                cell,
+                fixed,
+            );
+            images.insert(n_left + 1, image);
+            n_left += 1;
+        } else {
+            let right_idx = images.len() - 1 - n_right;
+            let image = interpolate(
+                images[right_idx].view(),
+                images[right_idx - 1].view(),
+                config.alpha,
+                cell,
+                fixed,
+            );
+            images.insert(right_idx, image);
+            n_right += 1;
+        }
+        from_left = !from_left;
+        pin_images(&mut images, fixed);
+        relax_collective(
+            &mut images,
+            &d_init,
+            &d_final,
+            cell,
+            config,
+            fixed,
+            config.short_iterations,
+        )?;
+    }
+    if config.reparametrize {
+        let mut path = stack_images(&images);
+        equal_arc(&mut path, cell)?;
+        pin_fixed_rows(fixed, &mut path);
+        copy_interior(&mut images, &path);
+    }
+    relax_collective(
+        &mut images,
+        &d_init,
+        &d_final,
+        cell,
+        config,
+        fixed,
+        config.final_iterations,
+    )?;
+    if config.pull_to_target {
+        let denom = (images.len() - 1) as f64;
+        let held = images[0].clone();
+        for i in 1..images.len() - 1 {
+            let xi = i as f64 / denom;
+            let target = pair_target(&d_init, &d_final, xi, config.inverse_distance);
+            relax_image(
+                &mut images[i],
+                target.view(),
+                cell,
+                &config.pull,
+                fixed,
+                held.view(),
+            )?;
+        }
+    }
+    pin_images(&mut images, fixed);
+    Ok(stack_images(&images))
+}
+
+/// Inverse-distance form of [`sidpp_alternating_path`].
+///
+/// Target pair distances at fraction `xi` are
+/// `1 / ((1 - xi) / d_reactant + xi / d_product)`. A pair closer than
+/// `1e-4` at an endpoint uses that floor in the denominators. The same
+/// loop inserts, relaxes, and reparameterizes. `inverse_distance` and
+/// `pull_to_target` are turned on for the call, and the pull minimizes
+/// each interior image on its finished-path target. This is not
+/// [`crate::geodesic_interpolate`].
+///
+/// # Errors
+///
+/// The errors of [`sidpp_alternating_path`]. The pull uses `config.pull`,
+/// so that L-BFGS stop must be usable.
+///
+/// # Examples
+///
+/// ```
+/// use ndarray::array;
+/// use rgsaddle::idpp::{IdppConfig, SidppAlternatingConfig, sidpp_alternating_inverse_distance_path};
+///
+/// let reactant = array![0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+/// let product = array![0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+/// let config = SidppAlternatingConfig::default()
+///     .with_short_iterations(1)
+///     .with_final_iterations(1)
+///     .with_pull(IdppConfig::default().with_max_iterations(1));
+/// let path = sidpp_alternating_inverse_distance_path(
+///     reactant.view(),
+///     product.view(),
+///     3,
+///     None,
+///     &[],
+///     &config,
+/// )?;
+/// assert_eq!(path.dim(), (3, 6));
+/// assert_eq!(path.row(0), reactant);
+/// assert_eq!(path.row(2), product);
+/// # Ok::<(), rgsaddle::SaddleError>(())
+/// ```
+pub fn sidpp_alternating_inverse_distance_path(
+    reactant: ArrayView1<f64>,
+    product: ArrayView1<f64>,
+    n_images: usize,
+    cell: Option<&Cell>,
+    fixed: &[bool],
+    config: &SidppAlternatingConfig,
+) -> Result<Array2<f64>, SaddleError> {
+    let config = config
+        .clone()
+        .with_inverse_distance(true)
+        .with_pull_to_target(true);
+    sidpp_alternating_path(reactant, product, n_images, cell, fixed, &config)
+}
+
+/// Fixed quick-min step. Not a [`SidppAlternatingConfig`] field.
+const QUICKMIN_STEP: f64 = 0.1;
+
 /// Per-component minimum-image tolerance for a frozen atom, matching the band.
 const FIXED_ENDPOINT_TOL: f64 = 1e-10;
+
+fn check_alternating(config: &SidppAlternatingConfig) -> Result<(), SaddleError> {
+    let c = config;
+    if !(c.alpha.is_finite() && c.alpha > 0.0 && c.alpha < 1.0) {
+        return Err(SaddleError::Invalid(
+            "sequential IDPP alpha must be finite and inside (0, 1)".into(),
+        ));
+    }
+    if !(c.force_tol.is_finite() && c.force_tol >= 0.0) {
+        return Err(SaddleError::Invalid(
+            "sequential IDPP force tolerance must be finite and non-negative".into(),
+        ));
+    }
+    if !(c.max_move.is_finite() && c.max_move > 0.0) {
+        return Err(SaddleError::Invalid(
+            "sequential IDPP max move must be finite and positive".into(),
+        ));
+    }
+    if !(c.spring.is_finite() && c.spring >= 0.0) {
+        return Err(SaddleError::Invalid(
+            "sequential IDPP spring must be finite and non-negative".into(),
+        ));
+    }
+    if c.pull_to_target {
+        check_config(&c.pull)?;
+    }
+    Ok(())
+}
 
 fn check_fixed_mask(
     reactant: ArrayView1<f64>,
@@ -854,6 +1167,44 @@ fn check_fixed_mask(
     Ok(())
 }
 
+/// Linear blend, or `1 / ((1 - xi) / d0 + xi / d1)` with the IDPP floor.
+fn interpolated_distance(start: f64, end: f64, xi: f64, inverse: bool) -> f64 {
+    if !inverse {
+        return (1.0 - xi) * start + xi * end;
+    }
+    let left = start.max(R_FLOOR);
+    let right = end.max(R_FLOOR);
+    let weight = (1.0 - xi) / left + xi / right;
+    (1.0 / weight).max(R_FLOOR)
+}
+
+fn pair_target(d_init: &Array2<f64>, d_final: &Array2<f64>, xi: f64, inverse: bool) -> Array2<f64> {
+    let n = d_init.nrows();
+    let mut target = Array2::zeros((n, n));
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let distance = interpolated_distance(d_init[(i, j)], d_final[(i, j)], xi, inverse);
+            target[(i, j)] = distance;
+            target[(j, i)] = distance;
+        }
+    }
+    target
+}
+
+fn interpolate(
+    from: ArrayView1<f64>,
+    toward: ArrayView1<f64>,
+    alpha: f64,
+    cell: Option<&Cell>,
+    fixed: &[bool],
+) -> Array1<f64> {
+    let mut step = mic_diff(toward, from, cell);
+    zero_fixed_components(fixed, &mut step);
+    let mut image = from.to_owned();
+    image.scaled_add(alpha, &step);
+    image
+}
+
 fn zero_fixed_components(fixed: &[bool], v: &mut Array1<f64>) {
     if fixed.is_empty() {
         return;
@@ -880,6 +1231,226 @@ fn restore_fixed(image: &mut Array1<f64>, held: ArrayView1<f64>, fixed: &[bool])
     }
 }
 
+fn pin_packed(x: &mut Array1<f64>, held: ArrayView1<f64>, fixed: &[bool]) {
+    if fixed.is_empty() {
+        return;
+    }
+    let dof = held.len();
+    let n = x.len() / dof;
+    for image in 0..n {
+        for (atom, &is_fixed) in fixed.iter().enumerate() {
+            if !is_fixed {
+                continue;
+            }
+            for c in 0..3 {
+                x[image * dof + 3 * atom + c] = held[3 * atom + c];
+            }
+        }
+    }
+}
+
+fn pin_images(images: &mut [Array1<f64>], fixed: &[bool]) {
+    if fixed.is_empty() || images.len() < 3 {
+        return;
+    }
+    let held = images[0].clone();
+    let last = images.len() - 1;
+    for image in &mut images[1..last] {
+        restore_fixed(image, held.view(), fixed);
+    }
+}
+
+fn stack_images(images: &[Array1<f64>]) -> Array2<f64> {
+    let dof = images[0].len();
+    let mut path = Array2::zeros((images.len(), dof));
+    for (i, image) in images.iter().enumerate() {
+        path.row_mut(i).assign(image);
+    }
+    path
+}
+
+fn copy_interior(images: &mut [Array1<f64>], path: &Array2<f64>) {
+    for i in 1..images.len() - 1 {
+        images[i].assign(&path.row(i));
+    }
+}
+
+/// Equal minimum-image arc length on the polyline. Endpoints stay put.
+fn equal_arc(path: &mut Array2<f64>, cell: Option<&Cell>) -> Result<(), SaddleError> {
+    let n = path.nrows();
+    if n < 3 {
+        return Ok(());
+    }
+    let original = path.clone();
+    let mut unwrapped = original.clone();
+    let mut s = vec![0.0; n];
+    for i in 1..n {
+        let d = mic_diff(original.row(i), original.row(i - 1), cell);
+        let row = &unwrapped.row(i - 1) + &d;
+        unwrapped.row_mut(i).assign(&row);
+        let length = norm(&d);
+        if !length.is_finite() {
+            return Err(SaddleError::NonFinite("sequential IDPP arc length"));
+        }
+        s[i] = s[i - 1] + length;
+    }
+    let total = s[n - 1];
+    if total <= f64::MIN_POSITIVE {
+        return Ok(());
+    }
+    let h = total / (n - 1) as f64;
+    for j in 1..n - 1 {
+        let target = j as f64 * h;
+        let mut k = 0;
+        while k < n - 2 && s[k + 1] < target {
+            k += 1;
+        }
+        let denom = s[k + 1] - s[k];
+        let fraction = if denom > f64::MIN_POSITIVE {
+            (target - s[k]) / denom
+        } else {
+            0.0
+        };
+        let p = &unwrapped.row(k) + &((&unwrapped.row(k + 1) - &unwrapped.row(k)) * fraction);
+        let mut difference = &p - &original.row(j);
+        if let Some(cell) = cell {
+            mic::wrap_difference(cell, &mut difference);
+        }
+        let row = &original.row(j) + &difference;
+        if !row.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("sequential IDPP reparametrization"));
+        }
+        path.row_mut(j).assign(&row);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn band_force(
+    reactant: &Array1<f64>,
+    product: &Array1<f64>,
+    y: ArrayView1<f64>,
+    d_init: &Array2<f64>,
+    d_final: &Array2<f64>,
+    cell: Option<&Cell>,
+    spring: f64,
+    inverse: bool,
+    fixed: &[bool],
+) -> Result<(f64, Array1<f64>), SaddleError> {
+    let dof = reactant.len();
+    if dof == 0 || y.len() % dof != 0 {
+        return Err(SaddleError::Shape(
+            "sequential IDPP interior does not match the endpoints".into(),
+        ));
+    }
+    let n_interior = y.len() / dof;
+    let n = n_interior + 2;
+    let mut path = Array2::zeros((n, dof));
+    path.row_mut(0).assign(reactant);
+    path.row_mut(n - 1).assign(product);
+    for i in 0..n_interior {
+        path.row_mut(i + 1)
+            .assign(&y.slice(s![i * dof..(i + 1) * dof]));
+    }
+    pin_fixed_rows(fixed, &mut path);
+    let last = (n - 1) as f64;
+    let mut energy = 0.0;
+    let mut flat = Array1::zeros(y.len());
+    for i in 1..n - 1 {
+        let xi = i as f64 / last;
+        let target = pair_target(d_init, d_final, xi, inverse);
+        let (value, grad) = idpp_value_grad(path.row(i), target.view(), cell)?;
+        energy += value;
+        let dist_next = norm(&mic_diff(path.row(i + 1), path.row(i), cell));
+        let dist_prev = norm(&mic_diff(path.row(i), path.row(i - 1), cell));
+        let tangent = unit(&mic_diff(path.row(i + 1), path.row(i - 1), cell));
+        let mut force = -grad;
+        let parallel = force.dot(&tangent);
+        force.scaled_add(-parallel, &tangent);
+        force.scaled_add(spring * (dist_next - dist_prev), &tangent);
+        zero_fixed_components(fixed, &mut force);
+        if !energy.is_finite() || !force.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("sequential IDPP force"));
+        }
+        let offset = (i - 1) * dof;
+        flat.slice_mut(s![offset..offset + dof]).assign(&force);
+    }
+    Ok((energy, flat))
+}
+
+fn relax_collective(
+    images: &mut [Array1<f64>],
+    d_init: &Array2<f64>,
+    d_final: &Array2<f64>,
+    cell: Option<&Cell>,
+    config: &SidppAlternatingConfig,
+    fixed: &[bool],
+    iterations: usize,
+) -> Result<(), SaddleError> {
+    if images.len() < 3 || iterations == 0 {
+        return Ok(());
+    }
+    use rgmin::{Control, Method, Oracle, QuickMinOptions, Solver};
+
+    let dof = images[0].len();
+    let n = images.len();
+    let mut x = Array1::from_iter(
+        images[1..n - 1]
+            .iter()
+            .flat_map(|image| image.iter().copied()),
+    );
+    pin_packed(&mut x, images[0].view(), fixed);
+    let reactant = images[0].clone();
+    let product = images[n - 1].clone();
+    let spring = config.spring;
+    let inverse = config.inverse_distance;
+    let oracle = Oracle::unbounded(x.len(), move |y: ArrayView1<f64>| {
+        match band_force(
+            &reactant, &product, y, d_init, d_final, cell, spring, inverse, fixed,
+        ) {
+            Ok((energy, force)) => (energy, -force),
+            Err(_) => (f64::NAN, Array1::from_elem(y.len(), f64::NAN)),
+        }
+    });
+    let control = Control::default()
+        .with_maxiter(usize::MAX)
+        .with_gtol(0.0)
+        .with_istep(QUICKMIN_STEP)
+        .with_maxmove(None);
+    let mut solver = Solver::new(Method::QuickMin, control, x.len());
+    solver.set_atom_maxmove(config.max_move);
+    solver.set_quickmin_options(QuickMinOptions::eon());
+    for _ in 0..iterations {
+        let (_energy, force) = band_force(
+            &images[0],
+            &images[n - 1],
+            x.view(),
+            d_init,
+            d_final,
+            cell,
+            spring,
+            inverse,
+            fixed,
+        )?;
+        if max_abs(force.view()) < config.force_tol {
+            break;
+        }
+        solver
+            .step(&oracle, &mut x)
+            .map_err(|err| SaddleError::Solver(err.to_string()))?;
+        pin_packed(&mut x, images[0].view(), fixed);
+        if !x.iter().all(|v| v.is_finite()) {
+            return Err(SaddleError::NonFinite("sequential IDPP image"));
+        }
+    }
+    let n_interior = n - 2;
+    for i in 0..n_interior {
+        images[i + 1].assign(&x.slice(s![i * dof..(i + 1) * dof]));
+    }
+    pin_images(images, fixed);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -903,5 +1474,14 @@ mod tests {
             let (em, _) = idpp_value_grad(minus.view(), target.view(), Some(&cell)).unwrap();
             assert_abs_diff_eq!(grad[k], (ep - em) / (2.0 * eps), epsilon = 1e-6);
         }
+    }
+
+    #[test]
+    fn inverse_distance_matches_the_parallel_sum() {
+        assert_abs_diff_eq!(interpolated_distance(1.0, 4.0, 0.5, false), 2.5);
+        assert_abs_diff_eq!(interpolated_distance(1.0, 4.0, 0.5, true), 1.6);
+        assert_abs_diff_eq!(interpolated_distance(1.0, 4.0, 0.0, true), 1.0);
+        assert_abs_diff_eq!(interpolated_distance(1.0, 4.0, 1.0, true), 4.0);
+        assert_abs_diff_eq!(interpolated_distance(0.0, 2.0, 0.0, true), R_FLOOR);
     }
 }

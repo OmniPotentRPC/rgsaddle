@@ -28,6 +28,10 @@
 //! start minimizes `|q(x) - q_mid|^2`, the shortest three point path
 //! `[A, x, B]` is relaxed with the middle image free, and the images are
 //! copied onto thirds of the path before the final relaxation.
+//!
+//! The inverse-distance sequential path is
+//! [`crate::idpp::sidpp_alternating_inverse_distance_path`]. The Morse chart's inverse
+//! term is a coordinate weight, not that target blend.
 
 use minimage::Cell;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1};
