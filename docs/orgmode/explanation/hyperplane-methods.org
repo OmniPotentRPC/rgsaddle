@@ -62,7 +62,7 @@ degeneracy of one hop's dividing plane.  That factor is the order of the
 subgroup that fixes both the reactant and the chosen saddle, the in-plane
 symmetry of that plane.  Jóhannesson and Jónsson, Secs. II D and III D,
 sample one such part of the hyperplane; the construction is in
-@@rst::doc:`crystal operations and symmetry-unique regions <explanation/symmetry-regions>`@@.
+@@rst::doc:`crystal operations and symmetry-unique regions </explanation/symmetry-regions>`@@.
 Putting the twelve directions into =m_plane= as well as =m_path= counts each
 hop twice.
 
