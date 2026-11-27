@@ -155,8 +155,14 @@ opt-level = 3
 # Debug assertions stay on. Only this crate is raised: dependencies
 # must build identically under dev and test, or the doctests that
 # `cargo test` links against the dev rlibs see two copies of `ndarray`.
+# Full debuginfo on that optimized crate, while several test targets
+# compile together, peaks above the 16 GB of a hosted runner. The
+# machine is shut down during the compile and the test step dies with
+# signal 15. Line tables keep panic locations and stay inside that
+# memory.
 [profile.test.package.rgsaddle]
 opt-level = 3
+debug = "line-tables-only"
 
 # include/rgsaddle.h is the hand-written contract (surface request,
 # status enum, stepping semantics); cargo-c installs it as is instead
