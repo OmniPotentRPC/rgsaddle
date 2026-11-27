@@ -16,6 +16,7 @@
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
+use crate::band::pin_fixed_rows;
 use crate::error::SaddleError;
 use crate::mic::{self, Cell};
 use crate::trics::{TricsConfig, trics_path};
@@ -193,7 +194,7 @@ pub fn linear_path(
 /// `(1 - xi) r_ab(reactant) + xi r_ab(product)`. A pair closer than
 /// `1e-4` is held at that floor so the weight stays finite. The
 /// endpoints are copied through. The minimizer is L-BFGS. A step that
-/// hits the iteration cap is kept.
+/// hits the iteration cap is kept. A frozen atom mask is [`idpp_path_fixed`].
 ///
 /// Arguments and result as [`linear_path`]; `config` sets the L-BFGS stop.
 ///
@@ -230,19 +231,7 @@ pub fn idpp_path(
     cell: Option<&Cell>,
     config: &IdppConfig,
 ) -> Result<Array2<f64>, SaddleError> {
-    check_config(config)?;
-    let mut path = linear_path(reactant, product, n_images, cell)?;
-    let d_init = distance_matrix(reactant, cell)?;
-    let d_final = distance_matrix(product, cell)?;
-    let denom = (n_images - 1) as f64;
-    for i in 1..n_images - 1 {
-        let xi = (i as f64) / denom;
-        let target = &d_init * (1.0 - xi) + &d_final * xi;
-        let mut image = path.row(i).to_owned();
-        relax_image(&mut image, target.view(), cell, config)?;
-        path.row_mut(i).assign(&image);
-    }
-    Ok(path)
+    idpp_path_fixed(reactant, product, n_images, cell, &[], config)
 }
 
 /// One IDPP image between `left` and `right`, relaxed from `start`.
@@ -261,7 +250,7 @@ pub(crate) fn idpp_midpoint(
     let xi = 0.5;
     let target = &distance_matrix(left, cell)? * (1.0 - xi) + &distance_matrix(right, cell)? * xi;
     let mut image = start;
-    relax_image(&mut image, target.view(), cell, config)?;
+    relax_image(&mut image, target.view(), cell, config, &[], left)?;
     Ok(image)
 }
 
@@ -708,15 +697,30 @@ fn relax_image(
     target: ArrayView2<f64>,
     cell: Option<&Cell>,
     config: &IdppConfig,
+    fixed: &[bool],
+    held: ArrayView1<f64>,
 ) -> Result<(), SaddleError> {
     use rgmin::{Accept, Control, Method, Oracle, Solver};
 
     let dim = image.len();
     let target = target.to_owned();
     let cell = cell.copied();
+    let fixed_owned = fixed.to_vec();
+    let held_owned = held.to_owned();
     let oracle = Oracle::unbounded(dim, move |y: ArrayView1<f64>| {
-        match idpp_value_grad(y, target.view(), cell.as_ref()) {
-            Ok(pair) => pair,
+        if fixed_owned.is_empty() {
+            return match idpp_value_grad(y, target.view(), cell.as_ref()) {
+                Ok(pair) => pair,
+                Err(_) => (f64::NAN, Array1::from_elem(y.len(), f64::NAN)),
+            };
+        }
+        let mut pinned = y.to_owned();
+        restore_fixed(&mut pinned, held_owned.view(), &fixed_owned);
+        match idpp_value_grad(pinned.view(), target.view(), cell.as_ref()) {
+            Ok((energy, mut grad)) => {
+                zero_fixed_components(&fixed_owned, &mut grad);
+                (energy, grad)
+            }
             Err(_) => (f64::NAN, Array1::from_elem(y.len(), f64::NAN)),
         }
     });
@@ -731,10 +735,16 @@ fn relax_image(
     );
     solver.set_atom_maxmove(config.max_move);
     solver.set_accept(Accept::Energy);
+    if !fixed.is_empty() {
+        restore_fixed(image, held, fixed);
+    }
     for _ in 0..config.max_iterations {
         let report = solver
             .step(&oracle, image)
             .map_err(|err| SaddleError::Solver(err.to_string()))?;
+        if !fixed.is_empty() {
+            restore_fixed(image, held, fixed);
+        }
         if !image.iter().all(|v| v.is_finite()) {
             return Err(SaddleError::NonFinite("IDPP image"));
         }
@@ -743,6 +753,131 @@ fn relax_image(
         }
     }
     Ok(())
+}
+
+/// IDPP path with a frozen-atom mask.
+///
+/// `fixed` is empty when every atom moves. `true` keeps that atom at
+/// its reactant coordinates on every interior image. A fixed atom whose
+/// minimum-image displacement between the endpoints exceeds 1e-10 in
+/// any component is rejected. The endpoints are copied through. An
+/// empty mask is the same minimization as [`idpp_path`].
+///
+/// # Errors
+///
+/// The errors of [`idpp_path`], [`SaddleError::Shape`] when `fixed` is
+/// non-empty and its length is not the atom count, and
+/// [`SaddleError::Invalid`] when a fixed atom moves between the endpoints.
+///
+/// # Examples
+///
+/// ```
+/// use ndarray::array;
+/// use rgsaddle::idpp::{IdppConfig, idpp_path_fixed};
+///
+/// let reactant = array![0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+/// let product = array![0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+/// let config = IdppConfig::default().with_max_iterations(1);
+/// let path = idpp_path_fixed(
+///     reactant.view(),
+///     product.view(),
+///     3,
+///     None,
+///     &[true, false],
+///     &config,
+/// )?;
+/// assert_eq!(path[(1, 0)], 0.0);
+/// assert_eq!(path[(1, 1)], 0.0);
+/// assert_eq!(path[(1, 2)], 0.0);
+/// # Ok::<(), rgsaddle::SaddleError>(())
+/// ```
+pub fn idpp_path_fixed(
+    reactant: ArrayView1<f64>,
+    product: ArrayView1<f64>,
+    n_images: usize,
+    cell: Option<&Cell>,
+    fixed: &[bool],
+    config: &IdppConfig,
+) -> Result<Array2<f64>, SaddleError> {
+    check_config(config)?;
+    check_ends(reactant, product, n_images)?;
+    check_fixed_mask(reactant, product, cell, fixed)?;
+    let mut path = linear_path(reactant, product, n_images, cell)?;
+    pin_fixed_rows(fixed, &mut path);
+    let d_init = distance_matrix(reactant, cell)?;
+    let d_final = distance_matrix(product, cell)?;
+    let denom = (n_images - 1) as f64;
+    let held = path.row(0).to_owned();
+    for i in 1..n_images - 1 {
+        let xi = (i as f64) / denom;
+        let target = &d_init * (1.0 - xi) + &d_final * xi;
+        let mut image = path.row(i).to_owned();
+        relax_image(&mut image, target.view(), cell, config, fixed, held.view())?;
+        path.row_mut(i).assign(&image);
+    }
+    pin_fixed_rows(fixed, &mut path);
+    Ok(path)
+}
+
+/// Per-component minimum-image tolerance for a frozen atom, matching the band.
+const FIXED_ENDPOINT_TOL: f64 = 1e-10;
+
+fn check_fixed_mask(
+    reactant: ArrayView1<f64>,
+    product: ArrayView1<f64>,
+    cell: Option<&Cell>,
+    fixed: &[bool],
+) -> Result<(), SaddleError> {
+    if fixed.is_empty() {
+        return Ok(());
+    }
+    let n = reactant.len() / 3;
+    if fixed.len() != n {
+        return Err(SaddleError::Shape(format!(
+            "fixed-atom mask has {} entries for {n} atoms",
+            fixed.len()
+        )));
+    }
+    let diff = mic_diff(product, reactant, cell);
+    for (atom, &is_fixed) in fixed.iter().enumerate() {
+        if !is_fixed {
+            continue;
+        }
+        let gap = (0..3).fold(0.0_f64, |m, c| m.max(diff[3 * atom + c].abs()));
+        if gap > FIXED_ENDPOINT_TOL {
+            return Err(SaddleError::Invalid(format!(
+                "fixed atom {atom} differs between the endpoints by {gap:e}; \
+                 a fixed atom keeps the reactant coordinates"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn zero_fixed_components(fixed: &[bool], v: &mut Array1<f64>) {
+    if fixed.is_empty() {
+        return;
+    }
+    for (atom, &is_fixed) in fixed.iter().enumerate() {
+        if is_fixed {
+            for c in 0..3 {
+                v[3 * atom + c] = 0.0;
+            }
+        }
+    }
+}
+
+fn restore_fixed(image: &mut Array1<f64>, held: ArrayView1<f64>, fixed: &[bool]) {
+    if fixed.is_empty() {
+        return;
+    }
+    for (atom, &is_fixed) in fixed.iter().enumerate() {
+        if is_fixed {
+            for c in 0..3 {
+                image[3 * atom + c] = held[3 * atom + c];
+            }
+        }
+    }
 }
 
 #[cfg(test)]

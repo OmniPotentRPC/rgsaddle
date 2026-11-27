@@ -186,7 +186,7 @@ pub use geodesic::{
 };
 pub use idpp::{
     IdppConfig, PathInitializer, SidppConfig, TricsSeed, TricsStartConfig, idpp_path,
-    initialize_path, linear_path, sidpp_path,
+    idpp_path_fixed, initialize_path, linear_path, sidpp_path,
 };
 pub use indexk::{
     BlockEigenKind, HessianProduct, IndexKConfig, IndexKReport, IndexKSession, WithHessian,
