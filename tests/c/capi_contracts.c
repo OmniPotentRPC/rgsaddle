@@ -1045,6 +1045,270 @@ static int test_trics_path_runtime(void) {
   return 0;
 }
 
+static int near(double a, double b, double tol) { return fabs(a - b) <= tol; }
+
+static double min_pair(const double *row, int n_atoms) {
+  double best = 1e300;
+  for (int i = 0; i < n_atoms; ++i) {
+    for (int j = i + 1; j < n_atoms; ++j) {
+      double dx = row[3 * i] - row[3 * j];
+      double dy = row[3 * i + 1] - row[3 * j + 1];
+      double dz = row[3 * i + 2] - row[3 * j + 2];
+      double r = sqrt(dx * dx + dy * dy + dz * dz);
+      if (r < best) {
+        best = r;
+      }
+    }
+  }
+  return best;
+}
+
+static double closest_interior(const double *path, int n_images, int n_atoms) {
+  int dof = 3 * n_atoms;
+  double best = 1e300;
+  for (int i = 1; i < n_images - 1; ++i) {
+    double r = min_pair(path + (size_t)i * (size_t)dof, n_atoms);
+    if (r < best) {
+      best = r;
+    }
+  }
+  return best;
+}
+
+static double max_abs_diff(const double *a, const double *b, int n) {
+  double worst = 0.0;
+  for (int i = 0; i < n; ++i) {
+    double d = fabs(a[i] - b[i]);
+    if (d > worst) {
+      worst = d;
+    }
+  }
+  return worst;
+}
+
+static int endpoints_match(const double *path, const double *reactant, const double *product,
+                           int n_images, int dof) {
+  if (memcmp(path, reactant, (size_t)dof * sizeof(double)) != 0) {
+    return 0;
+  }
+  return memcmp(path + (size_t)(n_images - 1) * (size_t)dof, product,
+                (size_t)dof * sizeof(double)) == 0;
+}
+
+static int frozen_holds(const double *path, int n_images, int n_atoms, int atom,
+                        const double *held) {
+  int dof = 3 * n_atoms;
+  for (int image = 1; image < n_images - 1; ++image) {
+    const double *row = path + (size_t)image * (size_t)dof + (size_t)(3 * atom);
+    for (int c = 0; c < 3; ++c) {
+      if (row[c] != held[c]) {
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
+static void swap_atoms(const double *in, double *out, int n_atoms, int i, int j) {
+  memcpy(out, in, (size_t)(3 * n_atoms) * sizeof(double));
+  for (int c = 0; c < 3; ++c) {
+    double tmp = out[3 * i + c];
+    out[3 * i + c] = out[3 * j + c];
+    out[3 * j + c] = tmp;
+  }
+}
+
+static void translate_atoms(const double *in, double *out, int n_atoms) {
+  for (int a = 0; a < n_atoms; ++a) {
+    out[3 * a] = in[3 * a] + 0.4;
+    out[3 * a + 1] = in[3 * a + 1] - 0.2;
+    out[3 * a + 2] = in[3 * a + 2] + 0.7;
+  }
+}
+
+static void rot_z(const double *in, double *out, int n_atoms) {
+  for (int a = 0; a < n_atoms; ++a) {
+    double x = in[3 * a];
+    double y = in[3 * a + 1];
+    out[3 * a] = -y;
+    out[3 * a + 1] = x;
+    out[3 * a + 2] = in[3 * a + 2];
+  }
+}
+
+static int call_seq(int64_t n_images, int64_t n_atoms, const double *reactant,
+                    const double *product, const double *cell, const uint8_t *mask,
+                    int64_t short_iters, int64_t final_iters, double *out) {
+  return rgsaddle_sidpp_alternating_path(n_images, n_atoms, reactant, product, cell, mask, 0.33,
+                                       short_iters, final_iters, 1e-3, 0.1, 5.0, out);
+}
+
+static int call_geo(int64_t n_images, int64_t n_atoms, const double *reactant,
+                    const double *product, const double *cell, const uint8_t *mask,
+                    int64_t short_iters, int64_t final_iters, double *out) {
+  return rgsaddle_sidpp_alternating_inverse_distance_path(n_images, n_atoms, reactant, product, cell, mask, 0.33,
+                                           short_iters, final_iters, 1e-3, 0.1, 5.0, out);
+}
+
+static int test_path_seeds(void) {
+  double one = 0.0;
+  CHECK(rgsaddle_sidpp_alternating_path(5, 1, NULL, &one, NULL, NULL, 0.33, 1, 1, 1e-3, 0.1, 5.0,
+                                      &one) == RGSADDLE_INVALID_PARAMETER,
+        "null reactant");
+  double reactant2[6] = {0.0, 0.0, 0.0, 1.0, 0.0, 0.0};
+  double product2[6] = {0.0, 0.0, 0.0, 0.0, 1.0, 0.0};
+  double out2[30] = {0.0};
+  CHECK(call_seq(2, 2, reactant2, product2, NULL, NULL, 1, 1, out2) == RGSADDLE_SHAPE,
+        "n_images");
+  CHECK(call_seq(3, 2, reactant2, product2, NULL, NULL, 1, 1, NULL) == RGSADDLE_INVALID_PARAMETER,
+        "null out");
+  CHECK(rgsaddle_sidpp_alternating_inverse_distance_path(3, 2, reactant2, product2, NULL, NULL, 1.0, 1, 1, 1e-3,
+                                          0.1, 5.0, out2) == RGSADDLE_INVALID_PARAMETER,
+        "alpha");
+  CHECK(rgsaddle_sidpp_alternating_path(3, 2, reactant2, product2, NULL, NULL, 0.33, -1, 1, 1e-3,
+                                      0.1, 5.0, out2) == RGSADDLE_INVALID_PARAMETER,
+        "negative count");
+  uint8_t bad_mask[2] = {0, 2};
+  CHECK(call_seq(3, 2, reactant2, product2, NULL, bad_mask, 1, 1, out2) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "bad mask");
+  double moved[6] = {0.4, 0.0, 0.0, 0.0, 1.0, 0.0};
+  uint8_t fix0[2] = {1, 0};
+  CHECK(call_seq(3, 2, reactant2, moved, NULL, fix0, 1, 1, out2) == RGSADDLE_INVALID_PARAMETER,
+        "fixed atom moved");
+  double singular[9] = {0.0};
+  CHECK(call_seq(3, 2, reactant2, product2, singular, NULL, 1, 1, out2) ==
+            RGSADDLE_INVALID_PARAMETER,
+        "singular cell");
+  CHECK(rgsaddle_idpp_fixed_path(3, INT64_MAX, reactant2, product2, NULL, NULL, 1, 1e-3, 0.1,
+                                 out2) == RGSADDLE_INVALID_PARAMETER,
+        "overflow");
+
+  double reactant3[9] = {0.0, 0.0, 0.0, 1.2, 0.2, 0.0, 5.0, 5.0, 5.0};
+  double product3[9] = {0.0, 0.0, 0.0, 0.2, 1.3, 0.1, 5.0, 5.0, 5.0};
+  uint8_t mask3[3] = {1, 0, 1};
+  double held0[3] = {0.0, 0.0, 0.0};
+  double held2[3] = {5.0, 5.0, 5.0};
+  double seq3[36];
+  double geo3[36];
+  double idpp3[36];
+  CHECK(rgsaddle_idpp_fixed_path(4, 3, reactant3, product3, NULL, mask3, 40, 1e-3, 0.1, idpp3) ==
+            RGSADDLE_OK,
+        "idpp fixed");
+  CHECK(call_seq(4, 3, reactant3, product3, NULL, mask3, 6, 8, seq3) == RGSADDLE_OK, "seq fixed");
+  CHECK(call_geo(4, 3, reactant3, product3, NULL, mask3, 6, 8, geo3) == RGSADDLE_OK, "geo fixed");
+  CHECK(endpoints_match(idpp3, reactant3, product3, 4, 9), "idpp ends");
+  CHECK(endpoints_match(seq3, reactant3, product3, 4, 9), "seq ends");
+  CHECK(endpoints_match(geo3, reactant3, product3, 4, 9), "geo ends");
+  CHECK(frozen_holds(idpp3, 4, 3, 0, held0) && frozen_holds(idpp3, 4, 3, 2, held2),
+        "idpp frozen");
+  CHECK(frozen_holds(seq3, 4, 3, 0, held0) && frozen_holds(seq3, 4, 3, 2, held2), "seq frozen");
+  CHECK(frozen_holds(geo3, 4, 3, 0, held0) && frozen_holds(geo3, 4, 3, 2, held2), "geo frozen");
+
+  double idpp_free[36];
+  double idpp_null[36];
+  CHECK(rgsaddle_idpp_path(4, 3, reactant3, product3, NULL, 40, 1e-3, 0.1, idpp_free) ==
+            RGSADDLE_OK,
+        "idpp free");
+  CHECK(rgsaddle_idpp_fixed_path(4, 3, reactant3, product3, NULL, NULL, 40, 1e-3, 0.1,
+                                 idpp_null) == RGSADDLE_OK,
+        "idpp null mask");
+  CHECK(max_abs_diff(idpp_free, idpp_null, 36) < 1e-12, "null mask matches idpp");
+
+  double base_r[9] = {0.1, -0.2, 0.3, 1.2, 0.4, -0.1, 0.2, 1.0, 0.5};
+  double base_p[9] = {0.4, 0.2, -0.3, 0.2, 1.3, 0.4, 1.1, 0.1, -0.2};
+  double seq_a[36], seq_b[36], geo_a[36], geo_b[36];
+  CHECK(call_seq(4, 3, base_r, base_p, NULL, NULL, 6, 8, seq_a) == RGSADDLE_OK, "perm seq");
+  CHECK(call_geo(4, 3, base_r, base_p, NULL, NULL, 6, 8, geo_a) == RGSADDLE_OK, "perm geo");
+  double swap_r[9], swap_p[9], seq_swapped[36], geo_swapped[36];
+  swap_atoms(base_r, swap_r, 3, 0, 2);
+  swap_atoms(base_p, swap_p, 3, 0, 2);
+  CHECK(call_seq(4, 3, swap_r, swap_p, NULL, NULL, 6, 8, seq_b) == RGSADDLE_OK, "perm seq b");
+  CHECK(call_geo(4, 3, swap_r, swap_p, NULL, NULL, 6, 8, geo_b) == RGSADDLE_OK, "perm geo b");
+  for (int image = 0; image < 4; ++image) {
+    swap_atoms(seq_a + (size_t)image * 9, seq_swapped + (size_t)image * 9, 3, 0, 2);
+    swap_atoms(geo_a + (size_t)image * 9, geo_swapped + (size_t)image * 9, 3, 0, 2);
+  }
+  CHECK(max_abs_diff(seq_b, seq_swapped, 36) < 1e-6, "sequential permutation");
+  CHECK(max_abs_diff(geo_b, geo_swapped, 36) < 1e-6, "geodesic permutation");
+
+  double tr_r[9], tr_p[9], seq_t[36], geo_t[36], seq_shift[36], geo_shift[36];
+  translate_atoms(base_r, tr_r, 3);
+  translate_atoms(base_p, tr_p, 3);
+  CHECK(call_seq(4, 3, tr_r, tr_p, NULL, NULL, 6, 8, seq_t) == RGSADDLE_OK, "translate seq");
+  CHECK(call_geo(4, 3, tr_r, tr_p, NULL, NULL, 6, 8, geo_t) == RGSADDLE_OK, "translate geo");
+  for (int image = 0; image < 4; ++image) {
+    translate_atoms(seq_a + (size_t)image * 9, seq_shift + (size_t)image * 9, 3);
+    translate_atoms(geo_a + (size_t)image * 9, geo_shift + (size_t)image * 9, 3);
+  }
+  CHECK(max_abs_diff(seq_t, seq_shift, 36) < 1e-6, "sequential translation");
+  CHECK(max_abs_diff(geo_t, geo_shift, 36) < 1e-6, "geodesic translation");
+
+  double rot_r[9], rot_p[9], seq_r[36], geo_r[36], seq_rot[36], geo_rot[36];
+  rot_z(base_r, rot_r, 3);
+  rot_z(base_p, rot_p, 3);
+  CHECK(call_seq(4, 3, rot_r, rot_p, NULL, NULL, 6, 8, seq_r) == RGSADDLE_OK, "rotate seq");
+  CHECK(call_geo(4, 3, rot_r, rot_p, NULL, NULL, 6, 8, geo_r) == RGSADDLE_OK, "rotate geo");
+  for (int image = 0; image < 4; ++image) {
+    rot_z(seq_a + (size_t)image * 9, seq_rot + (size_t)image * 9, 3);
+    rot_z(geo_a + (size_t)image * 9, geo_rot + (size_t)image * 9, 3);
+  }
+  CHECK(max_abs_diff(seq_r, seq_rot, 36) < 1e-6, "sequential rotation");
+  CHECK(max_abs_diff(geo_r, geo_rot, 36) < 1e-6, "geodesic rotation");
+
+  double cell[9] = {5.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 5.0};
+  double per_r[9] = {0.0, 0.0, 0.0, 0.3, 0.0, 0.0, 2.0, 2.0, 2.0};
+  double per_p[9] = {0.0, 0.0, 0.0, 4.8, 0.0, 0.0, 2.0, 2.0, 2.0};
+  uint8_t per_mask[3] = {1, 0, 1};
+  double per_cell[45], per_free[45];
+  CHECK(call_seq(5, 3, per_r, per_p, cell, per_mask, 0, 0, per_cell) == RGSADDLE_OK,
+        "periodic cell");
+  CHECK(call_seq(5, 3, per_r, per_p, NULL, per_mask, 0, 0, per_free) == RGSADDLE_OK,
+        "periodic free");
+  CHECK(endpoints_match(per_cell, per_r, per_p, 5, 9), "periodic ends");
+  double held_corner[3] = {2.0, 2.0, 2.0};
+  CHECK(frozen_holds(per_cell, 5, 3, 0, held0) && frozen_holds(per_cell, 5, 3, 2, held_corner),
+        "periodic frozen");
+  /* Image 2, atom 1, x. Short image is near 0.05; the long gap is 2.55. */
+  CHECK(near(per_cell[2 * 9 + 3], 0.05, 1e-6), "minimum image middle");
+  CHECK(near(per_free[2 * 9 + 3], 2.55, 1e-6), "cartesian middle");
+
+  double col_r[6] = {0.0, 0.0, 0.0, 2.0, 0.02, 0.0};
+  double col_p[6] = {2.0, 1.0, 0.0, 0.0, 1.02, 0.0};
+  double col_line = 1e300;
+  for (int image = 1; image < 4; ++image) {
+    double row[6];
+    double xi = (double)image / 4.0;
+    for (int k = 0; k < 6; ++k) {
+      row[k] = col_r[k] + xi * (col_p[k] - col_r[k]);
+    }
+    double r = min_pair(row, 2);
+    if (r < col_line) {
+      col_line = r;
+    }
+  }
+  double col_idpp[30], col_seq[30], col_geo[30];
+  CHECK(rgsaddle_idpp_path(5, 2, col_r, col_p, NULL, 5000, 1e-3, 0.1, col_idpp) == RGSADDLE_OK,
+        "collision idpp");
+  CHECK(call_seq(5, 2, col_r, col_p, NULL, NULL, 250, 5000, col_seq) == RGSADDLE_OK,
+        "collision sequential");
+  CHECK(call_geo(5, 2, col_r, col_p, NULL, NULL, 250, 5000, col_geo) == RGSADDLE_OK,
+        "collision geodesic");
+  double c_idpp = closest_interior(col_idpp, 5, 2);
+  double c_seq = closest_interior(col_seq, 5, 2);
+  double c_geo = closest_interior(col_geo, 5, 2);
+  printf("c_contact linear %.12f\n", col_line);
+  printf("c_contact idpp %.12f\n", c_idpp);
+  printf("c_contact sequential %.12f\n", c_seq);
+  printf("c_contact geodesic %.12f\n", c_geo);
+  CHECK(col_line < 0.05, "linear contact");
+  CHECK(c_idpp > 1.5, "idpp contact");
+  CHECK(c_seq > 0.5, "sequential contact");
+  CHECK(c_geo > 0.5, "geodesic contact");
+  CHECK(endpoints_match(col_seq, col_r, col_p, 5, 6), "collision ends");
+  return 0;
+}
+
 int main(void) {
   if (test_status_and_gates() != 0) {
     return 1;
@@ -1071,6 +1335,9 @@ int main(void) {
     return 1;
   }
   if (test_trics_path_runtime() != 0) {
+    return 1;
+  }
+  if (test_path_seeds() != 0) {
     return 1;
   }
   printf("RGSADDLE_CAPI_CONTRACTS_OK\n");
