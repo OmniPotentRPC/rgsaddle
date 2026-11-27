@@ -10,6 +10,11 @@ import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 _SCRIPT = _REPO / "docs" / "render_llms.py"
+if not _SCRIPT.is_file():
+    pytest.skip(
+        "docs/render_llms.py is not available in this tree",
+        allow_module_level=True,
+    )
 _SPEC = importlib.util.spec_from_file_location("render_llms", _SCRIPT)
 if _SPEC is None or _SPEC.loader is None:
     raise RuntimeError("docs/render_llms.py could not be loaded")
