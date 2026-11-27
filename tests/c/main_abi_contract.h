@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 _Static_assert(RGSADDLE_ABI_MAJOR == 1u, "main ABI major");
-#define RGSADDLE_EXPECTED_ABI_MINOR 70u
+#define RGSADDLE_EXPECTED_ABI_MINOR 71u
 _Static_assert(RGSADDLE_ABI_MINOR == RGSADDLE_EXPECTED_ABI_MINOR, "ABI minor");
 _Static_assert(RGSADDLE_LINEB_LINEAR_SEED == (1u << 0), "lineb flag bit 0");
 _Static_assert(RGSADDLE_LINEB_ENDPOINT_CONVERGENCE == (1u << 1), "lineb flag bit 1");
@@ -846,5 +846,23 @@ _Static_assert(_Generic(&rgsaddle_dyneb_mask, abi65_signature_rgsaddle_dyneb_mas
 typedef rgsaddle_status_t (*abi70_signature_rgsaddle_spline_resample)(
     int64_t n_images, int64_t n_atoms, double *positions, const double *cell);
 _Static_assert(_Generic(&rgsaddle_spline_resample, abi70_signature_rgsaddle_spline_resample: 1, default: 0), "rgsaddle_spline_resample signature");
+
+typedef rgsaddle_status_t (*abi71_signature_rgsaddle_idpp_fixed_path)(
+    int64_t n_images, int64_t n_atoms, const double *reactant, const double *product,
+    const double *cell, const uint8_t *mask, int64_t max_iterations, double grad_tol,
+    double max_move, double *out);
+_Static_assert(_Generic(&rgsaddle_idpp_fixed_path, abi71_signature_rgsaddle_idpp_fixed_path: 1, default: 0), "rgsaddle_idpp_fixed_path signature");
+
+typedef rgsaddle_status_t (*abi71_signature_rgsaddle_sidpp_alternating_path)(
+    int64_t n_images, int64_t n_atoms, const double *reactant, const double *product,
+    const double *cell, const uint8_t *mask, double alpha, int64_t short_iterations,
+    int64_t final_iterations, double force_tol, double max_move, double spring, double *out);
+_Static_assert(_Generic(&rgsaddle_sidpp_alternating_path, abi71_signature_rgsaddle_sidpp_alternating_path: 1, default: 0), "rgsaddle_sidpp_alternating_path signature");
+
+typedef rgsaddle_status_t (*abi71_signature_rgsaddle_sidpp_alternating_inverse_distance_path)(
+    int64_t n_images, int64_t n_atoms, const double *reactant, const double *product,
+    const double *cell, const uint8_t *mask, double alpha, int64_t short_iterations,
+    int64_t final_iterations, double force_tol, double max_move, double spring, double *out);
+_Static_assert(_Generic(&rgsaddle_sidpp_alternating_inverse_distance_path, abi71_signature_rgsaddle_sidpp_alternating_inverse_distance_path: 1, default: 0), "rgsaddle_sidpp_alternating_inverse_distance_path signature");
 
 #endif

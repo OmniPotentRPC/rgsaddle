@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define RGSADDLE_ABI_MAJOR 1u
-#define RGSADDLE_ABI_MINOR 70u
+#define RGSADDLE_ABI_MINOR 71u
 
 /**
  * Band config flags bit 0. When set, each evaluation calls the surface
@@ -1410,6 +1410,72 @@ rgsaddle_status_t rgsaddle_trics_path(
     int64_t max_inversion_iterations, double inversion_tolerance,
     double max_move, int32_t diagnostic_threshold, double splice_tolerance,
     int64_t max_splice_iterations, double length_per_angstrom, double *out);
+
+/**
+ * IDPP initial path with a frozen atom mask, ABI minor 71.
+ *
+ * Same buffer layout as rgsaddle_idpp_path. `mask` is NULL when every
+ * atom moves, or one byte per atom: 1 keeps that atom at the reactant
+ * coordinates on every interior image, and 0 lets it move. Any other
+ * byte is RGSADDLE_INVALID_PARAMETER. A fixed atom whose minimum-image
+ * displacement between the endpoints exceeds 1e-10 in any component is
+ * RGSADDLE_INVALID_PARAMETER. A NULL mask matches rgsaddle_idpp_path.
+ * `n_images` counts the endpoints and is at least 3. `cell` is a
+ * row-major 3x3 lattice, or NULL in free space. The endpoints are
+ * copied through.
+ */
+rgsaddle_status_t rgsaddle_idpp_fixed_path(int64_t n_images, int64_t n_atoms,
+                                           const double *reactant,
+                                           const double *product,
+                                           const double *cell,
+                                           const uint8_t *mask,
+                                           int64_t max_iterations,
+                                           double grad_tol, double max_move,
+                                           double *out);
+
+/**
+ * Sequential IDPP initial path grown from both ends, ABI minor 71.
+ *
+ * Images are inserted from the reactant side and the product side in
+ * turn. A new image takes `alpha` of the minimum-image step from the
+ * current frontier across the open gap. `alpha` is finite and inside
+ * (0, 1). Each insertion is followed by at most `short_iterations`
+ * quick-min steps on the whole band. The band is then placed at equal
+ * minimum-image arc length on the polyline, including a path with one
+ * interior image, and relaxed for at most `final_iterations` quick-min
+ * steps. The quick-min time step is 0.1. The collective force is the
+ * part of the IDPP force perpendicular to the simple tangent, plus
+ * `spring` times the difference of the distances to the neighbouring
+ * images along that tangent. A stage stops early when the largest
+ * absolute component of the free force is under `force_tol`. A count
+ * of 0 skips that stage. `force_tol` may be 0. `mask` and `cell` are
+ * the same as rgsaddle_idpp_fixed_path. This is not the S-IDPP growth
+ * inside the library and it does not evaluate a surface.
+ */
+rgsaddle_status_t rgsaddle_sidpp_alternating_path(
+    int64_t n_images, int64_t n_atoms, const double *reactant,
+    const double *product, const double *cell, const uint8_t *mask,
+    double alpha, int64_t short_iterations, int64_t final_iterations,
+    double force_tol, double max_move, double spring, double *out);
+
+/**
+ * Sequential path with inverse distance targets and a final pull, ABI minor 71.
+ *
+ * Same arguments and buffer layout as rgsaddle_sidpp_alternating_path.
+ * Target pair distances at fraction xi are the inverse-distance blend
+ * 1 / ((1 - xi) / d_reactant + xi / d_product). A pair closer than
+ * 1e-4 at an endpoint uses that floor. After the collective relaxation,
+ * each interior image is minimized on its finished-path target.
+ * `final_iterations` is at least 1 and `force_tol` is positive, because
+ * those values are the L-BFGS stop of the pull. This is not
+ * rgsaddle_geodesic_path.
+ */
+rgsaddle_status_t rgsaddle_sidpp_alternating_inverse_distance_path(
+    int64_t n_images, int64_t n_atoms, const double *reactant,
+    const double *product, const double *cell, const uint8_t *mask,
+    double alpha, int64_t short_iterations, int64_t final_iterations,
+    double force_tol, double max_move, double spring, double *out);
+
 
 typedef struct RgsaddleOcineb RgsaddleOcineb;
 
