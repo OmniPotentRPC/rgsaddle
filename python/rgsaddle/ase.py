@@ -1131,14 +1131,21 @@ def _neb_optimizer_type() -> type:
             return cast(type, cached)
         from ase.optimize.optimize import Optimizer
 
-        class Bound(NEBOptimizer, Optimizer):
-            pass
-
-        Bound.__name__ = "NEBOptimizer"
-        Bound.__qualname__ = "NEBOptimizer"
-        Bound.__doc__ = NEBOptimizer.__doc__
-        _neb_optimizer_type.cls = Bound  # type: ignore[attr-defined]
-        return Bound
+        # ``type`` keeps ``Optimizer`` on the MRO without a class statement.
+        # ``log`` and ``run`` follow ASE's NEB optimizer, so they are not
+        # substitutable for ``Optimizer.log`` and ``Dynamics.run``. The
+        # published methods stay the ones defined on ``NEBOptimizer``.
+        bound = type(
+            "NEBOptimizer",
+            (NEBOptimizer, Optimizer),
+            {
+                "__doc__": NEBOptimizer.__doc__,
+                "__module__": __name__,
+            },
+        )
+        bound.__qualname__ = "NEBOptimizer"
+        _neb_optimizer_type.cls = bound  # type: ignore[attr-defined]
+        return bound
 
 
 class NEBOptimizer:
@@ -1181,7 +1188,7 @@ class NEBOptimizer:
     def __new__(cls, *args: Any, **kwargs: Any) -> NEBOptimizer:
         if cls is NEBOptimizer:
             return cast(NEBOptimizer, object.__new__(_neb_optimizer_type()))
-        return cast(NEBOptimizer, object.__new__(cls))
+        return object.__new__(cls)
 
     def __init__(
         self,
@@ -1203,9 +1210,12 @@ class NEBOptimizer:
         self.nsteps = 0
         self.max_steps = 0
         self.logfile = None
+        # ``Optimizer`` annotates this parameter as ``Atoms``. ASE's own
+        # NEB optimizer passes the band, which is what this call stores.
+        band: Any = neb
         Optimizer.__init__(
             cast(Any, self),
-            atoms=neb,
+            atoms=band,
             restart=restart,
             logfile=logfile,
             trajectory=trajectory,
@@ -1253,14 +1263,18 @@ class NEBOptimizer:
     def call_observers(self) -> None:
         from ase.optimize.optimize import Dynamics
 
-        Dynamics.call_observers(cast(Any, self))
+        # ASE leaves ``call_observers`` unannotated. The name gives the call a type.
+        notify: Callable[..., Any] = Dynamics.call_observers
+        notify(self)
 
     def run_ode(self, fmax: float) -> bool:
         from ase.optimize.ode import ode12r
         from ase.optimize.sciopt import OptimizerConvergenceError
 
+        # ASE leaves ``ode12r`` unannotated. The name gives the call a type.
+        integrate: Callable[..., Any] = ode12r
         try:
-            ode12r(
+            integrate(
                 self.force_function,
                 np.asarray(self.neb.get_positions(), dtype=np.float64).reshape(-1),
                 fmax=fmax,
