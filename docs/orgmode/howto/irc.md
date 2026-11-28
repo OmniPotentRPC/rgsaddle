@@ -1,0 +1,76 @@
+`IrcSession` traces the intrinsic reaction coordinate (IRC) on either side of a supplied saddle.
+The saddle and the mode it leaves along can come from the climbing image aligned with the Hessian eigenmode (Goswami, Gunde, and Jonsson, Front. Chem. 14 (2026), https://doi.org/10.3389/fchem.2026.1807063), and two-dimensional root-mean-square deviation (RMSD) projections compare a branch with a band (Goswami, MethodsX 16, 103851 (2026), https://doi.org/10.1016/j.mex.2026.103851).
+Each call to `step` performs one outer IRC move, of one of three kinds.
+
+-   `IrcKind::SellaSphere`, the default, takes the energy minimum on the mass-weighted sphere of radius `dx` about the last point, the first about the saddle. Mueller and Brown constrain the step to that sphere (Theor. Chim. Acta 53, 75 (1979), https://doi.org/10.1007/BF00547608). Sella's `IRCTrustRegion` takes the same step (Hermes, Sargsyan, Najm, and Zador, J. Chem. Theory Comput. 18, 6974 (2022), https://doi.org/10.1021/acs.jctc.2c00395). Its path error is first order in `dx`.
+-   `IrcKind::Gs2` is the step of Gonzalez and Schlegel, J. Chem. Phys. 90, 2154 (1989), https://doi.org/10.1063/1.456010. Its pivot sits `dx/2` down the mass-weighted gradient from the last point, or `dx/2` along the launch mode from the saddle for the first step. The next point is the energy minimum on the sphere of radius `dx/2` about that pivot. Both points lie on one circular arc tangent to the gradient at each of them. The path error is therefore second order in `dx`. Radial projection maps a model minimum between the last point and the pivot back onto the last point. Until the model is positive definite and the arc exceeds eight radii, a model minimum inside the sphere therefore carries the step on along its line to the far side. The report's `arc` adds the mass-weighted chord of each step.
+-   `IrcKind::Morokuma` selects the predictor-corrector path.
+
+`tests/irc_mueller_brown.rs` fits both orders on the Mueller-Brown surface.
+
+`new` accepts a molecular Cartesian packing and atom masses. `new_euclidean` accepts an arbitrary nonzero dimension with unit coordinate weights. Those weights are a `MassMetric`. A `MetricPoint` and a `MetricTangent` are multiplied by the square root of the mass, and a `MetricCovector` (a force or a gradient) is divided by it. `from_surface` estimates the launch mode through Hessian actions as the lowest eigenvector of the mass-weighted Hessian. A host can instead pass a measured mode to `new`.
+
+
+# Runnable example: forward and reverse IRC branches
+
+```rust
+use ndarray::{Array1, ArrayView1, array};
+use rgsaddle::{IrcConfig, IrcDirection, IrcKind, IrcSession, PointSurface, SaddleError};
+
+struct DoubleWell;
+
+impl PointSurface for DoubleWell {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let t = x[0];
+        let e = (t * t - 1.0).powi(2);
+        let mut g = Array1::zeros(x.len());
+        g[0] = 4.0 * t * (t * t - 1.0);
+        Ok((e, g))
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    let saddle = Array1::zeros(6);
+    let masses = array![1.0, 1.0];
+    let mode = array![1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let config = IrcConfig::default()
+        .with_dx(0.2)
+        .with_kind(IrcKind::SellaSphere);
+    let mut irc = IrcSession::new(config, saddle, masses, mode, IrcDirection::Forward)?;
+    let fwd = irc.step(&DoubleWell)?;
+    assert!(fwd.arc > 0.0);
+    irc.set_direction(IrcDirection::Reverse);
+    let rev = irc.step(&DoubleWell)?;
+    assert!(rev.arc > 0.0);
+    Ok(())
+}
+```
+
+`set_direction` restores the saddle and reverses the launch. `reset` clears the approximation at a surface change. A sphere step rejects an energy increase above its specified numerical threshold and reduces the radius.
+Each later step without a rejection doubles the radius back up to the requested one.
+`set_direction` starts each branch at the requested radius.
+
+Step until the report sets `at_minimum`.
+A sphere-step report sets it once the step is past the kick and the largest force is at or below `force_tol`.
+One Hessian action at that point must also give positive curvature along the launch mode.
+That action is the only extra surface call, and it is made only once the force is at or below `force_tol`.
+The sphere radius does not enter, so a branch whose radius was halved still stops on its force.
+A point beside the saddle, where the curvature along the mode is still negative, does not stop.
+Through the C interface, `rgsaddle_irc_step` writes `RGSADDLE_STATUS_CONVERGED` to the report's `status` on that step.
+
+`tests/irc_termination.rs` checks that stop on both branches from two saddles that eOn hands over.
+These are the 13-atom Lennard-Jones cluster (LJ13) and the Morse Pt adatom.
+The default run checks the LJ13 reverse branch at `force_tol` 0.005 and eight Pt adatom branches.
+The full LJ13 set, both branches at 0.05, 0.01 and 0.005, is ignored in a debug build:
+
+```sh
+cargo test --release --test irc_termination -- --include-ignored
+```
+
+    test pt_adatom_point_beside_the_saddle_is_not_a_minimum ... ok
+    test lj13_reverse_branch_under_the_force_threshold_reports_a_minimum ... ok
+    test lj13_branches_under_the_force_threshold_report_a_minimum ... ok
+    
+    test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+
+Select `L2Norm` or `LinfNorm` for a generic vector packing. `MaxForceOnAtom` groups Cartesian triples. The C interface exposes construction, stepping, position access, direction changes, reset and destruction; `tests/c/irc_abi.c` exercises both directions of both sphere kinds and the Morokuma path. `RGSADDLE_IRC_SELLA_SPHERE` needs ABI minor 35. A config whose version minor is 34 or older runs the Sella sphere for every kind but `RGSADDLE_IRC_MOROKUMA`, and from minor 35 an unknown kind makes create return NULL. Minor 34 is the curvature probe and leaves IRC kinds unchanged.

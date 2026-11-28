@@ -1,0 +1,173 @@
+`include/rgsaddle.h` declares the C application binary interface (ABI), major 1, minor 71. It preserves the main band, minimum-mode and index-1 layouts and adds intrinsic reaction coordinate (IRC), Sella, constraint and geometry controls. Include this header rather than duplicating its structures. Check `rgsaddle_abi_stamp` before constructing a session. A meson project takes the headers from the top-level `meson.build`; see .
+
+A surface callback returns `rgsaddle_status_t` and receives one `rgsaddle_surface_request_t`. Positions and gradients are image-major Cartesian triples. The host supplies the energy and gradient arrays for every requested image; the library performs no Message Passing Interface (MPI) communication.
+From ABI minor 42, `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES` report constrained-ensemble tails that fail the drift or effective-sample guards.
+
+`rgsaddle_halve_raised_energy` and `rgsaddle_trust_update` (ABI minor 36) are the two decisions a host can take from energies it already holds. The first compares a trial energy with the energy before the step and returns the step length, halved when the trial is more than 1e-4 higher. The second updates a trust radius from a predicted energy change and the change that occurred, using the Sella schedule; a prediction below 1e-14 in absolute value leaves the radius as it was. Neither call evaluates a surface.
+
+`rgsaddle_band_project` (ABI minor 35) projects a band the host has already evaluated. It does not take an optimizer step and it does not wait for the climbing image to arm. When the config asks for a climb, the endpoint-slope rule selects the image on that call. `forces` uses the force convention, and the endpoint rows are zero. The function index lists every declared name; this page is the session loop.
+
+Create an opaque session, call its `step` entry, inspect `rgsaddle_report_t`, and free it. Check each function status before reading outputs. The host owns search limits and the surface lifetime. A reset marks a surface change. The report's `evaluations` field counts the surface rows consumed by the step.
+
+Band and minimum-mode force norms are selected by `rgsaddle_band_set_force_gate` and `rgsaddle_minmode_set_force_gate`. Their configuration layouts have no member for that norm. The optional feasible-step controls are `rgsaddle_band_set_highs` and `rgsaddle_minmode_set_highs`, with 0 or 1 as the flag.
+
+`rgsaddle_ocineb_create` (ABI minor 20) builds the climbing-image band that hands the climbing image to a minimum-mode search. `rgsaddle_ocineb_step` is one band move, one alignment of the band tangent with the lowest mode, or one minimum-mode translation, and `rgsaddle_ocineb_report_t` names that phase. `n_images` is at least 3. The alignment tolerance must be at least 1/sqrt(2). A solid-state band is refused. `rgsaddle_ocineb_positions` copies the band, `rgsaddle_ocineb_reset` drops the hand-off state, and `rgsaddle_ocineb_free` releases the session. From minor 21 the hand-off is the band's own refinement with these controls: the trigger is on the climbing image's largest per-atom force, `rgsaddle_minmode_config_t` supplies only the mode estimate, including the same version-gated `rotation_angle_tol` interpretation as `rgsaddle_minmode_create`, and a `RGSADDLE_OCINEB_MINMODE` step is one P-RFO climb step. `RGSADDLE_BAND_NO_MIN_MODE` is not read here. The climbing image's requests reach the point surface as one geometry with `image = -1` and without `RGSADDLE_REQ_CLIMBING_IMAGE`.
+
+`rgsaddle_idpp_path` (ABI minor 19) writes an initial path. `n_images` counts the endpoints and must be at least 3. `reactant` and `product` each hold `3 * n_atoms` doubles. `out` holds `n_images * 3 * n_atoms` doubles, image-major. `cell` is a row-major 3x3 lattice, or NULL in free space. A singular cell returns `RGSADDLE_INVALID_PARAMETER`. Interior images are relaxed toward interpolated minimum-image pair distances. `max_iterations`, `grad_tol`, and `max_move` are the per-image L-BFGS stop. The call does not evaluate a surface.
+
+`rgsaddle_trics_path` (ABI minor 66) refines an initial free-space path.
+`initial` and `out` each hold `n_images * 3 * n_atoms` doubles.
+The inversion, diagnostic, and splice arguments correspond to
+`TricsConfig`, and every length among them is in angstrom.
+`length_per_angstrom` is the length of one angstrom in the caller's
+coordinates, 1.0 for angstrom and 0.1 for nanometres; a path in other units
+is converted before the work and back before it is written.  A non-positive
+or non-finite value returns `RGSADDLE_INVALID_PARAMETER`.  The call does not
+evaluate a surface.  `n_images < 2`, `n_atoms < 1`, or dimension overflow
+returns `RGSADDLE_SHAPE`.  A two-image path (no interior image), a
+multi-segment split whose segments contain no interior image, a diagnostic
+maze with no stable route, a coordinate singularity that damped inversion
+cannot pass, or an inversion or splice that does not converge returns
+`RGSADDLE_SOLVER`.  Non-finite input or derived geometry returns
+`RGSADDLE_NON_FINITE`.  See
+`howto/path-initialization` for the Rust selector and the published splice
+tolerance.
+
+`rgsaddle_connect` (ABI minor 18) is the run-to-completion double-ended search. Stamp `rgsaddle_connect_config_t` with the ABI version. `max_calls` is a positive iteration cap and `force_tol` is the Euclidean stop. A nonzero `quench_nodes` minimizes a node created by a split before the next segment. `left` and `right` each hold `3 * n_atoms` positions, and `position` receives the returned geometry. The surface is called with one image and writes the energy and the Cartesian gradient. `rgsaddle_connect_report_t` carries the energy, the Euclidean gradient norm, the kind (`s`, `u`, or `f`), the Hessian index, and the evaluation count. The count includes finite differences that decide a step or an index. The Lanczos acceptance estimates the next curvature with two actions and does not build a dense Hessian. The COMPASS fallback does, and that Hessian is counted.
+
+From ABI minor 21 a climbing band refines its climbing image by the lowest mode (see the band how-to). While that runs, each surface request carries the climbing image alone: a per-image host gets `RGSADDLE_REQ_ONE_IMAGE` with that image's band index, and a batched host gets one geometry with `n_images = 1` and `image = -1`. From a band config at minor 22 those requests also set `RGSADDLE_REQ_CLIMBING_IMAGE` (request flags bit 1), and a batched one then carries the climbing image's band index in `image`, so a host that keeps per-image state, or that gives the one image every MPI rank, knows which image it is. A config below minor 22 gets the minor 21 request. The step report carries the curvature along the mode in `curvature` and 0 on a band step. Set `RGSADDLE_BAND_NO_MIN_MODE` (band config flag bit 3) for the plain CI-NEB of minor 20.
+
+From ABI minor 24, `rgsaddle_sella_saddle_set_symmetrized_ritz` takes 0 for the default or 1.
+The value 1 makes a Sella saddle session take the Ritz pairs of its finite-difference diagonalizations from Sella's symmetrized products.
+Any other value returns `RGSADDLE_INVALID_PARAMETER` and leaves the session unchanged.
+A library below minor 24 does not export the symbol.
+When the host loads the library at run time, check `rgsaddle_abi_version()` first.
+The Sella how-to says when the option helps.
+
+`rgsaddle_sella_saddle_set_small_system_atom_ceiling` (ABI minor 25) takes 1 or 0.
+The value 1 makes a Cartesian Sella saddle session bound only its largest atom move from the first step.
+That applies when its Euclidean radius `delta * n_free` starts at 1 or less.
+The value 0 keeps that radius alone.
+1 is the default.
+Any other value returns `RGSADDLE_INVALID_PARAMETER` and leaves the session unchanged.
+A library below minor 25 does not export the symbol; the Sella how-to describes the ceiling.
+
+From ABI minor 37, `rgsaddle_indexk_create` opens an index-k minimum-mode session. `rgsaddle_indexk_step` takes the surface and an optional `rgsaddle_hessian_fn`; a null Hessian estimates the action from the surface. `rgsaddle_indexk_modes` writes the n-by-k row-major block and the k curvatures. `rgsaddle_indexk_translated` writes the effective gradient of the last step. `rgsaddle_reflect_force` is the Householder product `F - 2 V V^T F`; for k = 1 that is `force - v * dot(force, v) * 2`, and the output must not alias the force. k = 1 follows the one-mode dimer or Lanczos step. `RGSADDLE_MINMODE_LOBPCG` at k = 1 uses Lanczos. A non-positive k makes create return NULL. `include/rgsaddle/session.hpp` wraps the session as `IndexK`. A library below minor 37 does not export the symbols.
+
+`rgsaddle_minmode_set_torque_window` (ABI minor 32) takes -1, 0 or 1.
+The value 1 turns on the classic dimer torque window.
+A rotation then also stops after one iteration once the rotational force is under 1.
+The value 0 turns that window off, so the rotation runs to `rotation_tol`, the angle test or `max_rotations`.
+The value -1 is the state of a new session. It turns the window on when `rotation_tol` is at least 1e-4 and the session is Lanczos or a dimer whose angle stop is off. A dimer with a positive `rotation_angle_tol`, the improved dimer, keeps the window off unless the value is 1.
+For config minors 5 through 62, `rotation_angle_tol` is read as given and 0 keeps the angle stop off.
+From minor 63, `rotation_angle_tol` = 0 keeps the Rust default angle stop unless flag bit 0, `RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL`, is set; with that bit and 0 the old stop-off behaviour remains.
+Any other value returns `RGSADDLE_INVALID_PARAMETER` and leaves the session unchanged.
+A library below minor 32 does not export the symbol.
+From minor 41 a Lanczos session reads the window too: a step's estimate stops once two Krylov vectors leave the Ritz residual divided by the absolute Ritz value under 1. A Ritz value whose magnitude is at most 1e-14 of the estimate's curvature scale, the largest Hessian action norm it has formed, uses that scale as the divisor. The value 0 runs the estimate to its dimensionless residual as before.
+
+ABI minor 43 adds the opt-in ART nouveau controls.
+`rgsaddle_artn_config_default` initializes an `rgsaddle_artn_config_t` with the published defaults, and `rgsaddle_minmode_set_artn` enables those controls on a Lanczos session.
+A NULL config disables the protocol.
+The setter rejects a dimer, nonzero reserved flags, negative counts and invalid floating-point controls without changing the session.
+Enabling or disabling restarts search history at the current position and mode; creating and stepping a session without this call is unchanged.
+
+From ABI minor 33 a band config with `RGSADDLE_SPRING_ONSAGER_MACHLUP` (spring 2) builds the Onsager-Machlup springs of Mandelli and Parrinello.
+At every evaluation each interior image gets the displacement `F / (2 spring_k)` of its current force, as eOn's `buildSpringStrategy` does.
+The endpoints get zero.
+Below minor 33 every displacement was zero.
+The spring then kept only the second difference of the path.
+A non-finite `spring_k` makes `rgsaddle_band_create` return NULL.
+No layout or symbol changes.
+When the host loads the library at run time, check `rgsaddle_abi_version()` for at least minor 33 before relying on the displacements.
+
+From ABI minor 35, `rgsaddle_irc_config_t` `kind` 0 (`RGSADDLE_IRC_GS2`) is the Gonzalez and Schlegel pivot step and 2 (`RGSADDLE_IRC_SELLA_SPHERE`) the sphere about the last point.
+A config whose version minor is 34 or older runs the sphere about the last point for every kind but Morokuma, as those versions did.
+Minor 34 is the curvature probe and leaves IRC kinds unchanged.
+From minor 35, create returns NULL on a kind other than 0, 1 and 2.
+The C++ helper `irc_config` selects `RGSADDLE_IRC_SELLA_SPHERE`.
+
+`include/rgsaddle/session.hpp` provides the C++ owning wrappers. `Band`, `MinMode` and `Irc` release their opaque handles automatically and translate failing statuses into exceptions. `tests/c/main_abi_contract.h` checks the retained main layouts and signatures; the C and C++ smoke executables exercise the official header and library together.
+
+`rgsaddle_minmode_set_rotation_stop_length` (ABI minor 38) takes a length in the host's unit.
+A positive length stops a dimer rotation once the curvature times that length times the sine of the estimated remaining rotation angle is at most `force_tol`, and stops Lanczos on the same bound for its Ritz residual and Ritz value.
+0, the state of a new session, turns the stop off; a negative or non-finite length returns `RGSADDLE_INVALID_PARAMETER` and leaves the session unchanged.
+The C++ `MinMode` wrapper calls it as `set_rotation_stop_length`, and Python takes it as the `rotation_stop_length` keyword of `MinMode`.
+
+`rgsaddle_reparametrize` (ABI minor 38) places the interior images of a band at equal arc length, in place, with no surface call.
+`RGSADDLE_REPARAM_LINEAR` places them on the polyline and `RGSADDLE_REPARAM_NOT_A_KNOT` on the not-a-knot cubic spline through the images.
+A non-negative `anchor` names an interior image that stays, and a non-null `cell` makes the chords minimum images.
+Band config bit 4, `RGSADDLE_BAND_SPLINE_REPARAM`, read from a config at minor 38 or newer, puts the trust-region band (`RGSADDLE_METHOD_RTR`) on the spline; `rgsaddle_band_create` and `rgsaddle_ocineb_create` read it.
+Python exposes the function as `rgsaddle.reparametrize(positions, scheme, anchor, cell)`.
+
+`rgsaddle_band_set_fixed_atoms` (ABI minor 39) takes `n_atoms` bytes, 1 for a fixed atom and 0 for a free one, shared by every image.
+Call it after `rgsaddle_band_create` and between steps; it drops the optimizer history and the last evaluation and keeps the endpoint energies.
+A null band returns `RGSADDLE_NULL_BAND`, a null mask or an `n_atoms` other than the band's returns `RGSADDLE_SHAPE`, and a byte other than 0 or 1, a mask that fixes every atom, endpoints that place a fixed atom differently, or a solid-state band returns `RGSADDLE_INVALID_PARAMETER` with the band unchanged.
+Fixed atoms never move, carry no force in the report, and leave the mean force in place whether or not `RGSADDLE_BAND_KEEP_TRANSLATION` is set.
+`rgsaddle_band_set_exp_precon` then builds its matrices on the free atoms, so the exponential metric runs with fixed atoms.
+`rgsaddle_band_project_fixed` is `rgsaddle_band_project` with the same mask, or `NULL` for none.
+A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 39 before resolving either symbol.
+The C++ `Band` wrapper calls it as `set_fixed_atoms`, from a pointer to the band's `n_atoms` bytes or from a `std::vector<std::uint8_t>` whose size is passed as `n_atoms`, and throws on a failing status.
+Python's `project_band` takes the mask as `fixed`, and `rgsaddle.ase.NEB` reads it from `FixAtoms`.
+
+ABI minor 40 adds the saddle-index check of `howto/band` and `howto/minmode`.
+A band, min-mode or OCI-NEB config stamped with minor 40 or newer certifies the converged point by default, with the settings `rgsaddle_saddle_check_default` writes into an `rgsaddle_saddle_check_t`; a config stamped below minor 40 runs without the check, as before.
+The check's surface calls count in the step's `evaluations`.
+`rgsaddle_band_set_saddle_check`, `rgsaddle_minmode_set_saddle_check` and `rgsaddle_ocineb_set_saddle_check` replace the check between steps, and NULL turns it off.
+A positive `escape_attempts` with a positive `escape_push` turns the escape on; the step that pushes reports `RGSADDLE_STATUS_RUNNING`.
+`rgsaddle_band_saddle_index`, `rgsaddle_minmode_saddle_index` and `rgsaddle_ocineb_saddle_index` fill an `rgsaddle_saddle_index_t` and write up to `capacity` curvatures in ascending order.
+Its `certified` is 1 while a certificate holds for the current point, the climbing image for a band; `index`, `converged`, `n_curvatures` and `evaluations` then describe it, and `total_evaluations` and `escapes` sum the session's checks and pushes either way.
+`rgsaddle_saddle_index` certifies one point through the surface callback of `rgsaddle_minmode_step`, with an optional gradient, seed mode and fixed-atom mask.
+A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 40 before resolving these symbols.
+The C++ `Band`, `MinMode` and `Ocineb` wrappers have `set_saddle_check` and `saddle_index`, `rgsaddle::saddle_check()` returns the defaults and `rgsaddle::saddle_index` certifies one point.
+Python's `MinMode` reports the index in `SessionReport.saddle_index` and has `saddle_index` and `set_saddle_check`, `rgsaddle.saddle_index` certifies one point, and `rgsaddle.ase.saddle_index` and `rgsaddle.ase.NEB.saddle_index` certify ASE atoms and the climbing image of an ASE band.
+
+ABI minor 44 adds the simplified string method of E, Ren, and Vanden-Eijnden, J. Chem. Phys. 126, 164103 (2007), https://doi.org/10.1063/1.2720838 .
+Band config bit 5, `RGSADDLE_BAND_STRING`, read from a config stamped with minor 44 or newer, evolves interior images under the full potential force (no spring, no tangent projection) and places them at equal arc length after each step: on the not-a-knot cubic spline when `RGSADDLE_BAND_SPLINE_REPARAM` is also set, and on the polyline otherwise.
+An armed climbing image reflects the potential force along the tangent and stays anchored during reparametrization.
+`rgsaddle_band_set_string` enables or clears the method on a live `RgsaddleBand` with an `rgsaddle_reparametrization_t` (`RGSADDLE_REPARAM_LINEAR` or `RGSADDLE_REPARAM_NOT_A_KNOT`); `enabled = 0` returns the band to NEB.
+`rgsaddle_band_project` and `rgsaddle_band_project_fixed` also read `RGSADDLE_BAND_STRING`.
+A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 44 before resolving `rgsaddle_band_set_string`.
+`include/rgsaddle/session.hpp` wraps it as `Band::set_string`, and Python exposes `rgsaddle.Band(..., string=True)`, `_core.project_band(..., projection="string")`, and `rgsaddle.ase.SimplifiedString`.
+
+ABI minor 44 adds the growing string method of Peters, Heyden, Bell, and Chakraborty, J. Chem. Phys. 120, 7877 (2004), https://doi.org/10.1063/1.1691018 . Its `join_tol` uses -1.0 for no early join and accepts zero as an inclusive zero-gap threshold.
+`rgsaddle_growing_string_config_default` initializes an `rgsaddle_growing_string_config_t`, `rgsaddle_growing_string_create` opens an `RgsaddleGrowingString` from the reactant and product endpoints, and `rgsaddle_growing_string_step` advances the separate fragments until they join and hand off to `StringSession`.
+`rgsaddle_growing_string_create` returns NULL for a `frontier_tol` that is not finite and positive, a `min_steps_per_node` below 1, a negative `max_steps_per_node` (0 means no cap), a negative `join_tol` other than -1.0, or a non-finite `join_tol` (-1.0 means no early join). The step report's `rotations` field is 0; `rgsaddle_growing_string_nodes_added` gives the nodes the last step grew.
+`rgsaddle_growing_string_n_images`, `rgsaddle_growing_string_nodes_added`, `rgsaddle_growing_string_phase`, `rgsaddle_growing_string_positions`, `rgsaddle_growing_string_ids`, `rgsaddle_growing_string_set_fixed_atoms`, `rgsaddle_growing_string_saddle_index`, and `rgsaddle_growing_string_free` inspect and manage the session.
+`include/rgsaddle/session.hpp` wraps it as `rgsaddle::GrowingString`, and Python exposes `rgsaddle.GrowingString` and `rgsaddle.ase.GrowingString`.
+
+ABI minor 45 adds the free-end adaptive NEB of Zhang, Zhang, Ye, and Zheng, J. Chem. Phys. 145, 094104 (2016), https://doi.org/10.1063/1.4962019 . It is a setter, not a band flag. `rgsaddle_band_set_free_end` enables, replaces, or clears it on a live `RgsaddleBand`: `side` is `RGSADDLE_FREE_END_FIRST` or `RGSADDLE_FREE_END_LAST`, `has_target_energy` selects `target_energy` or the endpoint's initial energy, and `max_cuts`, `cut_force`, `energy_tol`, `stability`, `window_offset`, and `cubic` are the adaptive window. `stability` and `window_offset` must be at least 1. `rgsaddle_band_free_end_residual` writes the signed residual $E(x_{\mathrm{end}}) - E_{\mathrm{target}}$ from the last step, and `rgsaddle_band_free_end_cuts` returns how many windows were actually removed. `rgsaddle_band_evaluation` returns the energies, gradients, and projected interior forces at the positions that step reported. A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 45 before resolving these three symbols. `include/rgsaddle/session.hpp` wraps them as `Band::set_free_end`, `Band::free_end_residual`, and `Band::free_end_cuts`. The worked example is `tests/free_end_neb.rs`.
+ABI minor 47 adds `rgsaddle_lineb_solve_with_kappa` for a fixed endpoint coefficient. It takes the same arguments as `rgsaddle_lineb_solve` and one additional pointer. A positive finite value selects the fixed coefficient and a null pointer selects the normalized restraint.
+
+ABI minor 47 adds `RGSADDLE_LINEB_PROJECTED_VERLET` `(1u << 2)` to `rgsaddle_lineb_solve_options`. It selects the projected Verlet band integrator (`LinebConfig::with_projected_verlet`). A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 47 before setting that bit.
+
+ABI minor 47 adds the one-shot fixed-energy LI-NEB and harmonic quantum TST entry points of `howto/lineb`. `rgsaddle_lineb_config_default` fills an `rgsaddle_lineb_config_t` with the paper spring, endpoint scale, time step, step cap, turning width, unit `ℏ` and `k_B`, and four quadrature pairs for the given `opt_tol` and `perp_tol`. `rgsaddle_lineb_solve` takes that config, `n_images` (≥ 3) and `n_atoms` Cartesian images (contiguous image, atom, xyz), `n_atoms` positive `atom_masses`, `molecular` 0 (expand each mass onto the three coordinates with no rigid alignment) or 1 (quaternion molecule alignment), the tunneling `energy`, `max_steps`, `beads`, and the host `rgsaddle_surface_fn`. `beads` 0 returns the path only and writes NaN into `log_rate_over_reactant`; `beads` must otherwise be at least 2. An unconverged path returns `RGSADDLE_STALLED` after writing the last images into `optimized_positions`. `rgsaddle_lineb_result_t` carries the spline action, both half periods and temperatures, the log rate, and the optimizer, measure, dynamics and rate call counts. A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 47 before resolving these symbols. The smoke test is `tests/c/lineb_abi.c`.
+
+The `RGSADDLE_LINEB_INTERPOLATED_FORCE_CLOCK` option selects the signed image force for the imaginary-time orbit and rate. The projected Verlet option controls band optimization independently.
+
+ABI minor 60 adds the per-step refine stepper. `rgsaddle_refine_method_t` is `RGSADDLE_REFINE_NONE` or `RGSADDLE_REFINE_LBFGS`. `rgsaddle_band_set_refine` installs L-BFGS for steps whose convergence force is at or under `threshold`, in the host's force units, and leaves every other step on the band method. A threshold of 0 selects 0.5, and `memory` less than or equal to 0 selects 20 pairs. `RGSADDLE_REFINE_NONE` clears the stepper and does not read the threshold. A negative or non-finite threshold and an unknown method are refused. `rgsaddle_band_is_refining` is 1 when the last first-order step used the refine stepper. A string, trust-region, solid-state, quick-min, or free-end band ignores the call. `include/rgsaddle/session.hpp` wraps the pair as `Band::set_refine` and `Band::is_refining`, and Python exposes `Band.set_refine` and `Band.is_refining`. A host checks `rgsaddle_abi_version()` for minor 60 or newer. The worked example is `tests/band_refine.rs`.
+
+ABI minor 64 adds geodesic interpolation (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), https://doi.org/10.1063/1.5090303 ).
+`rgsaddle_geodesic_config_default` fills an `rgsaddle_geodesic_config_t`.
+`rgsaddle_geodesic_path` minimizes the length of an existing image-major path under a host chart callback, and `rgsaddle_geodesic_morse` builds the path between two geometries with the Morse pair coordinates of their Eq. (7) (alpha 1.7, beta 0.01).
+`rgsaddle_geodesic_path` and `rgsaddle_geodesic_morse` return `RGSADDLE_NOT_CONVERGED` when a round of sweeps uses all of `max_sweeps` with an image still moving; the outputs then hold the last iterate.
+A NULL config selects the defaults, including `max_images` 32, so it requires `n_images` of at least 32.
+A supplied `max_images` above `n_images` is `RGSADDLE_INVALID_PARAMETER`: the output buffer cannot grow, and the cap is not clamped.
+`bound_samples` is even. `length`, `lower`, and `upper` may be NULL.
+A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 64 before resolving these symbols.
+
+ABI minor 65 adds dynamic NEB.
+`rgsaddle_band_set_dynamic` takes 0 to clear it or 1 to set `fmax` and `scale_fmax`; any other flag returns `RGSADDLE_INVALID_PARAMETER` and leaves the band unchanged.
+A non-finite `fmax` or `scale_fmax` returns `RGSADDLE_NON_FINITE` when the call would turn the option on. Clearing it ignores both values.
+A solid-state band, the trust-region stepper, the simplified string method, and the free-end adaptive NEB are refused.
+`rgsaddle_dyneb_mask` applies the same mask to a projected band the host already holds.
+A non-finite position, energy, force, `fmax`, or `scale_fmax` returns `RGSADDLE_NON_FINITE`.
+While the option is on, an interior image that a neighbour pulls back over its threshold is requested alone: `RGSADDLE_REQ_ONE_IMAGE` is set, `image` is that image's band index, `n_images` is the band length, and `RGSADDLE_REQ_CLIMBING_IMAGE` is not set.
+A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 65 before resolving either symbol.
+
+ABI minor 68 adds the run-to-completion AutoNEB of Kolsbjerg, Groves, and Hammer, J. Chem. Phys. 145, 094107 (2016), https://doi.org/10.1063/1.4961868. `rgsaddle_autoneb_run` grows a band from at least two images and writes `n_max` rows. `rgsaddle_autoneb_config_t` carries the spring `k`, the two force stops, the two step caps, `n_simul`, `n_max`, the projection, the tangent, and `space_energy_ratio`. `RGSADDLE_AUTONEB_CLIMB` arms the climb from the first evaluation of the climbing window. `RGSADDLE_AUTONEB_IDPP` places new images with the image-dependent pair potential. `RGSADDLE_AUTONEB_KEEP_TRANSLATION` leaves the mean Cartesian force in the window. `rgsaddle_autoneb_report_t` reports `status`, `max_force`, `ci_index` (-1 when there is none), `surface_rows`, `n_images`, and `iteration`. `iteration` counts the steps of the last stage alone, also when that stage keeps the window and the band session of the stage before it. The surface callback is the band callback, and it is not entered from another thread. Python calls it as `autoneb_run` and reads `AutonebReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`). `rgsaddle.ase.AutoNEB` is the ASE-shaped wrapper, and its `run()` returns an `AutoNEBReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`, `images`). A run that spends its steps returns `RGSADDLE_OK` with `status` 0, so a host tests `status` and `max_force`. `tests/c/autoneb_abi.c` drives the entry point on a double well and checks the status, the force, the iteration count, and the error returns. A host checks `rgsaddle_abi_version()` for minor 68 before resolving the symbol. The Rust types are `RgsaddleAutonebConfig` and `RgsaddleAutonebReport`.
+
+ABI minor 69 adds the downward solution-landscape search. `rgsaddle_landscape_config_default` fills an `rgsaddle_landscape_config_t` from the Rust defaults. `rgsaddle_landscape_create` opens an `RgsaddleLandscape` at a critical point whose optional unstable block is row-major `(3 * n_atoms)` by `k`. `rgsaddle_landscape_run` follows every unstable direction. Its Hessian argument is the new `rgsaddle_hessian_at_fn`, which receives the geometry, the vector and the output action; a null Hessian estimates the action from the surface. On `RGSADDLE_LANDSCAPE_BOUND` the report's `n_nodes` and `evaluations` are the counts already reached, `bound` is 1 for the node limit or 2 for the evaluation limit, `n_edges` is 0, and no pathway is stored. `rgsaddle_landscape_node`, `rgsaddle_landscape_modes`, and `rgsaddle_landscape_edge` read a stored map; before one they return `RGSADDLE_NO_EVALUATION`. `rgsaddle_landscape_free` releases the session. `include/rgsaddle/session.hpp` wraps it as `rgsaddle::Landscape`, and the constructor requires ABI 1.69. Python exposes `Landscape`. The worked example is `tests/landscape.rs`. ABI minor 69 also adds the typedef `rgsaddle_hessian_at_fn`, which is `int (*)(void *user, int64_t n_dof, const double *position, const double *vector, double *action)`. `rgsaddle_indexk_step_at` is `rgsaddle_indexk_step` with that geometry-aware callback, and `rgsaddle::IndexK::step_at` wraps it. `rgsaddle_hessian_fn` keeps its original four-argument signature, and `rgsaddle_indexk_step` and `rgsaddle_kappa_dimer_force` still take it. `rgsaddle_landscape_report_t` carries `flags` right after `version`, and the library writes zero. A library below minor 69 does not export the landscape symbols or `rgsaddle_indexk_step_at`.
+
+From minor 70, `RGSADDLE_TANGENT_SPLINE` selects the cubic-spline tangent on `rgsaddle_band_project` and `rgsaddle_band_step`, and `rgsaddle_spline_resample` places interior images at equal steps of the normalized chord length. A band session refuses that tangent together with the simplified string, a solid-state cell, free-end adaptive NEB, or the exponential metric.
+
+ABI minor 71 adds three initial paths. `rgsaddle_idpp_fixed_path` is `rgsaddle_idpp_path` with a frozen atom mask: NULL moves every atom, 1 keeps that atom at the reactant coordinates, and 0 lets it move. `rgsaddle_sidpp_alternating_path` inserts images from both ends at `alpha` (inside (0, 1), default 0.33), runs a short collective quick-min, places the band at equal minimum-image arc length, and runs a final collective quick-min. A count of 0 skips that stage. `rgsaddle_sidpp_alternating_inverse_distance_path` is the same loop with inverse distance targets and a last per-image pull onto the finished target. Its `final_iterations` is at least 1 and its `force_tol` is positive. This entry is not `rgsaddle_geodesic_path`. A host that loads the library at run time checks `rgsaddle_abi_version()` for at least minor 66 before resolving these symbols.

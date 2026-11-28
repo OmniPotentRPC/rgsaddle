@@ -1,0 +1,328 @@
+`SolidDimer` is a minimum-mode saddle search on the joint space of atom positions and cell strain. The translation is the dimer or Lanczos step of `MinModeSession`: estimate the lowest mode, invert the force along it, and take one rgmin step. That reflected force is Equation 3 of Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), https://doi.org/10.3389/fchem.2026.1807063. The same dimer, in eOn, is the search of Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), https://doi.org/10.1021/acs.jctc.5c00866. Force calls are counted as in Goswami, AIP Advances 15, 085210 (2025), https://doi.org/10.1063/5.0283639.
+
+The coordinate those steppers see is the solid-state dimer of Xiao, Sheppard, Rogal, and Henkelman, J. Chem. Phys. 140, 174104 (2014), https://doi.org/10.1063/1.4873437. Strain sits next to the atomic displacement with the Jacobian of the generalized solid-state nudged elastic band, Sheppard, Xiao, Chemelewski, Johnson, and Henkelman, J. Chem. Phys. 136, 074103 (2012), https://doi.org/10.1063/1.3684549,
+
+$$ J = V^{1/3} N^{1/6}. $$
+
+`J` is fixed from the cell at the start. The chart is the right strain `h = h_0 (I + ε)` with the atoms `r = r_0 (I + ε)`, so a pure strain keeps fractional coordinates fixed and `r_0` is the non-affine displacement. The free strains are the lower triangle, Voigt order xx, yy, zz, yz, xz, xy, stored as `J ε`. The upper triangle is the rotation and stays zero, as on the solid-state band. The cell block of the gradient is `M^{-T} (V σ) / J` plus the external load, with `M = I + ε`. At zero strain and zero load that block is `(V / J) σ`. `σ` is the Cauchy stress, `(1/V) ∂E/∂ε` for an infinitesimal right strain at fixed fractional coordinates.
+
+`CellMask::frozen` drops the strain block. `step` then calls `PointSurface::eval` on the atomic coordinates, and the position, mode, curvature, and evaluation count match `MinModeSession` bit for bit. Any free strain calls `eval_in_cell` and `cauchy_stress`. A surface that returns `None` from `cauchy_stress` is finite-differenced by `finite_difference_cauchy_stress`. The virial is `V σ`. `elastic_dipole` is that product. The interaction dipole used by `StrainResponse` is the opposite excess, `P = -V (σ_defect - σ_bulk)`, after the homogeneous-stress correction of Varvenne and Clouet, Phys. Rev. B 96, 224103 (2017), https://doi.org/10.1103/PhysRevB.96.224103.
+
+`SolidDimerConfig` is non-exhaustive. Build it with `new` or `frozen`, then `with_mask`, `with_external_stress`, `with_pressure`, `with_weight`, and `with_stress_check`. A positive pressure is `P I` added to the stress before the cell force, the sign of `SolidState::pressure`. External stress has that sign too, positive inward, so it is minus an applied Cauchy stress, and it is folded onto the lower triangle. `weight` scales `J`; 1 is the 2012 value. `step` and `run` return a `SolidDimerReport`, and `index` and `index_at` an `IndexReport`. Both are non-exhaustive: read their fields.
+
+No C field was added. A host that already drives `MinModeSession` keeps that path for a frozen cell and constructs `SolidDimer` when the cell is free.
+
+
+# Runnable example: variable-cell solid-state dimer
+
+```rust
+use ndarray::{Array1, ArrayView1, array};
+use rgsaddle::{
+    CellMask, IndexCheck, MinModeConfig, MinModeStatus, PointSurface, SaddleError, SolidDimer,
+    SolidDimerConfig, StressCheck, check_cauchy_stress, finite_difference_cauchy_stress, index_at,
+    virial,
+};
+
+struct ShearWell;
+
+impl PointSurface for ShearWell {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let u = x[0];
+        Ok(((u * u - 1.0).powi(2), array![4.0 * u * (u * u - 1.0), 0.0, 0.0]))
+    }
+
+    fn eval_in_cell(
+        &self,
+        x: ArrayView1<f64>,
+        cell: &[f64; 9],
+    ) -> Result<(f64, Array1<f64>), SaddleError> {
+        let u = x[0];
+        let gamma = cell[3];
+        let e = (u * u - 1.0).powi(2) + 6.0 * (gamma - 0.2 * u).powi(2);
+        let gu = 4.0 * u * (u * u - 1.0) - 2.4 * (gamma - 0.2 * u);
+        Ok((e, array![gu, 0.0, 0.0]))
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    let cell = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let pos = array![0.2, 0.0, 0.0];
+    let mode = array![1.0, 0.0, 0.0];
+    let _fd_stress = finite_difference_cauchy_stress(&ShearWell, pos.view(), cell, 1e-6)?;
+    let _vir = virial(1.0, _fd_stress);
+    let _ = check_cauchy_stress(&ShearWell, pos.view(), cell, StressCheck::new())?;
+    let config = SolidDimerConfig::new(MinModeConfig::default().with_force_tol(1e-3))
+        .with_mask(CellMask::frozen())
+        .with_index_check(IndexCheck::first_order());
+    let mut dimer = SolidDimer::new(config, pos.clone(), cell, mode)?;
+    let report = dimer.run(&ShearWell, 200)?;
+    assert_eq!(report.status, MinModeStatus::Converged);
+    let _idx = index_at(&ShearWell, dimer.positions(), IndexCheck::first_order())?;
+    Ok(())
+}
+```
+
+`with_index_check` counts the lowest eigenvalues of the projected Hessian when the force tolerance is met. The count is a Lanczos run with full reorthogonalisation. A chain that closes is restarted from a direction orthogonal to it, so a repeated eigenvalue is not dropped. Directions from `excluded_modes` are removed from each Hessian action, so a rigid translation named there is not a negative mode. The default names none. `IndexCheck::first_order` asks for eight eigenvalues, treats a value below -1e-4 as negative, and uses a central step of 1e-4. One negative eigenvalue accepts the point. More than one is left by a walk along the softest of them, on the downhill side, until that direction's Rayleigh quotient is no longer below -1e-4. The lowest mode stays the seed. Six walks are allowed. The report then sets `rejected` and the barrier is not that point. `IndexCheck` is non-exhaustive. `first_order` is also its `Default`, and `with_lowest`, `with_negative`, `with_step`, `with_escapes` and `with_escape` change one setting each. `with_flat` keeps a negative curvature λ running until the largest force component is at most `flat * |λ|`, and still at most the search tolerance. The copper rows use `flat = 0.005`, so the harmonic residual along the mode is about 0.005 Å.
+
+
+## The stress a surface returns
+
+`cauchy_stress` is `(1/V) ∂E/∂ε` in the energy and length units of `eval_in_cell`. It is positive in tension, so a stretched cell has a positive trace and a pressure tensor is `-σ`. LAMMPS reports a pressure: under `units metal` its `pxx pyy pzz pxy pxz pyz` are in bar, so `σ_ab = -p_ab / nktv2p` with `nktv2p = 1.6021765e6`, and its off-diagonal order is not the Voigt order of `CellMask`. The cell block of the gradient is `(V / J) σ`, so a pressure in place of the stress sends every free strain uphill. The largest force then grows instead of falling and the cell keeps shearing, while the same atoms converge in a frozen cell, which never reads the stress.
+
+The energy and the stress must follow every entry of the cell. Held diagonals with free shears change the cell only through its tilts, at a fixed diagonal and volume, and their cell force reads only `σ_yx`, `σ_zx` and `σ_zy`, so diagonal entries that match finite differences say nothing about that search. A box refreshed only when lx, ly, lz or the volume change hands it the energy and stress of the starting tilt while the atoms shear, and the cell shears away under that mask alone: a frozen cell never moves the box, and a fully free search changes a diagonal entry at every step, which refreshes it.
+
+`with_stress_check(StressCheck::new())` compares the tensor with `finite_difference_cauchy_stress` before the first step and stops with `SaddleError::Surface` when an entry differs by more than 1e-6 plus 1% of that entry. Each entry has its own scale: the tension of a hot cell would otherwise hide a wrong shear stress, and a search with held diagonals reads nothing but the shears. The message names the worst entry and the factor between the two tensors: -1 is a pressure, 1.602e6 a stress in bar, -1.602e6 a LAMMPS `metal` pressure passed through, and no single factor a permutation or a rotated frame. When every diagonal entry agrees it says so, which leaves the shear convention or an energy that misses tilts. It costs eighteen energies once. A surface that returns `None` is differenced already and is not checked. `check_cauchy_stress` is the same comparison at any geometry.
+
+
+## A defect saddle at fixed volume
+
+A saddle in a cell taken from a constant-pressure run is usually wanted at that volume. Two masks hold it exactly.
+
+-   `SolidDimerConfig::frozen` holds the cell. Nothing reads the stress, and the barrier belongs to that cell shape.
+-   `CellMask::voigt([false, false, false, true, true, true])` holds the three diagonal strains and frees the three shears. The search cell is lower triangular, so `M = I + ε` is unit lower triangular: every `h_ii` stays as it was, and so does `V = h_xx h_yy h_zz`. A hydrostatic `with_pressure` does no work here, because it pairs only with the diagonal strains.
+
+```rust
+let config = SolidDimerConfig::new(MinModeConfig::default())
+    .with_mask(CellMask::voigt([false, false, false, true, true, true]))
+    .with_weight(1.0)
+    .with_index_check(IndexCheck::first_order())
+    .with_stress_check(StressCheck::new());
+```
+
+Free shears matter when the shape of the cell is not part of the state being asked about. A single snapshot of a constant-pressure run carries tilt and anisotropy from thermal fluctuations, and a frozen cell turns that tilt into a shear load on the saddle. A defect whose elastic dipole has off-diagonal entries, such as a vacancy hop along <110> in cubic axes, relaxes the shear stress it makes only through the shears. Relaxing a shear stress `σ` lowers the energy by about `V σ^2 / (2 C_44)`, which falls off as 1/V for the defect's own stress. Hold the shears, or freeze the cell, when the shear is the load under study, as in the copper rows below, or when the cell is already an average whose shape should stay.
+
+Keep `with_weight(1.0)`. The stiffness of a strain in the generalized coordinate is `V C / J^2`, so a weight `w` divides it by `w^2`. The force tolerance accepts a stress of `force_tol J / V`, which grows with `w`, and `max_move` allows a strain of `max_move / J` per step. On rgpot's copper EAM, with the diagonals held and the stress right, weights of 0.25, 0.5, 1, 2 and 4 converge in 16, 29, 49, 47 and 103 steps, to saddle energies within 13 µeV. At 4 the cell modes are soft and the tilt stops about 3% short. At 0.25 the first step shears the cell by 0.25 Å, nearly four times its converged tilt, and a smaller weight overshoots further. No weight rescues a stress of the wrong sign: at 0.25 the cell shears by 12 Å in 40 steps, and at 4 it is still shearing after 160.
+
+`tests/mishin_cu.rs` runs that configuration on a Mishin copper vacancy hop in a 4×4×4 cell stretched 1.2% and tilted by 0.4, -0.3 and 0.2% of a side, started from the fixed-cell saddle. It converges in 40 steps with the volume and every `h_ii` unchanged to the last bit. The tilts move by -0.0653, 0.0438 and -0.0292 Å and the saddle energy falls by 0.02194 eV. Holding the shears and freeing the diagonals also converges in 40 steps, once the cell has contracted by 3.7%.
+
+Held diagonals are the one mask that moves the cell at a fixed diagonal and volume, so they are the run that finds a surface that misses tilts. On rgpot's copper EAM at the hop saddle in an untilted cell stretched 1.2%, a box refreshed only when lx, ly or lz change matches the diagonal of the finite-difference stress to 2e-10 eV/Å³. Frozen, fully free and with the shears held it takes the same steps, calls and final energies as the surface that follows every entry: the frozen cell never moves the box, and the other two change a diagonal entry at every evaluation. Those are 43 steps fully free, with the tilt moved by 0.007 Å, and 43 with the shears held. With the diagonals held the right surface converges in 18 steps and moves the tilt by 0.0074 Å, while this box runs it to -0.034, -0.275 and -0.480 Å after 40, 80 and 160 steps and the largest force in the true cell grows from 0.06 to 1.2 eV/Å. Its shear entry is 1.97e-4 eV/Å³ where the derivative of its energy is -2.8e-5. That gap is under the 3.1e-4 a tolerance on the largest entry allowed, and the per-entry check stops the box before the first step. `tests/mishin_cu.rs` stops the same box at the Mishin saddle, where the shear stress is 2.01e-4 eV/Å³ under a tension of 0.0306.
+
+
+## Certify a minimum and a saddle before Vineyard rates
+
+A Hessian index classifies a stationary point only. A point on the slope of a well has no negative mode and a point off a ridge still has one, so an index count alone would pass them as a minimum and a saddle. `certify_vineyard_pair` checks both points first and returns a `VineyardIndexReport` holding the `IndexReport` of the `minimum` and of the `saddle` when the pair is ready for a Vineyard prefactor.
+
+Each point must be stationary: the largest absolute component of its projected gradient is at most `force_tol`, which must be positive and finite. The minimum must then have no projected eigenvalue below `IndexCheck::negative` and the saddle exactly one. Exactly one needs the second eigenvalue as well as the first, so `IndexCheck::lowest` must be at least two. With a single resolved eigenvalue every index-two point and every maximum would count one negative mode, so a smaller value returns `VineyardIndexError::Evaluation` wrapping `SaddleError::Invalid`, as do an empty or non-finite coordinate and an unusable check, all before either surface is evaluated. `VineyardIndexReport` and `VineyardIndexError` are non-exhaustive, so match the error with a wildcard arm. An eigenvalue between that cutoff and zero is not counted, so the cutoff is the resolution of the certificate. The two points may live on different surfaces, for example the full system and an active region, and each surface names its own constrained or rigid directions through `PointSurface::excluded_modes`. Nothing else is projected, so an open cluster has to name its rotations as well as its translations.
+
+A pair that fails returns a `VineyardIndexError`, one variant for each reason:
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">Variant</th>
+<th scope="col" class="org-left">Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>Evaluation</code></td>
+<td class="org-left">A gradient, Hessian action or excluded-mode query failed, or an argument was invalid. Wraps the <code>SaddleError</code>.</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>MinimumForce</code></td>
+<td class="org-left">The reactant is not stationary. Carries <code>max_force</code> and <code>tolerance</code>.</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>SaddleForce</code></td>
+<td class="org-left">The transition state is not stationary. Carries <code>max_force</code> and <code>tolerance</code>.</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>Minimum</code></td>
+<td class="org-left">The reactant has projected negative modes. Carries <code>negative</code> and the full <code>report</code>.</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>Saddle</code></td>
+<td class="org-left">The transition state does not have exactly one. Carries <code>negative</code> and the full <code>report</code>.</td>
+</tr>
+</tbody>
+</table>
+
+`SolidDimerConfig::frozen_first_order` builds a fixed-cell dimer that certifies the projected index when it converges. A point that is still not index one after the escapes are spent comes back with `SolidDimerReport::rejected` set while its status stays converged, so a caller reads that flag before it passes the point on.
+
+
+## A barrier that moves with the cell
+
+`tests/solid_dimer_barrier.rs` couples a double well to the shear. The model is `(u^2 - 1)^2 + 6 (γ - 0.2 u)^2` plus penalties that are zero on the path. At the saddle `u = 0` and `γ = 0`, so the energy is exactly 1. Both minima sit at energy 0, and the barrier is exactly 1. The variable-cell dimer takes 88 generalized evaluations and stops at energy 1. The solid-state band on the same surface takes 92 rows and its climbing image is at energy 1. Freezing the cell at zero shear leaves the one-dimensional barrier at 0.7744, and that dimer takes 42 evaluations. An imposed shear of 0.1 moves the frozen barrier off 0.7744 by the amount of the one-dimensional scan.
+
+
+## Copper under shear
+
+Zhang, Wheatley, Chen, Qian, and Demkowicz, Phys. Rev. Materials 6, 053605 (2022), https://doi.org/10.1103/PhysRevMaterials.6.053605, find that a few percent of shear switches a copper <100> dumbbell toward <110> and drops the barrier to about a millielectronvolt. `tests/mishin_cu.rs` builds EAM1 from the functional form and Table I of Mishin, Mehl, Papaconstantopoulos, Voter, and Kress, Phys. Rev. B 63, 224106 (2001), https://doi.org/10.1103/PhysRevB.63.224106. A four-atom cube at 3.615 Å has energy -3.5402183104868774 eV per atom. The published parameters are rounded, so that is 0.0002183104868774 eV below -3.54. The virial matches a right-strain finite difference.
+
+The defect is the split interstitial on one lattice site of a 3×3×3 cell (109 atoms). That site is vacant and the extra atom makes the dumbbell. Each search starts at the <100> minimum relaxed at that shear. The lowest mode is two-sided, so the start is moved 0.02 Å toward the relaxed <110> orientation; the energy of that nudge is under 0.001 eV. The fixed cell holds the shear. The variable cell frees every lower-triangular strain and sets the external stress to minus the stress of the minimum, so the start is a stationary point of the enthalpy. The barrier is the saddle energy minus the minimum. For the variable cell the enthalpy barrier is that difference of `E + V0 σ_ext : ε`. A switch means the converged saddle is the shear-aligned <110> dumbbell. The translation is FIRE 2.0 with a 0.004 Å cap. With a 0.008 Å cap on rgmin 0.6.0 the 5% fixed-cell search steps past the switch, 7.8 meV above the minimum, and converges on an index-1 saddle 0.097 eV up that is not the switch; at 0.016 Å the 3% search does the same. Release build. The rows are `benchmarks/solid_dimer_cu.csv`.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-right" />
+
+<col  class="org-left" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-left" />
+</colgroup>
+<tbody>
+<tr>
+<td class="org-right">shear</td>
+<td class="org-left">cell</td>
+<td class="org-right">calls</td>
+<td class="org-right">barrier (eV)</td>
+<td class="org-right">enthalpy barrier (eV)</td>
+<td class="org-right">curvature</td>
+<td class="org-right">stress xy (eV/Å³)</td>
+<td class="org-right">negative modes</td>
+<td class="org-left">switch</td>
+</tr>
+
+<tr>
+<td class="org-right">0</td>
+<td class="org-left">fixed</td>
+<td class="org-right">1238</td>
+<td class="org-right">0.473923553294469</td>
+<td class="org-right">0.473923553294469</td>
+<td class="org-right">-0.9853209802173571</td>
+<td class="org-right">-0.010076037370901233</td>
+<td class="org-right">1</td>
+<td class="org-left">yes</td>
+</tr>
+
+<tr>
+<td class="org-right">0</td>
+<td class="org-left">variable</td>
+<td class="org-right">818</td>
+<td class="org-right">0.33255761943240714</td>
+<td class="org-right">0.34700116860756225</td>
+<td class="org-right">-0.5610497728503526</td>
+<td class="org-right">0.00000869281411476286</td>
+<td class="org-right">1</td>
+<td class="org-left">yes</td>
+</tr>
+
+<tr>
+<td class="org-right">0.02</td>
+<td class="org-left">fixed</td>
+<td class="org-right">748</td>
+<td class="org-right">0.24355187208260531</td>
+<td class="org-right">0.24355187208260531</td>
+<td class="org-right">-0.5631953615905473</td>
+<td class="org-right">0.00013434009525319944</td>
+<td class="org-right">1</td>
+<td class="org-left">yes</td>
+</tr>
+
+<tr>
+<td class="org-right">0.02</td>
+<td class="org-left">variable</td>
+<td class="org-right">828</td>
+<td class="org-right">0.3132135232119708</td>
+<td class="org-right">0.16276484378391842</td>
+<td class="org-right">-0.2746287816969879</td>
+<td class="org-right">0.008144299682520546</td>
+<td class="org-right">1</td>
+<td class="org-left">yes</td>
+</tr>
+
+<tr>
+<td class="org-right">0.03</td>
+<td class="org-left">fixed</td>
+<td class="org-right">743</td>
+<td class="org-right">0.14828663803587006</td>
+<td class="org-right">0.14828663803587006</td>
+<td class="org-right">-0.3748629187556624</td>
+<td class="org-right">0.005229790430296432</td>
+<td class="org-right">1</td>
+<td class="org-left">yes</td>
+</tr>
+
+<tr>
+<td class="org-right">0.03</td>
+<td class="org-left">variable</td>
+<td class="org-right">958</td>
+<td class="org-right">0.286042584261736</td>
+<td class="org-right">0.08811246942076423</td>
+<td class="org-right">-0.14464084405498187</td>
+<td class="org-right">0.012136787794593347</td>
+<td class="org-right">1</td>
+<td class="org-left">yes</td>
+</tr>
+
+<tr>
+<td class="org-right">0.04</td>
+<td class="org-left">fixed</td>
+<td class="org-right">795</td>
+<td class="org-right">0.06783472088164899</td>
+<td class="org-right">0.06783472088164899</td>
+<td class="org-right">-0.19890988772577067</td>
+<td class="org-right">0.010332137118764803</td>
+<td class="org-right">1</td>
+<td class="org-left">yes</td>
+</tr>
+
+<tr>
+<td class="org-right">0.04</td>
+<td class="org-left">variable</td>
+<td class="org-right">2291</td>
+<td class="org-right">0.2433784024096326</td>
+<td class="org-right">0.027289676167981725</td>
+<td class="org-right">-0.025428115136747722</td>
+<td class="org-right">0.01599529855217751</td>
+<td class="org-right">1</td>
+<td class="org-left">yes</td>
+</tr>
+
+<tr>
+<td class="org-right">0.05</td>
+<td class="org-left">fixed</td>
+<td class="org-right">3981</td>
+<td class="org-right">0.007772911164806828</td>
+<td class="org-right">0.007772911164806828</td>
+<td class="org-right">-0.034127148165562324</td>
+<td class="org-right">0.015469235712521899</td>
+<td class="org-right">1</td>
+<td class="org-left">yes</td>
+</tr>
+
+<tr>
+<td class="org-right">0.05</td>
+<td class="org-left">variable</td>
+<td class="org-right">2314</td>
+<td class="org-right">0.2815321237455919</td>
+<td class="org-right">0.9152325828545145</td>
+<td class="org-right">-1.2530621806837767</td>
+<td class="org-right">0.018904004459858143</td>
+<td class="org-right">1</td>
+<td class="org-left">no</td>
+</tr>
+</tbody>
+</table>
+
+The fixed barrier falls from 0.473923553294469 eV at zero shear to 0.007772911164806828 eV at 5%. On this 109-atom cell the collapse sits near 5%, later than the 3–4% of the larger cell in that paper.
+
+At zero shear the fixed cell stops at 0.473923553294469 eV with one negative projected eigenvalue. Its second eigenvalue is +3.7604e-4 at a finite-difference step of 1e-4, and steps 1e-3, 1e-4, 1e-5 and 1e-6 give +3.7568e-4, +3.7604e-4, +3.7605e-4 and +3.7605e-4. The overlap of that mode with a uniform translation is below 1.3e-14, so it is not a rigid mode and not a step artefact. The call count is 1238, of which 512 are index-check evaluations. The unchecked row of the previous commit, 0.4741823644375245 eV, stopped at the 2e-3 force without this test.
+
+At 4% variable the curvature is -0.025428115136747722. The largest force component first falls under 2e-3 at call 855 and the flat tolerance continues to call 2291, where the largest component is 1.196e-4. At 5% fixed the curvature is -0.034127148165562324. The 2e-3 force is first met at call 2182 and the run continues to call 3981, where the largest component is 1.702e-4.
+
+At 5% variable the reactant, with the external stress equal to minus its own stress, has no negative projected eigenvalue. The lowest is +0.018114765351867675, so the reactant is a minimum. The search stops on an index-1 saddle of the opposite <110>, enthalpy barrier 0.9152325828545145 eV, final shear 0.024405841859849658, 2314 calls, of which 640 are index-check evaluations.

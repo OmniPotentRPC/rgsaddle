@@ -1,0 +1,110 @@
+`ArtSession` is the activation-relaxation technique nouveau of Malek and Mousseau, Phys. Rev. E 62, 7723 (2000), https://doi.org/10.1103/PhysRevE.62.7723. The host supplies the reactant, a seed vector, and a displacement mask. The library does not draw either array. A mask entry of zero drops that coordinate, which is the localized push; a mask of ones keeps the whole seed.
+
+The phase is stored on the session. `step` runs one phase and leaves the next one in `ArtReport::phase`:
+
+1.  `Push` displaces along the masked seed, and later along that same direction.
+2.  `Perpendicular` minimizes the force in the hyperplane with `relax_to_tolerance`.
+3.  `Lanczos` reads the lowest curvature from `MinModeSession::estimate_mode`.
+4.  `Climb` takes one `MinModeSession::step`, then returns to the hyperplane relaxation.
+5.  `Certify` calls `saddle_index`.
+6.  `PushOver` steps both ways along the unstable mode.
+7.  `Quench` minimizes both images with no constraint.
+8.  `Report` decides reversibility.
+
+`run_events` repeats that for many seeds and records a later landing on the same saddle in `ArtBatch::duplicates`. `ArtSession::force_calls` lists the most recent `ArtConfig::force_call_window` evaluations (64 by default), with the phase that requested each one; `force_call_count()` is the unbounded total.
+
+During `Lanczos` on the climb, negative curvature and `mode_overlap_tol` keep the search on the accepted index-1 direction. A rejected estimate first gets a direct curvature check along the carried mode. If that direction is no longer negative, ART restarts from the last accepted point with a halved translation cap, up to `index_one_recovery_attempts` times. After that, a finite non-negative rejected curvature finishes the event as `ArtStatus::LostCurvature`, and a negative one (the mode switched) or a non-finite one returns `SaddleError::ArtIndexOneLost`.
+
+`ArtStatus::Connected` requires a converged index-1 certificate, both quench energies below the saddle, one quenched image on the reactant, and the other image a different minimum. Either sign of the push-over may be the return: the mode at the saddle is not required to point back along the path that arrived. `ArtStatus::Reverted` is the other case of one basin, and it is not a completed exit. The structural distance is Euclidean for one atom. For several atoms it is the Kabsch RMSD, or the RMSD of the sorted pair distances when `permute_identical` is set, which is the identical-atom comparison used for the LJ clusters in the paper.
+
+`ArtConfig::mode` is the Lanczos block. Its `artn` shortcut and its `saddle_check` are cleared: those steps are the phases above. `MinModeConfig::with_artn` remains the shorter opt-in inside one minimum-mode iteration. The point stencil's `Preset::Art` is still the push followed by a minimum-mode climb.
+
+`ArtConfig::default` is the host unit configuration: one host length for
+the pushes and the published defaults of the nested blocks. It is not a
+Lennard-Jones preset. The named `ArtConfig::lj_art()` preset is only for
+Lennard-Jones reduced units, where $\epsilon = 1$ and
+$\sigma = 1$. For a potential
+whose characteristic energy and length are not one in the host units, use
+`ArtConfig::for_units(energy_scale, length_scale)`. It scales lengths,
+forces, and curvatures separately. A FIRE or quick-min time step, including
+the climb's `MinModeConfig::time_step`, scales as length over the square root
+of energy, because the opening move is the force times the square of that
+step. The opening step of steepest descent, L-BFGS, nonlinear CG, DIIS and
+Barzilai-Borwein multiplies the force, so it scales as length squared over
+energy, and Adam's scales as a length. The angle stop `rotation_angle_tol`
+keeps its value. `rotation_tol` is dimensionless for Lanczos, the residual
+of the lowest Ritz pair divided by the absolute Ritz value and the relative
+change of that value, so it keeps its value. A dimer reads `rotation_tol`
+as a rotational force in curvature units, and unit conversion multiplies it
+by energy over length squared. Any other relaxation method is an
+error from `for_units`. `mode_overlap_tol` is a cosine, and
+`force_call_window` and `index_one_recovery_attempts` are counts, so
+`for_units` keeps their values. `ArtConfig::validate()`
+returns an invalid parameter error when the perpendicular relaxation force
+tolerance is looser than the mode force tolerance, and when the mode force
+tolerance is not finite and positive. It also holds `ArtConfig::mode` to the
+checks of `MinModeSession::new`, so a zero Krylov or rotation budget, a step
+or time step that is not finite and positive, or a stepper that tests the
+oracle value is an `ART mode:` error rather than a value adjusted during the
+search. Sessions and batches call it before consuming a configuration.
+
+The runnable example is the doctest on `ArtSession`: a one-dimensional double well in three coordinates, a host seed, and a connected index-1 exit. `tests/art_session.rs` repeats the paper's census on LJ7, starting from the pentagonal bipyramid.
+
+
+# Runnable example: phased ART nouveau session
+
+```rust
+use ndarray::{Array1, ArrayView1, array};
+use rgsaddle::{
+    ArtConfig, ArtPhase, ArtSeed, ArtSession, ArtStatus, PointSurface, SaddleError, full_mask,
+    run_events,
+};
+
+struct DoubleWell;
+
+impl PointSurface for DoubleWell {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (px, py, pz) = (x[0], x[1], x[2]);
+        let e = (px * px - 1.0).powi(2) + 2.0 * py * py + 2.0 * pz * pz;
+        Ok((e, array![4.0 * px * (px * px - 1.0), 4.0 * py, 4.0 * pz]))
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    let reactant = array![-1.0, 0.0, 0.0];
+    let direction = array![1.0, 0.1, 0.0];
+    let mask = full_mask(3);
+    let mode = rgsaddle::MinModeConfig::default()
+        .with_kind(rgsaddle::MinModeKind::Lanczos)
+        .with_saddle_check(None)
+        .with_force_tol(0.02)
+        .with_max_move(0.1)
+        .with_krylov_dim(4)
+        .with_max_rotations(6);
+    let config = ArtConfig::default()
+        .with_mode(mode)
+        .with_push_length(0.8)
+        .with_max_pushes(3)
+        .with_max_climbs(25)
+        .with_push_over(0.25);
+    let session = ArtSession::new(
+        config.clone(),
+        reactant.clone(),
+        direction.clone(),
+        mask.clone(),
+    )?;
+    assert_eq!(session.phase(), ArtPhase::Push);
+    let batch = run_events(
+        &config,
+        &reactant,
+        &[ArtSeed {
+            seed: direction,
+            mask,
+        }],
+        &DoubleWell,
+        200,
+    )?;
+    assert_eq!(batch.outcomes[0].status, ArtStatus::Connected);
+    Ok(())
+}
+```

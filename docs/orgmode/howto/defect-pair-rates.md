@@ -1,0 +1,443 @@
+
+
+# What is computed
+
+`defect_pair_rates` takes any `PointSurface`, a periodic cell, one relaxed defect geometry, and a catalogue of hops. A hop is a product geometry with a name. The library does not know what a vacancy or a dumbbell is. The caller names the fixed point, the atoms whose centroid is the mobile defect, and a shell label.
+
+For each hop the search
+
+1.  minimizes the reactant and the product,
+2.  climbs from the reactant side of the hop with `SolidDimer`, on a frozen cell or on the joint chart,
+3.  keeps the saddle only when `IndexCheck` reports exactly one negative projected eigenvalue,
+4.  pushes off both sides of the unstable mode by a largest-atomic displacement of `push`, minimizes, and accepts the hop when the two clouds of atoms match the reactant and the product (Hausdorff distance, so a permutation of identical atoms still matches),
+5.  builds an image-dependent-pair-potential path through that saddle, relaxes it with climbing off, then climbs. The climb uses the caller's band method. If that climb runs away, it is repeated with FIRE, or with ODE12r when the caller was already on FIRE,
+6.  integrates the projected average force along that path and shoots the Bennett–Chandler factor from the free-energy maximum.
+
+AutoNEB, zoom, and image freezing are not used. The band has a fixed number of images.
+
+A hop is `toward` when the mobile centroid moves closer to the fixed defect by more than the tolerance, `away` when it moves farther, and `tangential` otherwise. `classify_separation` is that test.
+
+
+# The rate
+
+The finite-temperature rate is
+
+    k(T) = κ ν exp(-ΔF / kT)
+
+`ΔF` is the potential of mean force from the reactant hyperplane to the dividing surface, the maximum of the PAFI profile. `ν` is the reactant attempt frequency along the path tangent only,
+
+    ν = (1 / 2π) sqrt( (τ · H τ) / m )
+
+with `τ` the unit tangent at the reactant and `H` the Cartesian Hessian. `κ` is the Bennett–Chandler transmission coefficient. In the harmonic limit `ΔF` holds the transverse vibrational entropy, and this expression agrees with Vineyard's rate when `κ = 1`. Vineyard, J. Phys. Chem. Solids 3, 121 (1957), https://doi.org/10.1016/0022-3697(57)90059-8.
+
+The comparison rate is the full Vineyard prefactor,
+
+    k_h(T) = ν_h exp(-ΔE0 / kT),    ν_h = (∏ ν_min) / (∏ ν_sad),
+
+translations removed when the Hessian is the whole cell, the unstable eigenvalue left out of the saddle product. `ΔE0` is the potential difference, or the enthalpy difference when an external stress is set. The harmonic free-energy barrier implied by the same split is
+
+    ΔF_h = ΔE0 - kT ln(ν_h / ν).
+
+`ΔF - ΔF_h` is the anharmonic excess. At equal mass, energy in eV and length in Å, `angular_scale_rad_s` turns `sqrt(λ / m)` into rad/s and the rates are in Hz. A caller in another unit system sets `boltzmann`, `mass` and `angular_scale`.
+
+A caller that computes the Vineyard prefactor from its own minimum and saddle first calls `certify_vineyard_pair`, which refuses a point that is not stationary, a minimum with a projected negative mode and a saddle that does not have exactly one (`howto/solid-dimer`).
+
+
+# PAFI
+
+Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018), https://doi.org/10.1103/PhysRevLett.120.135503, give the free-energy gradient along a path without a collective variable. The path `X(s)` is `ArcPath`, the not-a-knot cubic spline of every coordinate through the images: the paper's "spline interpolation for each atomic coordinate" of NEB images (p. 135503-2) and the default end condition of scipy's `CubicSpline`, which their reference code uses. Two images give the chord and three the parabola. The hyperplane at `s` is `(x - X) · t = 0`, with `t = X'` less its center-of-mass part when the center of mass is held. With `ψ = (x - X) · X'' / |t|²`,
+
+    dF/ds = ⟨ (∇E · t) (1 - ψ) ⟩.
+
+The paper's `ψ`, its Eq. (5), is `1 - ψ` here. `PafiMeanForce::ReferenceCode`, the default, averages the first term of its Eq. (8), as LAMMPS `fix pafi` and Swinburne's public driver do. This force-only estimator integrates to the free energy of the flat hyperplanes, `-kT ln ∫ δ((x - X) · t / |t|) exp(-E / kT) dx`. `PafiMeanForce::PublishedEquation8` adds the paper's second term, `kT d/ds ln(|1 - ψ| / |X'|)`, evaluated analytically from `X'`, `X''`, and the one-sided `X'''` of the cubic spline; it refuses a sample when the Eq. (6) locality condition `1 - ψ > 0` fails. `HyperplaneAverage::psi` is the mean of `ψ`. Sampling is overdamped Langevin (Brownian) dynamics in that plane, Eq. (9), stepped as in Leimkuhler and Matthews, Appl. Math. Res. Express 2013, 34 (2013), https://doi.org/10.1093/amrx/abs010, Eq. (3), the high-friction limit of their BAOAB step: the noise of a step is the sum of a new Gaussian draw and the draw of the step before. `PafiIntegrator::EulerMaruyama` is the paper's direct Eq. (9) discretization and the reference-code protocol. A step is still one force call. The parallel piece of the drift and of the noise is removed, the plane is restored after every step, and the center of mass can be held. A plane can hold more than one basin, and the walk can cross into another one. With `max_jump` set, 0.4 Å by default, the production run is cut into `blocks` stretches; the thermalized configuration and the end of every stretch are quenched in the plane, along the steepest-descent flow unless `quench` says otherwise, and compared with the plane minimum quenched from the path. One atom farther than `max_jump` from it means the walk has left the basin of the path, and that stretch is sampled again from the end of the last kept one; `HyperplaneAverage::rejected` counts them, and more than `blocks` is an error, since the plane then does not hold the walk in the basin. Swinburne and Marinica's reference code drops a trajectory whose minimum after sampling has moved more than its `MaxJumpThresh` of 0.4 Å the same way. Dropping stretches conditions the walk on staying in the basin for a whole stretch, which takes a little weight from near the ridge. The integral is the trapezoid rule. The standard error comes from block means whose block is at least twice the integrated autocorrelation time of the recorded series, propagated through the trapezoid weights. When `target_error` is set, planes are resampled and inverse-variance combined until the barrier error is at or below that target or `max_rounds` is spent. The dividing surface is the plane of maximum `ΔF`. `zero_temperature_barrier` integrates `∇E · X'` along the spline, which is the energy along it and passes through the image energies; on a converged path that is the zero-temperature limit of the same integral. A finite-temperature rate is stored only when that limit reproduces `ΔE0` within `zero_t_tol` and the band force is under tolerance. The attempt frequency and the Bennett–Chandler normal take the same spline tangent.
+
+Hyperplanes normal to the chords between images do not form one family: the normal jumps at every image, so the planes on the two sides of an image differ and the curvature term is lost. Their average is the mean force on planes that no single free energy is the integral over.
+
+On a straight path `ψ` is zero and the estimator is the mean force. A one-dimensional barrier `(1 - x²)²` integrates to 1. A two-dimensional well `(1 - x²)² + ½ k(x) y²` with `k = 1.5 + 0.5 x` has the exact classical shift `(kT / 2) ln(k(0) / k(-1))`. On its plane `x = 0` the walk is the harmonic mode `k = 1.5` in `y`, and `dF/ds = ⟨y²⟩ / 4 = kT / (4 k)`; at `μ k dt = 1.2`, where the Euler–Maruyama step samples `⟨y²⟩` 2.5 times too wide, the sampled gradient is within four standard errors of it. A bent valley `(1 - x²)² + ½ k (y - a (1 - x²))²` with `a = 0.5` and `k = 4`, at `kT = 0.1` on five images, has curved hyperplanes: on each of nine planes the sampled gradient matches the derivative of `-kT ln Z` of the spline hyperplanes by quadrature, which chord hyperplanes miss by up to 0.18. On the plane `x = 0` of `h (y² - 1)² - b y + c x y` with `h = 0.4`, `b = 0.1` and `c = 0.5`, at `kT = 0.1`, the path sits in the upper of two wells, `2 kT` above the lower behind a ridge `3 kT` high, and `∂E/∂x = c y` tells them apart: with the basin test the gradient is `c ⟨y⟩` over the basin of the path by quadrature, and without it the walk falls into the lower well. Tilted to `b = 0.55`, the upper well does not hold the walk for a stretch and the plane is refused. `tests/pafi_analytic.rs` checks all six, and that the spline reproduces a cubic and its reversal.
+
+
+# Bennett–Chandler
+
+Bennett, in Algorithms for Chemical Computations, ACS Symposium Series 46, 63 (1977), https://doi.org/10.1021/bk-1977-0046.ch004, and Chandler, J. Chem. Phys. 68, 2959 (1978), https://doi.org/10.1063/1.436049, write the recrossing factor as the plateau of the flux correlation. Configurations are the PAFI samples on the dividing surface. Velocities are Maxwell–Boltzmann. The trajectories are inertial Langevin (BAOAB); zero friction is Newtonian.
+
+    κ(t) = ⟨ v_τ(0) θ(s(t)) ⟩ / ⟨ v_τ(0) θ(v_τ(0)) ⟩
+
+`s(t) = (x(t) - x_surface) · τ` and `θ(s)` is 1 on the product side of the surface. The numerator keeps the sign of the initial velocity. `τ` is the path tangent from the reactant toward the product, the direction of increasing arc length on a reactant-first path. A tangent that points the other way is reversed before the shot. The opposite normal is not tried, and a negative `κ` is not clamped into `[0, 1]`. The reported `κ` is `κ(t)` at the requested plateau record, with a block standard error. A rate is formed only when `κ` lies in `[0, 1]`.
+
+On the quartic `V = (x² - 1)²` the barrier curvature gives `ω_b = 2` at unit mass. Newtonian trajectories that start at the top with `v > 0` are still on the product side a short time later, so `κ = 1`. With friction `γ = 2`, Kramers, Physica 7, 284 (1940), https://doi.org/10.1016/S0031-8914(40)90098-2, gives
+
+    κ = sqrt(1 + α²) - α,    α = γ / (2 ω_b) = 1/2,
+
+which is `sqrt(5)/2 - 1/2 ≈ 0.618`. `tests/bennett_kramers.rs` compares the plateau of `κ(t)` with that value.
+
+
+# The catalogue
+
+`RateCatalogue::to_json` writes `rgsaddle.defect_pair_rates` version 1. `from_json` reads it back. Each entry is one exit channel. The key is `(shell, direction, hop, temperature, cell_repeats)`. `rate_Hz` is `k(T)` in the caller's frequency unit (Hz when the angular scale is `angular_scale_rad_s`).
+
+amsel is the absorbing-Markov selector for superbasin exit distributions. It does not parse this file itself. A loader groups entries that share a shell, a cell and a temperature, and passes `rate_Hz` to the FPTA or MRM kernel as the first-order exit rate of that channel. `hop` and `direction` are the channel name. `dE0`, `dF`, `dF_error`, `dF_harmonic`, `nu`, `vineyard`, `kappa`, the saddle Cauchy stress and the elastic dipole `P = -V (σ - σ_bulk)` are stored beside the rate so a later run can see what entered `k(T)`.
+
+
+# Placements
+
+`translate_onto_sites` and `push_past` build the starting geometries of a relaxation. `translate_onto_sites` pairs the atoms you name with a list of sites, nearest pair first under the minimum image, and puts each atom on its site by the short displacement. Atoms with no site and sites with no atom are left alone. A tie goes to the earlier atom, then the lower site. Relax the result before using it as a minimum. A vacancy centroid and the atoms of a self-interstitial are one use, and an adatom and a hollow are another.
+
+```rust
+let cell = [[l, 0.0, 0.0], [0.0, l, 0.0], [0.0, 0.0, l]];
+let filled = rgsaddle::translate_onto_sites(atoms.view(), cell, [true; 3], &dumbbell, vacancy.view())?;
+let start = filled.positions;
+```
+
+`push_past` returns `saddle + f (saddle - reactant)` with each atom's displacement folded first. Relax the result to leave a saddle on the product side. `f` of 0 returns the saddle and a negative `f` pulls back toward the reactant. Both functions fold the axes named by the `periodic` mask. An axis that is not periodic still needs a vector that makes the cell invertible, and its length is never used. The fold is the shortest image under whole periodic lattice vectors. In an orthogonal cell it rounds each fraction, and a displacement of exactly half a cell keeps its sign. In a sheared, hexagonal or other skewed cell rounding the fractions can miss the nearest image, so the neighbouring images are searched.
+
+
+# Relaxed states
+
+A placement is a starting geometry, not a state. Whether it is a bound pair or has recombined is a property of the minimum it relaxes to, so that minimum has to be reached. `relax_to_tolerance` minimizes in a fixed cell until the largest per-atom force norm, `max_i |F_i|`, is below `RelaxConfig::force_tol` (`DEFAULT_FORCE_TOL`, 1e-3 in the surface's force unit, eV/Å for eV and Å). `RelaxConfig::max_steps` (`DEFAULT_MAX_STEPS`, 10000) is a guard. Reaching it returns `SaddleError::Solver` with the step count and the force reached, never a geometry. The minimizer is any `rgmin::Method`, FIRE 2.0 by default.
+
+Convergence fixes the end state as a minimum, not which minimum. From a start near a basin boundary FIRE, which carries momentum, and L-BFGS, which extrapolates, can each settle below the tolerance in different basins. When the basin is the answer, as it is for recombination, follow the steepest-descent flow with `Method::Ode12r` and check it with a second integration of the same flow, `Method::Steepest` under a smaller per-atom cap.
+
+```rust
+let relax = rgsaddle::RelaxConfig::default()
+    .with_method(rgmin::Method::Ode12r)
+    .with_force_tol(1.0e-3)
+    .with_max_atom_move(0.08)
+    .with_initial_step(0.08);
+let done = rgsaddle::relax_to_tolerance(&surface, start, cell, &relax)?;
+let occupancy = rgsaddle::site_occupancy(sites.view(), done.positions.view(), cell)?;
+let recombined = occupancy.is_perfect();
+```
+
+`site_occupancy` is the Wigner–Seitz test (Nordlund et al., Phys. Rev. B 57, 7556 (1998), https://doi.org/10.1103/PhysRevB.57.7556): each atom belongs to the nearest reference site under the minimum image, an empty site is a vacancy and a site with `n` atoms carries `n - 1` interstitials. A Frenkel pair relaxed to a configuration with every site singly occupied has recombined, whatever its local distortion. Neither function knows what the defect is; the caller supplies the surface and the sites.
+
+
+# Pair networks
+
+`PairNetwork` is the kinetic network of a mobile defect next to a fixed one. A configuration is an integer relative vector and an orientation director, in a unit the caller picks (`a/2` for an fcc lattice), and a point group of integer matrices acts on both. A state is one orbit of configurations, so every symmetry-distinct relative vector and orientation is its own state; nothing is lumped by radius or by axis. Moves carry a kind, a displacement, the orientation before and after, and a saddle director `via` that tells apart two paths between the same configurations. A hop class is one orbit of the unordered pair of configurations with its `via`, so one saddle serves a hop and its reverse and detailed balance holds when rates come from saddle and state energies. `PairNetwork::sites` asks a closure for the rate of each edge, with the hop class, its direction and the source state, and returns `VolumeSite` rows and the hops that leave the radius.
+
+```rust
+let group = rgsaddle::cubic_group();
+let moves = rgsaddle::PairMove::orbit(
+    &[
+        rgsaddle::PairMove::new("translate", [1, 1, 0], [1, 0, 0], [0, 1, 0], [0, 0, 0]),
+        rgsaddle::PairMove::new("rotate", [0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]),
+    ],
+    &group,
+);
+let network = rgsaddle::PairNetwork::build(&group, &[[1, 0, 0], [0, 1, 0], [0, 0, 1]], &moves, offsets, 272)?;
+let (sites, exits) = network.sites(&spontaneous, &rate)?;
+```
+
+`matched_capture_radius` closes such a chain at its cutoff. Outside the region the capture probability of a field-free crystal is `R/r`, so a hop out to `d` is captured with probability `R/d`, and `R` is fixed by asking the weighted mean of `P r` over the outermost sites to equal it. Capture probabilities are affine in `R`, so two solves give it. On uniform fcc hops with the nearest shells absorbing, `P r` is flat from the second shell out and `R` moves by under 0.3 % between cutoffs of 10 and 16.5 `a/2`. `embed_sphere_return` on the same chain sends a hop that lands just past the sphere back with probability close to 1, and its `P r` rises toward the cutoff.
+
+Which hop classes deserve a free-energy calculation follows from the network itself. Perturb `ln k` of one class at a time in the rate closure, take `d V / d ln k` by central differences, and hand the values to `sensitivity_cover` with the spread of the rate model and the tolerance of the result. It ranks the classes by `abs(d V / d ln k)` and returns how many leading ones to compute so that the rest, all moved by that spread together, shift the result by less than the tolerance. One PAFI path through a class's saddle that ends in the product minimum gives both directions: `FreeEnergyProfile::barrier` from the reactant and `FreeEnergyProfile::reverse_barrier` from the last plane, each with its own error. Their difference is the free-energy difference of the two ends plus whatever the integral drifts along the path, and the errors of the plane averages need not cover that drift. When the difference of the ends is known, for two minima from their zero-temperature energies, `FreeEnergyProfile::balanced` (or `balanced_barriers` on the numbers) takes the forward barrier and the reverse one plus that gap as two estimates of one barrier. It returns their inverse-variance mean, the reverse barrier the gap below it, and the drift, with half the drift added to the error. A path between two equivalent states is balanced against no gap. The two directions then obey detailed balance with the end energies they were balanced on.
+
+The two barriers need not be equally good. The forward one integrates the profile up to the dividing surface and the reverse one past it to the last plane, so each carries the drift of its own stretch. A path integrated again from its other end shows which: the barrier above each end is then read once from the start of an integration and once from its end. When the readings from the start agree and those from the end do not, the drift lies past the dividing surface, and `FreeEnergyProfile::anchored` (or `anchored_barriers`) keeps the forward barrier and its error and puts the reverse barrier the gap below it. Its `drift` is still what the barrier from the last plane adds to the gap, a check on the paths it was not taken from. Rate the isolated reference the same way as the classes it anchors, or the ratio of their rates keeps the drift.
+
+```rust
+let cover = rgsaddle::sensitivity_cover(&sensitivity, model_spread, tolerance);
+let compute: Vec<usize> = cover.order[..cover.covered].to_vec();
+let (profile, _) = rgsaddle::pafi_profile(&surface, &path, &path.arcs(), &pafi)?;
+let both = profile.anchored(product_energy - reactant_energy)?;
+let (forward, backward, error) = (both.forward, both.reverse, both.error);
+```
+
+The classes left on the rate model should not inherit its bias. Each computed class gives a residual `ln k_computed - ln k_model`, its error and a row of features; the two directions of a class rated from one path share one error, so they enter as one residual, their mean. `calibrate_surrogate` fits `x · β` to the residuals by weighted least squares with weights `1/(σ² + τ²)`. The scatter `τ` is the Paule–Mandel value: zero when the errors already explain the residuals, otherwise the one that brings the weighted sum of squares to its degrees of freedom. A direction still on the model then takes `SurrogateCalibration::shift`, and `SurrogateCalibration::spread` is its error as one more draw from the same population, the spread to hand back to `sensitivity_cover`. `SurrogateCalibration::draw` moves the coefficients within their covariance for error draws. A column of ones fits a common bias. A feature that differs between the two directions of one hop class changes their ratio, so it keeps detailed balance only when that difference is a difference of a function of the state.
+
+```rust
+let fit = rgsaddle::calibrate_surrogate(&features, &residuals, &errors)?;
+let (shift, spread) = (fit.shift(&[1.0]), fit.spread(&[1.0]));
+let cover = rgsaddle::sensitivity_cover(&on_model, spread, tolerance);
+```
+
+
+# Assumptions
+
+The dividing surface is a hyperplane normal to the path, not a variationally optimized surface. The harmonic prefactor uses a caller-chosen block of atoms when the whole-cell Hessian is too large; modes below `10⁻⁴` in the surface's curvature unit are left out of the product. Overdamped sampling assumes the constrained ensemble has been reached after `thermalize` steps. The basin of the path on a plane is the one its in-plane quench from the path reaches, tested at the ends of stretches; a crossing that comes back within a stretch stays in the average. The Bennett–Chandler plateau is whatever record the caller names; a negative `κ` means that record is not a transmission coefficient and no rate is stored. The cell of a frozen search is the cell bound into the surface.
+
+
+# Copper
+
+The Mishin EAM1 numbers are a validation, not part of the library. The potential is the analytic form already in `tests/mishin_cu.rs` (Mishin, Mehl, Papaconstantopoulos, Voter, and Kress, Phys. Rev. B 63, 224106 (2001), https://doi.org/10.1103/PhysRevB.63.224106, Table I). The question is the one posed by Mwungeli, Liu, and Demkowicz, Phys. Rev. Materials 9, 023601 (2025), https://doi.org/10.1103/PhysRevMaterials.9.023601: whether the vacancy / self-interstitial recombination volume in Cu falls from about 290 Ω at 300 K to about 160 Ω at 500 K and above because the hop rates toward, away from, and tangential to the vacancy are anharmonic. Crossref records the paper as published 11 February 2025, Phys. Rev. Materials 9, 023601. Their Table 1 gives the zero-pressure lattice parameters 3.631, 3.637, 3.643, 3.649 and 3.655 Å at 300, 400, 500, 600 and 700 K, and cells of 10, 11, 12, 13 and 16 cubic repeats (4000, 5324, 6912, 8788 and 16384 atoms).
+
+The lattice parameter in the table is from a zero-pressure Langevin run with the Berendsen barostat on a 6×6×6 cell of this potential, 2 fs steps, the average of the second 4 ps of an 8 ps trajectory. That barostat is now the equilibration option `NptBarostat::Berendsen`. The default barostat is stochastic cell rescaling, so regenerating the table with the default does not repeat these Berendsen runs. The barostat pressure is the kinetic pressure `2 K / (3 V)`, which averages `(N - 1) k_B T / V` because the thermostat removes the centre-of-mass momentum, minus a third of the trace of the tension-positive configurational stress. It is not taken from Table 1.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-right">T / K</th>
+<th scope="col" class="org-right">a / Å, this work</th>
+<th scope="col" class="org-right">a / Å, Table 1</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-right">300</td>
+<td class="org-right">3.63195</td>
+<td class="org-right">3.631</td>
+</tr>
+
+<tr>
+<td class="org-right">400</td>
+<td class="org-right">3.63817</td>
+<td class="org-right">3.637</td>
+</tr>
+
+<tr>
+<td class="org-right">500</td>
+<td class="org-right">3.64349</td>
+<td class="org-right">3.643</td>
+</tr>
+
+<tr>
+<td class="org-right">600</td>
+<td class="org-right">3.65095</td>
+<td class="org-right">3.649</td>
+</tr>
+
+<tr>
+<td class="org-right">700</td>
+<td class="org-right">3.65747</td>
+<td class="org-right">3.655</td>
+</tr>
+</tbody>
+</table>
+
+The slope matches Table 1 and the offset is 0.0005 to 0.0025 Å. Each entry is one 4000 step run (2000 discarded) with seed `17 T + 11`, so it carries the scatter of a short run. At 600 K, eight seeds of that length (1 to 8) gave a spread of 0.0006 Å in the lattice parameter. That spread is smaller than the offsets at 300, 400, 600 and 700 K (0.00095, 0.00117, 0.00195 and 0.00247 Å, the differences of the two columns above) and larger only than the 500 K offset (0.00049 Å), so it does not show that the offsets are unresolved. The standard errors that `npt_lattice` reports for those runs, 0.00004 to 0.00013 Å, are smaller than that spread because the blocking estimate had not reached a plateau (`lattice_error_resolved` is false); they are lower bounds. Only the 500 K run passes the pressure screen at 4000 steps (see ).
+
+To see what the run length leaves in `a`, the 600 K system was run with eight seeds at 4000 steps and four seeds at 40000 steps, 2000 discarded in both, with the settings above. The means are 3.650662 Å (spread 0.000606 Å, standard error 0.000214 Å) and 3.650629 Å (spread 0.000161 Å, standard error 0.000081 Å). They differ by 0.00003 ± 0.00023 Å, so the run length leaves no bias that this comparison can resolve, and none of the four 40000 step runs misses the pressure screen. `cargo test --release --test mishin_cu npt_lattice_run_length -- --ignored --nocapture` repeats it.
+
+The table before this one read 3.62831, 3.63371, 3.63867, 3.64416 and 3.64979 Å. Those runs left the kinetic pressure out of the barostat, which accounts for most of the 0.004 Å offset it showed. Benchmark files and figures produced with the older lattice constants are stale until they are rerun. `cargo test --release --test mishin_cu npt_lattice_table -- --ignored --nocapture` regenerates the table.
+
+Climbing L-BFGS follows the highest image. On the copper band that image was a collision left by the initial path, and the step ran up the wall; the NEB guards drop such a step and do not make it the saddle. The band used here relaxes with FIRE and climbing off, then climbs. A path is kept only when the force is at most 0.01 eV/Å and the zero-temperature integral of the path force reproduces ΔE0.
+
+The path integral is the line integral of ∇E along the polyline through the images. A cubic spline between those images cut the corner off a curved saddle, and the rotation integral came out 14 meV low. On the polyline, ΔE0 and the zero-temperature integral differ by at most 0.0053 eV over 122 rated translation hops on the 8×8×8 cell. The free dumbbell's rotation was not found by the seeds used here, so its ΔF is still not stored.
+
+The free dumbbell translation on the 8×8×8 cell has ΔE0 = 0.090966 eV at the 500 K lattice and 0.094614 eV at the 300 K lattice. The zero-temperature integrals are 0.089934 eV and 0.093511 eV. PAFI gives ΔF(500 K) = 0.094013 ± 0.009186 eV, rate 1.442×10<sup>11</sup> Hz, and ΔF(300 K) = 0.092507 ± 0.005543 eV, rate 3.383×10<sup>10</sup> Hz. The rotation seeded from the ⟨110⟩ guess has ΔE0 = 0.233710 eV at 500 K (integral 0.226944 eV, 6.8 meV low, inside the gate) and ΔE0 = 0.236061 eV at 300 K (integral 0.231614 eV). ΔF(300 K) = 0.201437 ± 0.008689 eV, rate 4.597×10<sup>8</sup> Hz. ΔF(500 K) = 0.164418 ± 0.016586 eV; that error is above 0.01 eV, so the 500 K rotation rate is not within the requested tolerance.
+
+Away from the vacancy, same cell:
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-right">shell / Å</th>
+<th scope="col" class="org-right">orientation</th>
+<th scope="col" class="org-right">T / K</th>
+<th scope="col" class="org-right">ΔE0 / eV</th>
+<th scope="col" class="org-right">zero-T / eV</th>
+<th scope="col" class="org-left">ΔF / eV</th>
+<th scope="col" class="org-left">rate / Hz</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-right">3.639</td>
+<td class="org-right">010</td>
+<td class="org-right">500</td>
+<td class="org-right">0.135159</td>
+<td class="org-right">0.135251</td>
+<td class="org-left">0.167277 ± 0.008010</td>
+<td class="org-left">1.257×10<sup>10</sup></td>
+</tr>
+
+<tr>
+<td class="org-right">3.639</td>
+<td class="org-right">010</td>
+<td class="org-right">300</td>
+<td class="org-right">0.152723</td>
+<td class="org-right">band 0.022 eV/Å</td>
+<td class="org-left">not converged</td>
+<td class="org-left">&#xa0;</td>
+</tr>
+
+<tr>
+<td class="org-right">4.456</td>
+<td class="org-right">100</td>
+<td class="org-right">500</td>
+<td class="org-right">0.097864</td>
+<td class="org-right">0.097406</td>
+<td class="org-left">0.103069 ± 0.006027</td>
+<td class="org-left">not stored</td>
+</tr>
+
+<tr>
+<td class="org-right">4.456</td>
+<td class="org-right">100</td>
+<td class="org-right">300</td>
+<td class="org-right">0.102482</td>
+<td class="org-right">0.101183</td>
+<td class="org-left">0.096599 ± 0.004190</td>
+<td class="org-left">not stored</td>
+</tr>
+
+<tr>
+<td class="org-right">5.146</td>
+<td class="org-right">001</td>
+<td class="org-right">500</td>
+<td class="org-right">0.095942</td>
+<td class="org-right">0.094687</td>
+<td class="org-left">0.100562 ± 0.007883</td>
+<td class="org-left">9.066×10<sup>10</sup></td>
+</tr>
+
+<tr>
+<td class="org-right">5.146</td>
+<td class="org-right">001</td>
+<td class="org-right">300</td>
+<td class="org-right">0.099501</td>
+<td class="org-right">0.098056</td>
+<td class="org-left">0.098318 ± 0.004404</td>
+<td class="org-left">1.405×10<sup>10</sup></td>
+</tr>
+</tbody>
+</table>
+
+The 4.456 Å attempt frequency is stored (2.132×10<sup>12</sup> Hz at 500 K, 2.150×10<sup>12</sup> Hz at 300 K). The transmission coefficient was not accepted, so `rate_Hz` is empty. A second away channel at 4.456 Å, ΔE0 = 0.0861 eV, was not sampled.
+
+Seeded dimers from the bound pair, at least 32 per orientation, find the short capture saddles. The earlier 0.41 eV and 0.49 eV figures were maxima on a band stretched across the whole 4 eV drop; they are not these saddles. At 2.573 Å, orientations 100 and 010 recombine on relaxation. Orientation 001 has index-1 saddles from −0.188 eV to +0.013 eV. The band on the +0.001178 eV saddle reaches 0.00193 eV/Å, the path integral is 0.000000 eV, and PAFI gives ΔF(500 K) = 0.020074 ± 0.006302 eV, κ = 0.396, rate 1.202×10<sup>11</sup> Hz. ΔF(300 K) = 0.011323 ± 0.003939 eV, κ = 0.402; the attempt frequency was not obtained, so that rate is empty. At 3.639 Å, orientation 010, one index-1 saddle is 0.124824 eV, the segment integral is 0.145100 eV, and the band force is 0.00857 eV/Å, above the 0.002 eV/Å target. Orientations 100 and 001 produced no recombination saddle in 32 seeds. At 4.456 Å, orientation 100, the index-1 saddles are 0.004516, 0.007719 and 0.016627 eV. The band on the lowest has integral 0.000041 eV and force 0.00809 eV/Å, so it is not converged. Orientation 010 produced no index-1 saddle. At 5.146 Å, orientation 100 recombines on relaxation. Orientation 001 has a converged saddle, ΔE0 = 0.071269 eV, integral 0.064164 eV, force 0.00155 eV/Å. PAFI gives ΔF(500 K) = 0.053000 ± 0.008588 eV, κ = 0.441, rate 2.809×10<sup>11</sup> Hz, and ΔF(300 K) = 0.054596 ± 0.005527 eV, κ = 0.441, rate 1.184×10<sup>11</sup> Hz. Against the stored away rates those ratios are 3.098 at 500 K and 8.430 at 300 K. The 3.639 Å away hop at 300 K is still not converged (ΔE0 = 0.152015 eV, band force 0.02909 eV/Å). Rows are `benchmarks/defect_pair_local.csv`.
+
+The 4.456 Å away channels now have rates. At 500 K the 0.097864 eV barrier has ΔF = 0.105967 ± 0.009985 eV, κ = 0.318, rate 5.707×10<sup>10</sup> Hz, and a second copy of the same barrier has ΔF = 0.105276 ± 0.008774 eV, κ = 0.081, rate 1.482×10<sup>10</sup> Hz. The 0.086099 eV barrier has ΔF = 0.089060 ± 0.009150 eV, κ = 0.0146, rate 3.636×10<sup>9</sup> Hz, and a second copy has ΔF = 0.086222 ± 0.006931 eV, κ = 0.579, rate 1.542×10<sup>11</sup> Hz. The rotation at 500 K is ΔF = 0.186186 ± 0.010313 eV, rate 1.435×10<sup>10</sup> Hz. That error is 0.3 meV over the 0.01 eV target. The 3.639 Å away hop at 300 K did not converge: ΔE0 = 0.152723 eV and the band force is 0.02997 eV/Å. No capture rate was stored, so no capture-to-away ratio is reported. The rows are `benchmarks/defect_pair_finish.csv`.
+
+Table 1 of the accepted manuscript, volumes in Ω, α-method then β-bar method. The prose of that manuscript says 5312 and 6924 atoms where the table says 5324 and 6912; 4n³ is 5324 and 6912.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-right">T / K</th>
+<th scope="col" class="org-right">cell</th>
+<th scope="col" class="org-left">α</th>
+<th scope="col" class="org-left">β-bar</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-right">300</td>
+<td class="org-right">8788</td>
+<td class="org-left">254±21</td>
+<td class="org-left">286±28</td>
+</tr>
+
+<tr>
+<td class="org-right">400</td>
+<td class="org-right">8788</td>
+<td class="org-left">212±12</td>
+<td class="org-left">210±20</td>
+</tr>
+
+<tr>
+<td class="org-right">500</td>
+<td class="org-right">4000</td>
+<td class="org-left">309±18</td>
+<td class="org-left">287±34</td>
+</tr>
+
+<tr>
+<td class="org-right">500</td>
+<td class="org-right">5324</td>
+<td class="org-left">169±17</td>
+<td class="org-left">180±20</td>
+</tr>
+
+<tr>
+<td class="org-right">500</td>
+<td class="org-right">6912</td>
+<td class="org-left">188±11</td>
+<td class="org-left">191±19</td>
+</tr>
+
+<tr>
+<td class="org-right">500</td>
+<td class="org-right">8788</td>
+<td class="org-left">185±23</td>
+<td class="org-left">161±15</td>
+</tr>
+
+<tr>
+<td class="org-right">500</td>
+<td class="org-right">16384</td>
+<td class="org-left">202±13</td>
+<td class="org-left">206±22</td>
+</tr>
+
+<tr>
+<td class="org-right">600</td>
+<td class="org-right">4000</td>
+<td class="org-left">218±13</td>
+<td class="org-left">238±22</td>
+</tr>
+
+<tr>
+<td class="org-right">600</td>
+<td class="org-right">5324</td>
+<td class="org-left">170±8</td>
+<td class="org-left">177±15</td>
+</tr>
+
+<tr>
+<td class="org-right">600</td>
+<td class="org-right">6912</td>
+<td class="org-left">198±10</td>
+<td class="org-left">203±20</td>
+</tr>
+
+<tr>
+<td class="org-right">600</td>
+<td class="org-right">8788</td>
+<td class="org-left">186±14</td>
+<td class="org-left">191±18</td>
+</tr>
+
+<tr>
+<td class="org-right">600</td>
+<td class="org-right">16384</td>
+<td class="org-left">183±9</td>
+<td class="org-left">194±18</td>
+</tr>
+
+<tr>
+<td class="org-right">700</td>
+<td class="org-right">8788</td>
+<td class="org-left">203±10</td>
+<td class="org-left">210±21</td>
+</tr>
+</tbody>
+</table>
+
+Spontaneous recombination was scanned for every placement out to 10.6 Å on 8×8×8 (2048 sites) and 10×10×10 (4000 sites), at each of the five lattice parameters, with the dumbbell along x. A shell splits into orbits under the dumbbell's symmetry; the Miller column of `benchmarks/defect_pair_shells.csv` is the orbit's representative with the first index along the dumbbell axis. Each placement is followed down the steepest-descent flow by ODE12r to 1e-3 eV/Å and counts as recombined when `site_occupancy` finds every site singly occupied. Steepest descent under a 0.02 Å cap repeats every placement: the two agree on all 440, with end states within 4.6×10⁻⁴ Å in gap and 1.9×10⁻³ Å in separation (stated tolerance 0.02 Å). ODE12r took at most 389 steps and steepest descent at most 1047; the scan took 21.5 min on 8 threads. The two cells agree at every temperature. The recombining orbits are 8 of the 12 first neighbors (1 1 0), the 2 sites of 3.63–3.65 Å along the axis (2 0 0), 16 of the 24 sites near 4.45 Å (1 2 1), 8 of the 12 near 5.14 Å (2 2 0) and 8 of the 36 near 7.70 Å (3 3 0), 42 sites. At 300 and 400 K the 4 sites of 3.63 Å perpendicular to the axis (0 2 0) recombine too, 46 sites; at 500–700 K the flow from them ends in a bound pair 3.55–3.58 Å from the vacancy with a 2.20 Å gap. That orbit sits near a basin boundary. Converged FIRE and L-BFGS each disagree with the flow on some lattices: FIRE gives 42 sites everywhere except 46 on 10×10×10 at 300 and 400 K, and L-BFGS gives 42 everywhere except 46 on 8×8×8 at 500 K. Their count is a property of the minimizer, so neither is used. The earlier counts stopped each placement after 60 FIRE steps and read a dumbbell gap outside 1.2–2.5 Å as recombination: 24 sites at 300–600 K and 30 at 700 K with rgmin 0.5.2, and 54 at 300 K and 30 at 400–700 K with rgmin 0.6.0. Truncation left placements in transit; the 7.70 Å orbit takes 213–251 ODE12r steps to recombine. 12×12×12 and 14×14×14 were not run. 46 or 42 sites is the orientation-resolved spontaneous count. It is not Table 1. The isolated rates are `benchmarks/defect_pair_cu.csv`.

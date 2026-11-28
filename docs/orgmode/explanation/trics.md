@@ -1,0 +1,145 @@
+TRICS constructs a molecular path in internal coordinates while changing
+coordinate systems before an angle or dihedral becomes singular.  The method
+is due to Park, Song, and Wang.  The implementation follows the algorithmic
+ideas in the BSD licensed geomeTRIC reference implementation without
+including its source.
+
+
+# Translation rotation internal coordinates
+
+For a fragment, the primitive vector $p(x)$ contains bond distances,
+angles, dihedrals, three mean translations, and three rotations relative to
+the reference geometry.  Its Wilson matrix and metric are
+
+$$
+B_p = \frac{\partial p}{\partial x}, \qquad G_p = B_p B_p^{\mathsf T}.
+$$
+
+Let $U$ contain the eigenvectors of $G_p$ whose eigenvalues pass the
+configured absolute rank threshold.  The nonredundant TRIC coordinates and
+their Wilson matrix are
+
+$$
+q = U^{\mathsf T}p, \qquad B_q = U^{\mathsf T}B_p.
+$$
+
+The translation and rotation coordinates keep disconnected fragments in the
+same coordinate construction.  Fragment rotations are scaled by the
+fragment radius of gyration.  Ordinary angles switch to two linear bend
+directions at 155 degrees, matching the angular warning threshold.  Out of
+plane primitives complete suitable three connected centers.
+
+Bonds extended through every linear angle at either end form atom lines.  A
+torsion about a line is a dihedral whose two central atoms lie on the line
+and whose terminal atoms are bonded off it, so the twist of an allene is
+carried across its linear center.  No dihedral is built with a linear angle,
+and a line with no atoms bonded off both ends, such as acetylene, carries no
+dihedral at all.
+
+
+# Stability diagnostic
+
+A separate TRIC system $Q_i$ is built at each initial image $x_i$.  The
+diagnostic matrix evaluates each system on every image,
+
+$$
+D_{ij} = \max_{\alpha \in Q_i} d_\alpha(x_j).
+$$
+
+Here $d_\alpha$ is zero for a regular primitive, one for a warning, two for
+an unstable angular primitive, and three or above for imminent failure.
+Distances, translations, and rotations are regular unless their geometry is
+invalid.  Dihedrals use adjacent angle boundaries of 155, 165, and 175
+degrees.  Linear bends use absolute cosine boundaries of 0.8, 0.6, and 0.4.
+Out of plane coordinates use 0.95, 0.98, and 0.99 for each adjacent angle
+and add the two scores, so their diagnostic can reach six.
+
+Entries at or below `diagnostic_threshold` form an internal coordinate maze.
+The selection prunes dead ends, drives square cars from both the left and
+right edges, minimizes the number of segments, and then chooses the largest
+successful car.  The splice width is the next even integer nearest one tenth
+of the image count, bounded from two through six.  Short segments are merged
+before each segment is expanded by half that width.  A segment is
+interpolated only in a coordinate system whose diagnostic stays at or below
+`diagnostic_threshold` on every image of the expanded segment, so a threshold
+of zero or one never admits a level two system.
+
+
+# Segment interpolation and inversion
+
+Inside one stable interval, the internal displacement is divided uniformly,
+
+$$
+q(t_k) = q(0) + t_k\Delta q,\qquad
+t_k = \frac{k}{n-1}.
+$$
+
+Each image is recovered iteratively.  With internal residual $r$, one
+Cartesian update is
+
+$$
+\Delta x = B_q^{\mathsf T}
+           (B_q B_q^{\mathsf T})^{-1}r.
+$$
+
+The largest atom move is bounded by `TricInversionConfig::max_atom_move`.
+An update that increases the residual, or that lands where a primitive or
+its Wilson row is singular, is rejected and retried at half damping.
+Accepted updates increase damping by a factor of 1.2 up to one.  Five
+consecutive rejected updates, a damped step below tolerance, or reaching the
+iteration cap above tolerance returns a solver error.  A start geometry or
+segment endpoint at which the system is singular is also a solver error,
+as is a diagnostic maze with no stable route.
+Following the reference implementation, the aligned Cartesian endpoint must
+be within 0.01 Angstrom.  The implementation tries the reverse direction and
+alternate stable coordinate systems when a candidate does not converge.
+
+
+# Splicing and concatenation
+
+Write $\chi_s(x_a,x_b,t_a,t_b;t)$ for interpolation at $t$ in segment
+system $s$.  For two overlapping segments, their endpoint iteration is
+
+$$
+x_a \leftarrow \chi_1(x_b,x_1,t_b,1;t_a), \qquad
+x_b \leftarrow \chi_0(x_0,x_a,0,t_a;t_b).
+$$
+
+For splice width $L$, the paired Cartesian geometries are the left
+segment's $-L$ and $-1$ images and the right segment's 0 and $L-1$
+images.  All neighboring pairs are updated from the preceding iteration.
+Splice damping starts at one, decreases by a factor of 0.8 to a floor of 0.2
+after a nondecreasing mismatch, and resets to one after three decreases.
+Iteration stops when the maximum Cartesian displacement of any atom between
+overlapping segment endpoints is at most
+`TricsConfig::splice_tolerance`.  Its default is
+`TRICS_SPLICE_TOLERANCE_ANGSTROM`, $1.8\times10^{-3}$ Angstrom.
+
+The final path takes images from the left segment up to the midpoint of each
+overlap and from the right segment after it.  If one system is stable across
+the whole path, TRICS interpolates once and skips the splice iteration.
+Three images split into two segments of two images that share the middle
+image.  Neither segment has an interior image to place, so TRICS returns
+`SaddleError::Solver` (`RGSADDLE_SOLVER` from C) and does not return the
+unrefined path.  A path of four or more images still splices, because its
+segments then overlap by two images.
+
+The coordinate construction is kept in `rgsaddle::trics` behind an
+engine-independent Cartesian boundary.  It can therefore serve future
+geometry optimizers without coupling `rgsaddle` to a potential engine or
+changing `rgmin`.
+
+
+# Length unit
+
+Every absolute length threshold is stated in angstrom: the splice tolerance,
+the inversion move cap and residual, and the 0.01 Angstrom endpoint agreement
+above.  `TricsConfig::length_per_angstrom` is the length of one angstrom in
+the caller's coordinates (1 by default, 0.1 for nanometres, about 1.8897 for
+bohr).  `trics_path` divides the path by it before the work and multiplies
+the result by it afterwards, and returns the first and last image exactly as
+given, so a path in any unit needs only that one option.  The finite
+difference step of the primitive derivatives is a fraction of the size of the
+atoms it moves and does not depend on the unit.  The Kabsch rotation inside
+the rotation coordinates treats two eigenvalues as equal when they differ by
+a fixed fraction of the largest, so it does not depend on the unit either.

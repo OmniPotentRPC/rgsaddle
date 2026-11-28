@@ -1,0 +1,146 @@
+
+
+# Band and minimum-mode
+
+The band and the minimum-mode search assemble a force and ask `rgmin::Solver` for one step. Hosts interleave trust regions, drift budgets, acquisition, or a hybrid minimum-mode following (MMF) between steps. `run` is a loop over `step`. The shared reflection, the point presets, and the chain are in .
+
+
+# Translation rotation internal coordinates with splicing
+
+builds a nonredundant coordinate
+system at every initial image, selects overlapping stable charts, interpolates
+inside each chart, and splices their endpoints.
+
+
+# Crystal symmetry regions
+
+The operation lifting, the split between path multiplicity and in-plane
+region degeneracy, and the nearest-image convention are described in
+.
+
+
+# Exact PAFI and OH-TST references
+
+records how the tests compute deterministic quadrature and mean-first-passage references for PAFI and OH-TST validation.
+
+
+# PAFI, OH-TST and harmonic TST
+
+All three turn a saddle or a dividing surface into a rate; they differ in which dividing surface they use and whether they sample a transmission coefficient for it, not in the underlying transition-state-theory picture. has the equations, the assumptions behind each, and when to reach for one over another.
+
+
+# Index-1 Newton
+
+`Index1Session` searches an index-1 saddle on a Cartesian energy Hessian. The displacement is Baker's restricted-step partitioned RFO: a 2 by 2 rational-function problem maximizes the lowest mode, a second rational-function problem minimizes the complement, and the Besalu-Bofill scaling is solved so the Cartesian step lies inside the trust sphere. Powell or Bofill updates the Hessian from the gradient difference. The trust radius shrinks when that model predicts the energy change poorly and grows when a step on the sphere agrees with it.
+
+`nichols_step` is the separate i-PI level shift. A host that already holds a spectrum can call it. `rgsaddle_prfo_step` is the restricted-step partition. `rgsaddle_hessian_powell` and `rgsaddle_hessian_bofill` update the Hessian.
+
+
+# Cyclic block factorization
+
+`block_cyclic` factors a cyclic block-tridiagonal matrix whose neighbor coupling is a scalar spring.
+The rotation fallback, the `SaddleError::Singular` criterion, the symmetric part of each diagonal block, and the residual norm are in .
+Each public item is in .
+
+
+# eOn branch structure
+
+Tangents, springs, projections, and the climbing-image force follow eOn's `NEBTangent` / `NEBSpringForce` / `NEBForceProjection` with the same branches. The climbing image arms when the convergence force falls under `factor * baseline` or under an absolute trigger.
+
+
+# Simplified string
+
+E, Ren, and Vanden-Eijnden, J. Chem. Phys. 126, 164103 (2007), https://doi.org/10.1063/1.2720838 , replace the tangent projection and spring forces of NEB with an operator split on the equal-arc-length curve manifold.
+Each step evolves the interior images under the full potential force $-\nabla V(x_i)$ and then reparametrizes the chain to equal arc length $\mathcal{R}(x_{\mathrm{evol}})$, on the not-a-knot cubic spline (`Reparametrization::NotAKnot`) or on the polyline (`Reparametrization::Linear`).
+Because moving along the tangent of a curve and reparametrizing back to equal arc length cancels the tangential component to first order in the step size, the fixed point $\mathcal{R}(\mathcal{E}(x^*)) = x^*$ satisfies $\nabla V(x)^\perp = 0$ up to the spline or polyline interpolation order without estimating tangents on non-climbing images.
+At any finite image count the discrete fixed point has $x^{n+1} - x^n = 0$ while a chord projection of $\nabla V$ carries the interpolation residual, so convergence and `BandEvaluation.projected` measure the effective string velocity $(x^{n+1} - x^n) \lVert F_{\mathrm{evol}} \rVert_2 / \lVert \Delta x_{\mathrm{evol}} \rVert_2$ in force units.
+`BandStatus::Converged` requires that velocity to meet `force_tol` on two consecutive accepted string steps. A single under-tolerance step can be a transient of the optimizer/reparametrization split; requiring the next step to confirm it prevents a report whose accepted path immediately returns above tolerance.
+When `BandConfig::climbing` arms an interior image, that image reflects $-\nabla V$ along the path tangent and stays anchored during $\mathcal{R}$, so each side is spaced at equal arc length on its own while the climbing image converges to $\nabla V = 0$.
+For `L-BFGS` the secant pairs $(s_n, y_n)$ are taken across the reparametrized displacement $s_n = x^{n+1} - x^n$, which keeps the initial inverse-Hessian scale $s_n \cdot y_n / \lVert y_n \rVert^2$ on the transverse valley curvature; for `FIRE`, `QuickMin`, `Bb`, and `ODE12r` that same transverse Rayleigh step bounds the solver time step so `BandConfig::default()` settles without knowing the surface stiffness in advance.
+When a linearly interpolated guess between reactant and product crosses a rugged region far from the minimum energy path, `GrowingStringSession` (Peters, Heyden, Bell, and Chakraborty, J. Chem. Phys. 120, 7877 (2004), https://doi.org/10.1063/1.1691018 ) grows reactant and product string fragments inward under frontier tangent constraints and separate fragment relaxation until the fragments meet, then hands off to `StringSession` with image IDs and batched evaluations preserved.
+
+
+# Periodicity
+
+Positions stay unwrapped Cartesian. `Cell` wraps per-atom differences for the band mechanics through fractional coordinates (rows are lattice vectors; a zero row is a non-periodic axis). Neighbor lists, when a surface wants them, are vesin's job.
+
+The point-defect finite-cell correction is described in .  It uses `linkcell::Cell` / minimage for the defect separation, Barnett's anisotropic Green function, and a spherical periodic-image order with an explicit error estimate.
+
+
+# The solid-state reference cell
+
+The solid-state band is checked against an answer computed without a band. The case is the Bain path from bcc to fcc of LJ (epsilon 1 eV, sigma 1 A), switched to zero over [2.0, 2.2] A. Both atoms of the body-centred tetragonal cell diag(a, a, c) sit on inversion centres, so the atomic force is zero at any cell. The relaxed energy at fixed c/a is then a one-dimensional minimum over the volume. `validation/bain_lj_reference.py` scans it on a 2.5e-4 grid. bcc and fcc are minima, and the saddle sits at c/a 1.09331985, 0.0590356373 eV/atom above bcc. Over the six cell strains that saddle has one negative eigenvalue.
+
+The saddle is not stable against atomic motion. The phonon at k = (1/2, 0, 1/2) of the conventional cell has the eigenvalue -51.5 eV/A<sup>2</sup> there, and it shuffles alternate planes. The two-atom cell carries no wave vector but k = 0, so in that cell the scan's saddle is the band's saddle. A supercell does carry the shuffle. A 5x5x4 supercell (200 atoms) has k = (2/5, 0, 1/2), with eigenvalue -38.4 eV/A<sup>2</sup>. Its band, run with the settings of the two-atom test and a tolerance of 1e-3, shows the instability:
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-right">iteration</th>
+<th scope="col" class="org-right">largest force component</th>
+<th scope="col" class="org-left">climbing image</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-right">150</td>
+<td class="org-right">4.6e-3</td>
+<td class="org-left">c/a 1.0933, the scan saddle</td>
+</tr>
+
+<tr>
+<td class="org-right">200</td>
+<td class="org-right">3.19</td>
+<td class="org-left">cells shear, a and b part</td>
+</tr>
+
+<tr>
+<td class="org-right">947</td>
+<td class="org-right">8.9e-4 (converged)</td>
+<td class="org-left">c/a 1.0523, 0.0266 eV/atom above bcc</td>
+</tr>
+</tbody>
+</table>
+
+At convergence the cells carry a shear of 0.233 A, a and b differ by 0.065 A, and the atoms sit up to 0.031 (fractional) off their sites. Rounding seeds the shuffle. The band then follows it to a lower path, as an NEB should, and the scan is no reference for that cell. `tests/c/solid_bain_lj.c` therefore checks the two-atom cell. There the climbing image reaches c/a 1.09331984 and 0.0590356373 eV/atom. Run with arguments `5 5 4 7 1e-3 5000 0.1 0.5`, it reproduces the supercell run and fails its tetragonal-path check by design.
+
+
+# Evaluations per step
+
+A warm band step costs `n_images - 2` image evaluations, twice that when FIRE 2.0 backs up half a time step after an uphill move and takes the force at the corrected point. The endpoint energies are evaluated once. The session keeps its last evaluation, keyed on the interior positions, so a step that starts where the previous one ended is assembled from it: a host resync through `set_positions` (rows equal up to the minimum image keep the session's own copy), an optimizer `restart`, or a solver that dropped its own cache costs nothing. `BandReport.surface_rows` counts what the surface evaluated. The climbing image is chosen on the energies of the evaluation it climbs on, so the step that arms it already climbs. The converged step also counts the image evaluations of the saddle-index check.
+
+
+# Saddle index
+
+The climbing image of the OCI-NEB of Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), https://doi.org/10.3389/fchem.2026.1807063, and the min-mode search, the dimer that Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), https://doi.org/10.1021/acs.jctc.5c00866, accelerate with a Gaussian process, each follow one mode.
+Here both converge where the force vanishes and the curvature along that mode is negative.
+That holds at a saddle of any index whose other negative modes the force never excites, as on a band that keeps a symmetry of its start.
+The index-1 saddle that Gould, Ortner, and Packwood, Math. Comp. 85, 2939 (2016), https://doi.org/10.1090/mcom/3096, analyse is positive definite off its one negative mode, and eOn fails a process search whose prefactor Hessian at the saddle has any other count.
+The check counts the negative curvatures at the converged point without a full Hessian.
+Block Lanczos with full reorthogonalization grows a Krylov space from the search's mode and pseudo-random vectors, one finite-difference action per vector, and stops once the lowest few Ritz pairs and the first non-negative one past the negatives meet a residual.
+The Ritz values bound the eigenvalues of the symmetrized operator from above, one by one, so the count of negative Ritz values never exceeds its index.
+A small residual puts each listed Ritz value within that residual of an eigenvalue; the pseudo-random start makes a missed lower eigenvalue unlikely, not impossible.
+The random vectors matter: a space grown from a symmetric mode alone stays symmetric and never sees the modes that break the symmetry.
+On the 84 free coordinates of the slab in `howto/band`, the certificate of the index-3 point took 58 to 60 actions and that of the index-1 saddle 70, where a central-difference Hessian takes 168 gradients.
+The escape follows Yin, Wang, Chen, Zhang, and Zhang, Phys. Rev. Lett. 124, 090601 (2020), https://doi.org/10.1103/PhysRevLett.124.090601: from an index-k saddle, a push along unstable directions leads to saddles of lower index, and the restarted search maximizes along the kept mode only, the index-1 case of Yin, Zhang, and Zhang, SIAM J. Sci. Comput. 41, A3576 (2019), https://doi.org/10.1137/19M1253356.
+
+
+# Steppers
+
+FIRE is the default, as in eOn's velocity NEB stepper. The projected NEB force is not the gradient of the summed image energy the oracle reports, so L-BFGS runs under rgmin's `Accept::Step`: the two-loop direction, capped per atom, with one evaluation and no energy test.
+
+
+# Minimum mode
+
+The dimer rotation is the modified Newton step of Heyden, Bell, and Keil (2005) and Kastner and Sherwood (2008): one trial gradient fixes the Fourier model of the curvature in the rotation plane, the optimal angle is closed form, and the gradient at the rotated dimer is the exact (on a quadratic) combination of the two measured ones, so each rotation costs one evaluation. Rotation planes are Polak-Ribiere conjugate, and the force and direction of a finished rotation are kept for the next centre. A repeated estimate at the same centre, `set_mode`, and `reset` start that sequence again. A failed surface callback leaves the retained pair unchanged. In Rust, a `MinModeConfig` with `rotation_tol < 1e-4` drops the default five-degree dimer angle stop unless `with_rotation_angle_tol` set it explicitly. Lanczos reads `rotation_tol` as a dimensionless tolerance, its lowest Ritz residual divided by the absolute Ritz value, and, when `set_lanczos_rel_tol` is unset, as its relative Ritz-value tolerance. A Ritz value whose magnitude is at most 1e-14 of the curvature scale, the largest Hessian action norm the estimate has formed, has no magnitude of its own, so the residual is divided by that scale and the quotient is never formed. Only in that unset case and with `rotation_tol >= 1e-4` does it infer the classic torque window, which stops once two vectors leave that same ratio under 1, dividing by the same scale when the Ritz value is that small. Those two span the plane of a steepest-descent dimer rotation, and their Ritz vector is the dimer turned to the lowest curvature in it (Zeng, Xiao, and Henkelman, J. Chem. Phys. 140, 044115 (2014), https://doi.org/10.1063/1.4862410). Both use the forward difference against the centre gradient by default; `validation/fd_curvature.py` gives its error, `dr |T| / 2 + 2 eps / dr`, and the `dr` that minimizes it for a given gradient noise. `FiniteDifference::Central` trades one more gradient per action for an `O(dr^2)` error.
+
+The translation steps on the inverted force, whose value (the true energy) is not its potential, as the band's pseudo-energy is not the potential of the projected force. Both sessions accept only methods that step on the force alone (FIRE, L-BFGS under `Accept::Step`, Barzilai-Borwein) and refuse line-searched ones. Between steps the solver's cached force, inverted along the previous mode, is dropped (rgmin `forget_evaluation`) and the centre answers the re-read without a surface call. A turn inside `MODE_RESET_ANGLE` (45 degrees, the Householder cone of Goswami, Gunde, and Jónsson, Front. Chem. (2026), https://doi.org/10.3389/fchem.2026.1807063; `validation/mode_reset.py`) keeps the L-BFGS pairs and the FIRE velocity. Past that cone the memory is dropped and the FIRE velocity returns to zero. FIRE opens at timestep 1.0 with a ceiling of 2.5 (Bitzek, Koskinen, Gähler, Moseler, and Gumbsch, Phys. Rev. Lett. 97, 170201 (2006), https://doi.org/10.1103/PhysRevLett.97.170201). When the per-atom cap shortens a negative-curvature step and the arrival is no longer negative, the move is replaced from the last negative point by `0.01 F`. A capped step that stays negative is kept. A non-negative curvature takes one step along the mode on which the largest atom moves `max_move`, eOn's `maxAtomMotionAppliedV` in its FIRE and L-BFGS steppers. Under `set_cg_translate` that step has Euclidean norm `max_move`, the single step of eOn's conjugate gradients. When the parallel gradient is within half that step of the minimum of the parabola along the mode, the climb keeps the mode's orientation.

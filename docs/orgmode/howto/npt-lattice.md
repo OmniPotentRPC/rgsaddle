@@ -1,0 +1,202 @@
+`npt_lattice` samples the lattice parameter of a cubic crystal under isotropic Langevin dynamics. The default barostat is stochastic cell rescaling, which samples the isotropic NPT ensemble. `NptBarostat::Berendsen` is opt-in and is for equilibration only: its volume distribution depends on the coupling time and is not the NPT ensemble, and the report then carries no fluctuation statistics. The sampled lattice is what a finite-temperature calculation needs before it builds a cell, such as the copper validation in `howto/defect-pair-rates`. The module is `npt`. It holds `NptConfig`, `NptBarostat`, `NptReport` and `npt_lattice`, and all four are re-exported at the crate root.
+
+
+# What the run does
+
+The caller passes the Cartesian `positions`, the row-major `Cell`, a temperature, a mass and an evaluator. The evaluator returns `(energy, gradient, stress)` for a position and a cell, with the stress a tension-positive Cauchy stress. Energy is accepted for compatibility and unused. Units follow `BOLTZMANN_EV_PER_K` and `angular_scale_rad_s`: eV, Å and amu, with times in seconds in the configuration.
+
+Each step evaluates the surface twice, once at the start for the first half step and once after the thermostat for the second, so a run of `S` steps makes `2 S` evaluations. The rescaling at the end of a step changes the positions and the cell, which is why the first evaluation of the next step cannot reuse the previous one. Each step is a velocity-Verlet half step, an Ornstein-Uhlenbeck thermostat step with the centre-of-mass momentum removed, the second half step, and a barostat rescaling of the cell and the positions. Stochastic cell rescaling (Bernetti and Bussi, J. Chem. Phys. 153, 114107 (2020), https://doi.org/10.1063/5.0020514) takes their equation 5: the Berendsen drift of the log volume, plus a noise whose variance is fixed by the compressibility and the coupling time. The positions and the cell are multiplied by the exponential of one third of that increment, and the velocities are divided by the same factor, because the pressure uses the instantaneous kinetic energy. The sampled volume variance does not depend on the coupling time. `NptBarostat::Berendsen` instead multiplies the volume by a factor limited to 0.5 per cent and does not scale the velocities. The pressure that drives the barostat and that the report carries is the kinetic pressure `2 K / (3 V)` minus a third of the trace of the stress. Leaving the kinetic term out would sample the cell where the configurational stress vanishes instead of the zero-pressure cell. `tests/npt_lattice.rs` checks the kinetic term against an ideal gas, which reads `(N - 1) k T / V` once the centre-of-mass momentum is removed, against atoms tethered to cell-scaled sites, whose total pressure is zero at every volume, and against a Lennard-Jones fluid, whose volume variance is the same at two coupling times and whose compressibility matches the volume-fluctuation formula.
+
+
+# Configuration
+
+`NptConfig` is non-exhaustive. Start from `NptConfig::default()` and chain the `with_*` setters.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">Field</th>
+<th scope="col" class="org-left">Setter</th>
+<th scope="col" class="org-left">Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>repeats</code></td>
+<td class="org-left"><code>with_repeats</code></td>
+<td class="org-left">6, conventional cells per lattice vector, so the reported lattice parameter is the cube root of the volume over this</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>steps</code></td>
+<td class="org-left"><code>with_steps</code></td>
+<td class="org-left">4000, the first run length</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>maximum_steps</code></td>
+<td class="org-left"><code>with_maximum_steps</code></td>
+<td class="org-left">4000, the longest run after extensions</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>extension_steps</code></td>
+<td class="org-left"><code>with_extension_steps</code></td>
+<td class="org-left">1000, added when the pressure screen is not met</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>equilibration_steps</code></td>
+<td class="org-left"><code>with_equilibration_steps</code></td>
+<td class="org-left">2000, discarded before statistics</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>block_steps</code></td>
+<td class="org-left"><code>with_block_steps</code></td>
+<td class="org-left">250, the length of one reported block</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>timestep_s</code></td>
+<td class="org-left"><code>with_timestep_s</code></td>
+<td class="org-left">2e-15</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>langevin_gamma_per_s</code></td>
+<td class="org-left"><code>with_langevin_gamma_per_s</code></td>
+<td class="org-left">1e12</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>barostat</code></td>
+<td class="org-left"><code>with_barostat</code></td>
+<td class="org-left"><code>NptBarostat::StochasticCellRescaling</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>berendsen_tau_s</code></td>
+<td class="org-left"><code>with_berendsen_tau_s</code></td>
+<td class="org-left">0.5e-12, the pressure coupling time of whichever <code>barostat</code> is selected</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>compressibility_per_ev_a3</code></td>
+<td class="org-left"><code>with_compressibility_per_ev_a3</code></td>
+<td class="org-left">1 / 0.87</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>target_pressure_ev_a3</code></td>
+<td class="org-left"><code>with_target_pressure_ev_a3</code></td>
+<td class="org-left">0</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>seed</code></td>
+<td class="org-left"><code>with_seed</code></td>
+<td class="org-left">11</td>
+</tr>
+</tbody>
+</table>
+
+The call needs at least two blocks of `block_steps` in the production part of `steps`, finite positive controls (the target pressure only has to be finite, and may be negative), and `steps <= maximum_steps`; otherwise it returns `SaddleError::Invalid`. `block_steps` sets `NptReport::blocks`, the number of complete blocks, and that floor. It does not set the standard errors.
+
+
+# What the call refuses
+
+Every refusal happens before the first evaluation, and leaves `positions` and `cell` as they were.
+
+-   A single atom returns `SaddleError::Invalid`. The thermostat removes the centre-of-mass momentum, which leaves `3 (N - 1)` thermal degrees of freedom, so one atom would sit at rest at any temperature and report a converged zero pressure. This holds at zero temperature as well.
+-   A control that is NaN or infinite, or whose value in internal units overflows or underflows, returns `SaddleError::Invalid`.
+-   A NaN or infinity in `positions` or in the cell returns `SaddleError::NonFinite`, and a cell whose volume is zero returns `SaddleError::Invalid`, since the kinetic pressure divides by the volume.
+-   A cell that is not cubic returns `SaddleError::Invalid`. The edges must be equal and orthogonal to a relative tolerance of 1e-8. Outside that tolerance the call is refused. It does not report `cbrt(volume) / repeats` for a cell that is not a cube. A rotated cube, with equal orthogonal edges, is accepted.
+-   An `extension_steps` that cannot be added to the step counter without overflow returns `SaddleError::Invalid` before the first evaluation. A wrapped counter would skip the final checkpoint and return an earlier report.
+
+A value that turns non-finite during the run is an error too: the evaluator's gradient or stress, the volume, the pressure, the barostat factor and the lattice sample are each checked at every step, and the standard errors are computed only from finite series. A gradient whose length differs from `positions` returns `SaddleError::Shape`. No partial report is returned.
+
+
+# The random stream
+
+The thermostat noise is xoshiro256\*\* (Blackman and Vigna) with its state expanded from the seed by SplitMix64, as the authors prescribe. Every seed, including consecutive ones, therefore starts an unrelated stream, and seed 0 is valid. A stream is a function of the seed alone, so a run is reproducible.
+
+
+# Standard errors
+
+Successive steps of a barostatted run are correlated over many hundreds of steps, so the plain standard error of the steps, or of block means shorter than the correlation time, is too small. `npt_lattice` blocks the per-step series instead (Flyvbjerg and Petersen, J. Chem. Phys. 91, 461 (1989), https://doi.org/10.1063/1.457480). Neighbouring pairs are averaged to double the block length, the standard error of the block means is computed at every level, and the reported value is the largest over the levels that keep at least sixteen blocks. That choice errs high: on 24 uncorrelated series of 16384 values it averaged 1.14 times the plain standard error. The estimator is tested in `src/npt.rs` on autoregressive series whose standard error is known in closed form. At a correlation parameter of 0.995 over 131072 steps the estimate averaged 1.01 times the exact value over 24 seeds, where 250-step block means averaged 0.65 times it.
+
+A standard error is only as good as the run is long against the correlation. `lattice_error_resolved` and `pressure_error_resolved` are true when the last doubling of the block length raised the estimate by no more than its own sampling error, which is the plateau of the blocking curve, and for a series with no spread. When a flag is false the estimate was still rising at the longest block length the run allows, and the standard error is a lower bound. A run of 2000 production steps of the copper cell in `howto/defect-pair-rates` shows it: its lattice standard errors of 0.00004 to 0.00013 Å are unresolved, and eight seeds of that run scatter by 0.0006 Å. Those standard errors are ensemble fluctuations only when `ensemble_fluctuations` is true, which it is for stochastic cell rescaling. For `NptBarostat::Berendsen` the standard errors are zero, both resolved flags are false, and `pressure_converged` is false: the zeros are not a measured variance, and the run continues to `maximum_steps` because the pressure screen needs ensemble errors that this barostat does not produce.
+
+
+# Reading `pressure_converged`
+
+`NptReport::pressure_converged` is true when the pressure error is resolved and the mean pressure is within two standard errors of the target, with a series that has no spread passing only at exactly zero residual. It is indicative. It is a screen, not a proof of equilibrium: it cannot see a drift slower than the run, and a two standard error window passes a real bias about one time in twenty. Read a true as "no evidence of bias at this run length", and read a false as "run longer or look at the spread", not as a failed calculation. The lattice standard error has its own flag and is not part of the screen.
+
+A run that fails the screen extends by `extension_steps` until it passes or reaches `maximum_steps`. The screen is applied again at every extension to a series that has grown, so over a whole run it passes a real bias somewhat more often than the one time in twenty of a single test, another reason to read it as indicative. With the defaults, `maximum_steps` equals `steps`, so no extension happens unless the caller raises the cap.
+
+
+# Runnable example: the pressure of an ideal gas
+
+The example is `examples/npt_lattice.rs`.
+
+```rust
+use ndarray::Array1;
+use rgsaddle::{BOLTZMANN_EV_PER_K, Cell, NptConfig, SaddleError, npt_lattice};
+
+fn main() -> Result<(), SaddleError> {
+    let per_side = 5;
+    let spacing = 4.0;
+    let mut positions = Vec::new();
+    for i in 0..per_side {
+        for j in 0..per_side {
+            for k in 0..per_side {
+                positions.extend([i, j, k].map(|index| index as f64 * spacing));
+            }
+        }
+    }
+    let atoms = positions.len() / 3;
+    let mut positions = Array1::from_vec(positions);
+    let edge = per_side as f64 * spacing;
+    let mut cell = Cell([[edge, 0.0, 0.0], [0.0, edge, 0.0], [0.0, 0.0, edge]]);
+
+    let temperature_k = 300.0;
+    let config = NptConfig::default()
+        .with_repeats(per_side)
+        .with_steps(4_000)
+        .with_maximum_steps(8_000)
+        .with_extension_steps(2_000)
+        .with_equilibration_steps(1_000)
+        .with_compressibility_per_ev_a3(1.0e-12)
+        .with_seed(3);
+    let report = npt_lattice(
+        &mut positions,
+        &mut cell,
+        temperature_k,
+        63.546,
+        config,
+        |x, _| Ok((0.0, Array1::zeros(x.len()), [[0.0; 3]; 3])),
+    )?;
+
+    let ideal = (atoms - 1) as f64 * BOLTZMANN_EV_PER_K * temperature_k / edge.powi(3);
+    println!(
+        "{} steps, pressure {:.4e} +- {:.1e} eV/A^3 (resolved {}), ideal gas {ideal:.4e}",
+        report.steps,
+        report.mean_pressure,
+        report.pressure_standard_error,
+        report.pressure_error_resolved
+    );
+    Ok(())
+}
+```
+
+It prints the pressure of 125 non-interacting atoms against `(N - 1) k T / V`. Run it with `cargo run --release --example npt_lattice`.

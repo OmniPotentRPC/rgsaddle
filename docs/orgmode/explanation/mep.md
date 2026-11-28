@@ -1,0 +1,9 @@
+An intrinsic reaction coordinate follows the gradient in mass-weighted coordinates. With `x_mw = sqrt(m) x`, its tangent is the normalized negative mass-weighted gradient.
+
+The inner steps of both sphere kinds use a moving constraint whose radius is measured in that metric. The displacement and the stored path offset appear together in the constraint, so the sphere is not the unit sphere centred at the coordinate origin. The steps follow the full mass-weighted gradient. Only the launch mode that `from_surface` estimates leaves out the excluded directions of the surface, such as rigid-body motion.
+
+The launch direction is the lowest eigenvector `u` of the mass-weighted Hessian `M^{-1/2} H M^{-1/2}`, taken as the Cartesian displacement `M^{-1/2} u`. A surface that supports Hessian actions can supply it without materializing a dense Hessian. An existing dense Hessian can use the corresponding eigensolver. The host chooses the method and verifies the physical saddle before tracing its branches.
+
+A geodesic initial path (Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), https://doi.org/10.1063/1.5090303) places images by minimizing redundant coordinate length before any potential call. `geodesic_path` does that for a caller supplied chart. It is not itself a minimum energy path.
+
+In unweighted Cartesian coordinates, a minimum energy path between two basins satisfies $\nabla V(x)^\perp = 0$ along the curve. `BandSession` approximates that path either by the nudged elastic band, which projects the potential force perpendicular to a discrete tangent and spaces images with tangential springs, or by the simplified string method of E, Ren, and Vanden-Eijnden, J. Chem. Phys. 126, 164103 (2007), https://doi.org/10.1063/1.2720838 (`StringConfig`), which evolves images under the full potential force $-\nabla V$ and restores equal arc length geometrically on the not-a-knot cubic spline or the polyline after each step.

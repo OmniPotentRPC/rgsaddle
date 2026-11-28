@@ -1,0 +1,221 @@
+
+
+# System prerequisites
+
+-   The current stable Rust with clippy and rustfmt; CI formats, lints and tests with it.
+-   rustup and jq, which the minimum supported Rust version checks below use to install the toolchain that `rust-version` in `Cargo.toml` names.
+-   A C compiler, and a C++ compiler with C++17 support and its standard library headers.
+    The C and C++ smoke tests call `cc` and `c++`, or the compilers named by `CC` and `CXX`.
+    The CMake builds below use the same compilers.
+    If Clang cannot find `cstddef`, set `CXX=g++`.
+    Or install the libstdc++ development package for the GNU Compiler Collection (GCC) version that Clang selects.
+-   GNU m4, which the GNU Multiple Precision Arithmetic Library (GMP) build behind the `verify` feature needs.
+    On Debian and Ubuntu install the `m4` package.
+-   CMake, which the `chemfiles` and `highs` features use to build native libraries.
+    CMake 4 needs `CMAKE_POLICY_VERSION_MINIMUM=3.5` for the chemfiles build.
+    uses the same setting.
+
+
+# Build and test
+
+Build and test a pinned checkout with its Cargo lockfile.
+The C and C++ smoke tests require the C ABI library as well as the test executables.
+
+```sh
+cargo build --locked --features capi
+cargo test --locked --features capi
+CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo fmt --check
+```
+
+Optional features are checked with their dependencies enabled.
+The `faer` feature is part of the default set.
+It is the dense self-adjoint spectrum used by connect and SQNM.
+The Kani workflow's prove step builds with `--no-default-features --features capi` so that job does not compile `pulp`.
+The `kani-github-action` default command is a bare `cargo-kani`, which would enable `faer`.
+The workflow overrides that command and does not pass `--ignore-global-asm`.
+Build the Python package with scikit-build-core (`pip install .`) and run `tests/python` against the installed package.
+The algebra and interval checks live in `validation` and `tests/symbolic`; the Lean libraries live in `formal`.
+The verify workflow's symbolic-script step runs those checks and leaves `validation/benchmark/` out.
+Those files are the pt-island campaign drivers.
+They import optbench and take a checkout plus a long run, so they are not part of the minute-long symbolic check.
+
+A git dependency names a full 40-character `rev`, never a `tag` or `branch`, with the exact version of the crate at that commit, such as `version = "=0.5.2"`.
+Cargo keys a git source by its reference, so a dependent that pins the same commit another way locks a second copy.
+`ci/consumer` is such a dependent: it takes this checkout by path and pins linkcell, rgmin and rgpot-core by rev.
+Bump its revs together with `Cargo.toml`.
+The CI test job runs the check and compiles the consumer:
+
+```sh
+python3 ci/check_dependency_pins.py
+cargo check --manifest-path ci/consumer/Cargo.toml --target-dir target
+```
+
+
+# Minimum supported Rust version
+
+The minimum supported Rust version (MSRV) is `1.88`, the `rust-version` in `Cargo.toml`.
+A change must not need a newer compiler, and must pass the MSRV checks below as well as the stable ones.
+Clippy adds and revises lints between releases, so code that stable's clippy accepts can fail the MSRV's, and the reverse.
+The `msrv` job of the CI workflow reads `rust-version` with `cargo metadata` and installs that toolchain.
+It runs the clippy steps of the test and readcon jobs and of the verify workflow's rust job on it, then builds and tests `--features capi`, all with `--locked`.
+A dependency in `Cargo.lock` that needs a newer compiler fails the job.
+Edition 2024's resolver avoids that when it can: `cargo update` prefers versions that support the MSRV.
+To raise the MSRV, edit `rust-version`; the job and the commands below read it from there.
+These commands reproduce the job:
+
+```sh
+msrv=$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "rgsaddle") | .rust_version')
+rustup toolchain install "$msrv" --profile minimal --component clippy
+cargo +"$msrv" clippy --locked --features capi -- -D warnings
+cargo +"$msrv" clippy --locked --all-targets --features capi,ohtst -- -D warnings
+cargo +"$msrv" clippy --locked --all-targets --features readcon -- -D warnings
+cargo +"$msrv" clippy --locked --all-targets --features readcon,readcon-db -- -D warnings
+cargo +"$msrv" clippy --locked --all-targets --features capi,verify -- -D warnings
+cargo +"$msrv" build --locked --features capi
+cargo +"$msrv" test --locked --features capi
+```
+
+
+# Python stub
+
+`python/rgsaddle/_core.pyi` is the output of nanobind's stubgen on the installed extension.
+Do not edit it by hand.
+The typing job of the Python binding workflow regenerates it with nanobind 3.1.0 and fails on any difference.
+The extension renders its own signatures, so `build-system.requires` in `pyproject.toml` pins the same nanobind.
+Give a binding that takes a callable or returns a tuple an `nb::sig`, as `connect` does; a bare `Callable` or `tuple` fails `mypy --strict`.
+After a change to `bind/ext.cpp`, rebuild against the pinned nanobind and regenerate the stub:
+
+```sh
+python -m pip install 'nanobind==3.1.0' 'scikit-build-core>=1.1'
+python -m pip install --no-build-isolation .
+python scripts/regen_stub.py
+```
+
+`python scripts/regen_stub.py --check` prints the difference and exits nonzero, as the typing job does.
+The script reads the pin from `pyproject.toml` and refuses another nanobind.
+
+
+# Documentation
+
+Narrative pages are the Org sources under `docs/orgmode`.
+`docs/export.el` writes a reStructuredText file under `docs/source` for each of them.
+Git ignores those files, so edit the Org source and do not add the generated files.
+Build the site as the docs workflow does:
+
+```sh
+python docs/check_c_symbols.py
+python docs/check_paths.py
+python docs/check_dois.py
+emacs --batch -l docs/export.el
+python -m pip install -r docs/requirements.txt
+sphinx-build -b html -n -W --keep-going docs/source docs/build
+sphinx-build -b linkcheck -n -W --keep-going docs/source docs/build/linkcheck
+```
+
+The API documentation builds with every rustdoc warning denied on each feature set CI tests, and once with private items.
+A public doc that links a private item, a broken or redundant intra-doc link, a bare URL or unclosed HTML fails the CI test job.
+The crate overview links the optional `ohtst` module only when that feature is enabled.
+A default-feature build names the module and the `ohtst` feature in code font, because the module is not compiled.
+Each entry point opens with an example on a small analytic surface, which `cargo test` runs.
+
+```sh
+ci/check_rustdoc.sh
+cargo test --locked --doc --features capi
+```
+
+Retain numerical assertions and record the source, dependency and library revisions with performance results.
+
+
+# Changelog
+
+Each change adds a fragment under `docs/newsfragments`
+and leaves `docs/orgmode/changelog.org` as it is.
+Name the fragment `+<slug>.<type>.org`, or `<issue>.<type>.org` for a
+change with an issue number.
+The types are the sections of `towncrier.toml`: `breaking`, `security`,
+`removed`, `deprecated`, `added`, `doc`, `dev`, `changed`, `fixed` and `misc`.
+Write Org markup with one sentence per line.
+A release collects the fragments under a new heading, and `--draft`
+prints that heading without writing it:
+
+```sh
+python -m pip install towncrier
+towncrier build --draft --version <version>
+towncrier build --version <version>
+```
+
+
+# Release to crates.io
+
+A pushed `v*` tag starts `publish.yml` on the tagged commit.
+The workflow checks out the tag, obtains a crates.io token through `rust-lang/crates-io-auth-action`, and runs `cargo publish --locked --no-verify -p rgsaddle`.
+`--no-verify` stays on because the git-pinned `rgmin` dependency in `Cargo.toml` fails `cargo package`: the packaged manifest cannot fetch that git source the way a local checkout does.
+Free-end bands need `LevelSetConstraint`, which is not yet in a published crates.io release, so `Cargo.toml` and `ci/consumer/Cargo.toml` keep `rgmin` pinned by git revision with `version = "=0.7.0"` until a crates.io release carries the symbol.
+Do not drop `--no-verify` without either switching to that release or changing how the dependency is specified.
+
+Before tagging, run the MSRV test line above, bump versions as below, and collect the changelog.
+On the maintainer machine, `cargo package --locked -p rgsaddle` still fails for the pin; rely on CI publish or build from the git checkout.
+
+
+# Release to PyPI
+
+A `v*` tag publishes the Python package to PyPI through `pypi.yml`; the crate upload is the crates.io workflow above.
+`pypi.yml` uses PyPI trusted publishing, so the repository holds no PyPI token.
+Before the first upload, the PyPI account that will own the project adds a pending publisher at <https://pypi.org/manage/account/publishing/> with these values:
+
+-   PyPI Project Name: `rgsaddle`
+-   Owner: `OmniPotentRPC`
+-   Repository name: `rgsaddle`
+-   Workflow name: `pypi.yml`
+-   Environment name: `pypi`
+
+The first upload creates the project and turns the pending publisher into its trusted publisher.
+Only the `publish` job runs in the `pypi` environment and holds `id-token: write`, so required reviewers added to that environment in the repository settings hold every upload until one approves it.
+
+To release a version:
+
+1.  Set it in `Cargo.toml`, `pyproject.toml`, `meson.build`, `CITATION.cff`, `codemeta.json`, `.zenodo.json`, `docs/source/conf.py`, and the install example in `docs/orgmode/getting-started.org`; `tests/package_version.rs` holds the first six equal. Rebuild `llms.txt` and `llms-full.txt` with `python docs/render_llms.py` when narrative pages moved.
+2.  Collect the fragments with `towncrier build --version <version>` and commit the updated `docs/orgmode/changelog.org`.
+3.  Push the release commit to `main`, then push the tag `v<version>` on that commit. The tag runs `publish.yml` and `pypi.yml` on GitHub-hosted runners; neither workflow needs a local publish.
+
+The `versions` job stops the run unless the tag is `v` followed by the version in both `Cargo.toml` and `pyproject.toml`.
+The `wheels` job runs cibuildwheel with the `[tool.cibuildwheel]` table of `pyproject.toml` on Linux `x86_64` and `aarch64`, macOS `arm64` and `x86_64`, and Windows `x86_64`, and tests every wheel.
+The `smoke` job installs each platform's wheels into a fresh virtual environment under CPython 3.10, 3.14 and 3.14t, and the sdist under 3.12, and imports the package.
+`publish` uploads after every other job has passed.
+
+A pushed tag runs the workflows of the tagged commit, so a tag cut before `pypi.yml` existed, such as `v0.5.0`, does not start it.
+Once `pypi.yml` is on the default branch, a manual run with the `tag` input builds and publishes such a tag:
+
+```sh
+gh workflow run pypi.yml --ref main -f tag=v0.5.0
+```
+
+A deployment branch rule on the `pypi` environment must admit `main` for that run.
+A manual run without the input builds and smoke-tests the selected branch and uploads nothing.
+
+
+# Contact
+
+Report bugs, ask questions and propose changes on the issue tracker at <https://github.com/OmniPotentRPC/rgsaddle/issues>.
+The maintainer is Rohit Goswami (rgoswami@ieee.org), the author listed in `Cargo.toml` and `pyproject.toml`.
+
+
+# Acknowledgments
+
+The nudged elastic band (NEB) force assembly is ported from eOn .
+The tangents, springs, projections and climbing-image force keep eOn's branch structure.
+They come from eOn's `NEBTangent`, `NEBSpringForce` and `NEBForceProjection`.
+
+Other parts follow existing codes.
+AutoNEB follows the window and spring rescaling of the AutoNEB in the Atomic Simulation Environment (ASE).
+The Sella sessions follow the optimizer, constraints and eigensolvers of Sella.
+`nichols_step` and the Powell update follow i-PI under the MIT option of its licence.
+
+The crate builds on rgmin for its steppers and on linkcell for cutoff neighbour walks.
+ndarray, faer and rayon supply arrays, dense linear algebra and threads.
+The optional features read structure files with readcon-core and chemfiles.
+readcon-db stores traces and restarts.
+The `verify` checks use rug, which binds GMP and the GNU Multiple Precision Floating-Point Reliable (MPFR) library.
+The Python package is built with nanobind, scikit-build-core and Corrosion.
+Its `rgsaddle.ase` module uses ASE.

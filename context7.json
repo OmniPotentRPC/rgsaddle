@@ -1,0 +1,7 @@
+{
+  "projectTitle": "rgsaddle",
+  "description": "Band (NEB) and minimum-mode saddle searches in Rust over rgmin steppers.",
+  "rules": [
+    "Band and minimum-mode searches take one rgmin Solver step; the host owns the loop."
+  ]
+}

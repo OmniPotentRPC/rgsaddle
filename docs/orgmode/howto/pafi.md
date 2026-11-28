@@ -1,0 +1,508 @@
+
+
+# What is computed
+
+Projected average force integration (PAFI) turns a path between two minima, such as the images of a converged nudged elastic band (NEB), into a free-energy profile at a temperature. Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018), https://doi.org/10.1103/PhysRevLett.120.135503, introduced it. The profile needs no collective variable. The path is the collective variable, and the system is sampled in the hyperplanes normal to it.
+
+Let `X(s)` be the path with parameter `s`. The hyperplane at `s` is
+
+    (x - X(s)) · n = 0
+
+with `n = X'(s)`, less its center-of-mass part when the center of mass is held. The module `rgsaddle::pafi` samples the system confined to that plane at temperature `T` and averages
+
+    dF/ds = ⟨ (∇E · n) (1 - ψ) ⟩,    ψ = (x - X) · X'' / |n|²
+
+The average is over the Boltzmann distribution on the plane. `ψ` corrects for the curvature of the path: the planes of a curved path converge on one side, and `1 - ψ > 0` is the condition that they do not cross where the system is sampled. The potential of mean force is the integral of `dF/ds` from the first plane. Its maximum is the free-energy barrier, and the plane of the maximum is the dividing surface.
+
+By default the Jacobian term of the paper's Eq. (8) is left out, as it is in LAMMPS `fix pafi` and in the reference code of Swinburne and Marinica (`PafiMeanForce::ReferenceCode`). What is integrated is then the free energy of the flat hyperplanes, `-kT ln ∫ δ((x - X) · n / |n|) exp(-E/kT) dx`, which does not depend on how the path is parametrized. `PafiMeanForce::PublishedEquation8` adds the second term, `kT d/ds ln(|ψ| / |X'|)`, evaluated analytically from the third derivative of the spline, and refuses a sample where the locality condition `1 - ψ > 0` fails.
+
+PAFI gives a barrier and a profile. It does not give a rate prefactor. `defect_pair_rates` (see `howto/defect-pair-rates`) builds a rate on a PAFI barrier. The section Related methods says how PAFI differs from optimal hyperplanar TST.
+
+The built-in walk of this module is the analytic-surface reference. A production engine, such as LAMMPS through `LammpsHyperplaneSampler`, supplies the samples through the `HyperplaneSampler` trait and `average_hyperplane_with_sampler`, which applies the same estimator, equilibration test and block errors (see `explanation/hyperplane-methods`).
+
+
+# What the surface must provide
+
+`rgsaddle::PointSurface` is the caller's surface for one geometry. PAFI uses only `eval`:
+
+```rust
+fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError>
+```
+
+-   `x` is a flat coordinate vector. The gradient has the same length as `x` and is `dE/dx`, not the force. A gradient of another length, or one that is not finite, ends the run with an error.
+-   Units are the caller's. `kT` (`PafiConfig::thermal`) is in the energy unit of the surface and the path parameter has the length unit of the positions. For energies in eV, `kT` is `BOLTZMANN_EV_PER_K * T`.
+-   The surface is called from several threads at once, one per plane, so it must be `Sync`. `PointSurface` already requires that.
+-   With the center of mass held, the vector is read as `x₀, y₀, z₀, x₁, …`, three entries per atom, and needs at least two atoms.
+-   The walk uses only the gradient. The in-plane quench of `PafiConfig::max_jump` also uses the energy, so the two must be consistent.
+-   The surface handles its own periodic cell. The frames of the path are not wrapped (see below), so it must accept coordinates outside the cell.
+
+
+# The path
+
+`ArcPath` is the curve `X(s)` through ordered frames. Two ways build it.
+
+From NEB images, reactant first, with `ArcPath::from_positions`:
+
+```rust
+let path = ArcPath::from_positions(&images)?;   // images: Vec<Array1<f64>>
+```
+
+The parameter of a frame is the sum of the straight chord lengths from the first frame, taken over the whole coordinate vector. `s` has the length unit of the positions and `dF/ds` is an energy per length. Neighboring images must be finite and distinct.
+
+From frames with parameters of your own, with `ArcPath::new`:
+
+```rust
+let path = ArcPath::new(vec![PathFrame { positions, arc }, /* ... */])?;
+```
+
+The `arc` values must strictly increase. The reference code of Swinburne and Marinica uses each frame's distance from the first over that of the last, so that `s` runs from 0 to 1. `tests/pafi_reference.rs` builds its path that way.
+
+In a periodic cell, unwrap every frame against the first by the minimum image before building the path. The path is interpolated coordinate by coordinate, and a frame that jumped a cell length would send the curve across the cell.
+
+The first frame is the zero of the profile, so it should be a relaxed minimum. The last should be one too if the reverse barrier is wanted.
+
+
+## Tangents and why the path is a spline
+
+The arc length is the polyline arc length of the images, the sum of the chords. The curve is not the polyline. Every coordinate is the not-a-knot cubic spline of the frames over that parameter, which is the interpolation of the paper and the default of scipy's `CubicSpline`, used by the reference code. The tangent `X'`, the curvature `X''` and the jerk `X'''` are the first three derivatives of the spline, evaluated by `ArcPath::geometry(s)` at any `s` in `ArcPath::bounds` and returned in `PathGeometry`. Two frames give the straight line and three the parabola through them. `X`, `X'` and `X''` are continuous.
+
+A polyline cannot be used. Its tangent is the chord, which jumps at every image, and its curvature is zero between the images, so `ψ` is zero everywhere. The planes of neighboring segments then do not form one family, and the integral is not the free energy of any set of hyperplanes. An earlier version of this module took the chords. The spline regression now checks all nine zero-temperature gradients of the Fe self-interstitial reference path within 1e-3, and `tests/pafi_analytic.rs` checks the sampled spline-plane gradients against independent quadrature of each plane's free energy.
+
+`ArcPath::arcs` gives the parameter of every frame, `bounds` the first and the last, and `reversed` the same curve from the last frame, with parameter `first + last - s`. A profile integrated over the reversed path starts from the other end, and comparing the two shows the drift of the integration.
+
+
+# The configuration
+
+`PafiConfig` is non-exhaustive. Start from `PafiConfig::default()` and chain setters. Each field has a `with_*` setter of the same name. The setters of `target_error` and `max_jump` take a bare value or `None`.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-right" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">Field</th>
+<th scope="col" class="org-right">Default</th>
+<th scope="col" class="org-left">Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>thermal</code></td>
+<td class="org-right">0.02585</td>
+<td class="org-left"><code>kT</code> in the energy unit of the surface (300 K in eV)</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>mobility</code></td>
+<td class="org-right">1.0</td>
+<td class="org-left"><code>μ</code> in <code>dx = -μ ∇E dt + sqrt(2 μ kT dt) ξ</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>time_step</code></td>
+<td class="org-right">1e-3</td>
+<td class="org-left"><code>dt</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>thermalize</code></td>
+<td class="org-right">200</td>
+<td class="org-left">minimum warm-up steps discarded before the first sample; the equilibration test may discard more</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>stride</code></td>
+<td class="org-right">5</td>
+<td class="org-left">steps between samples</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>samples</code></td>
+<td class="org-right">200</td>
+<td class="org-left">recorded samples per plane, at least <code>2 * blocks</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>blocks</code></td>
+<td class="org-right">5</td>
+<td class="org-left">blocks for the standard error, at least 2</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>trajectories</code></td>
+<td class="org-right">1</td>
+<td class="org-left">independent trajectories per plane; with more than one, the error is the spread of their means, as in the reference code</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>integrator</code></td>
+<td class="org-right"><code>LeimkuhlerMatthews</code></td>
+<td class="org-left"><code>PafiIntegrator::EulerMaruyama</code> is the direct step of the paper's Eq. (9)</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>mean_force</code></td>
+<td class="org-right"><code>ReferenceCode</code></td>
+<td class="org-left"><code>PafiMeanForce::PublishedEquation8</code> adds the Jacobian term of the paper's Eq. (8)</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>seed</code></td>
+<td class="org-right">1</td>
+<td class="org-left">seed of the noise; trajectory <code>i</code> takes <code>seed + i</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>fix_com</code></td>
+<td class="org-right"><code>true</code></td>
+<td class="org-left">hold the center of mass, when the vector has at least two atoms</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>retain</code></td>
+<td class="org-right">16</td>
+<td class="org-left">configurations kept per plane, evenly spaced from sample 0 through <code>samples</code> minus one; both ends are kept when this is above 1, and it must not exceed <code>samples</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>target_error</code></td>
+<td class="org-right"><code>None</code></td>
+<td class="org-left">stop when the barrier error is at or below this; <code>None</code> runs one pass</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>max_rounds</code></td>
+<td class="org-right">4</td>
+<td class="org-left">most passes, the first included, to reach <code>target_error</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>region</code></td>
+<td class="org-right"><code>None</code></td>
+<td class="org-left">hard region the walk must stay in, set with <code>with_region</code>; <code>None</code> leaves the plane unrestricted</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>max_jump</code></td>
+<td class="org-right"><code>Some(0.4)</code></td>
+<td class="org-left">largest per-atom displacement, in the length unit, before a plane is taken to have left the basin; <code>None</code> skips the test</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>quench</code></td>
+<td class="org-right"><code>RelaxConfig</code> with <code>Method::Ode12r</code></td>
+<td class="org-left">the in-plane quench of <code>max_jump</code>: method, force tolerance, step cap, per-atom step</td>
+</tr>
+</tbody>
+</table>
+
+By default the step is the one of Leimkuhler and Matthews, Appl. Math. Res. Express 2013, 34 (2013), https://doi.org/10.1093/amrx/abs010, Eq. (3), the high-friction limit of BAOAB: the noise of a step is the sum of two consecutive draws. Averages are second order in `time_step`, and on a harmonic plane at `μ k dt = 1.2` the tests find `⟨y²⟩` within four errors of its exact value. `μ dt ∇E` is a length, so `μ dt` is length² per energy. The step must be small against the stiffest mode of the plane. `tests/pafi_analytic.rs` runs a harmonic plane at `μ k dt = 1.2`, where an Euler-Maruyama step samples `⟨y²⟩` 2.5 times too wide. Set `integrator` to `PafiIntegrator::EulerMaruyama` to take that step anyway.
+
+A configuration is checked on entry. `thermal`, `mobility` and `time_step` must be finite and positive, `stride` and `trajectories` positive, `blocks` at least 2, `samples` at least `2 * blocks`, `retain` at most `samples`, and a given `max_jump` finite and positive. A bad value is `SaddleError::Invalid`.
+
+`max_jump` keeps the walk in the basin of the path. The production run is cut into `blocks` stretches. The thermalized configuration and the end of every stretch are quenched within the plane and compared with the minimum of the plane quenched from the path. If one atom is farther than `max_jump`, the configuration has left the basin. A stretch that left it is dropped and sampled again from the end of the last kept one, and a thermalization is sampled again from the path. The reference code drops such a trajectory the same way, at 0.4 Å. More dropped stretches than `blocks` is an error, because walks keep leaving the basin on that plane. `HyperplaneAverage::rejected` counts them.
+
+
+# Thermalization and equilibration
+
+Each plane starts at `X(s)` on the path. It runs `thermalize` steps (default 200) and then records `samples` values, one every `stride` steps. `thermalize` is a minimum warm-up floor, not a statement that equilibrium has been reached. The recorded series is then passed to the automated equilibration test of Chodera, J. Chem. Theory Comput. 12, 1799 (2016). It discards the head of the series that maximizes the number of independent samples of what remains, `N_eff = (N - t₀) / max(1, 2 τ)`, and keeps the tail. A second guard splits the tail in half and requires the means to agree within four block standard errors. The gradient, its error, `psi`, `tau` and `n_eff` come from the tail only. `retained` is a separate even subset of the full recorded series, from the first sample through the last. Both ends are kept when `retain` is greater than one. When `target_error` asks for more passes, each added pass starts again from the path point, thermalizes for `thermalize / 2` steps, and records more samples.
+
+The test can refuse a plane. `SaddleError::InsufficientEffectiveSamples` means the tail has fewer than `blocks` independent samples, so raise `samples` or `stride`. `SaddleError::NotEquilibrated` means the two halves of the tail disagree beyond four standard errors, so raise `thermalize` and `samples`. No gradient is returned for a plane that fails either.
+
+What to read, on every plane, in `HyperplaneAverage`:
+
+-   `equilibration` is the `EquilibrationReport`: `discard` records and `equilibration_steps` steps were dropped, with the split-half drift and its error. A discard that is a large part of `samples` says the start at the path point is far from the equilibrium of the plane, so raise `thermalize`.
+-   `tau` is the integrated autocorrelation time of the tail, in samples, so one `tau` is `tau * stride` steps.
+-   `n_eff` is `(samples - discard) / max(1, 2 τ)`, the number of independent samples the error is worth. A small `n_eff` means a large `tau` against the tail: raise `samples`.
+-   `rejected` above zero means walks left the basin of the path on this plane, and were sampled again (see `max_jump`).
+
+
+# Choosing the arcs
+
+`pafi_profile` takes the parameters of the planes. They must be at least two, strictly increasing, and inside `ArcPath::bounds`; a value outside is `SaddleError::Invalid`. The integral is the trapezoid rule over the planes, so the spacing must resolve the changes of `dF/ds`.
+
+One plane per image:
+
+```rust
+let arcs = path.arcs();
+```
+
+Evenly spaced planes, which need not be the images, 33 here:
+
+```rust
+let (first, last) = path.bounds();
+let arcs: Vec<f64> = (0..33)
+    .map(|k| first + (last - first) * k as f64 / 32.0)
+    .collect();
+```
+
+The reference examples of the next section use 9 and 33 planes, evenly spaced in the normalized distance from the first frame. At `kT → 0` the gradient on a plane through a minimum is zero: the first and last of the nine iron gradients of the next section are 0.0.
+
+
+# A profile in one call
+
+```rust
+let path = ArcPath::from_positions(&images)?;
+let kt = BOLTZMANN_EV_PER_K * 1000.0;
+let config = PafiConfig::default()
+    .with_thermal(kt)
+    .with_thermalize(1000)
+    .with_samples(2000)
+    .with_blocks(20)
+    .with_target_error(0.2 * kt);
+let arcs = path.arcs();
+let (profile, planes) = pafi_profile(&surface, &path, &arcs, &config)?;
+println!("barrier {} ± {} at plane {}", profile.barrier, profile.barrier_error, profile.dividing);
+```
+
+The planes are sampled in parallel. Plane `k` takes the seed `seed + k + 1`, so a run is reproducible and the planes do not share noise. An error from any plane ends the call.
+
+The rustdoc of `rgsaddle::pafi` has a complete program of this kind that is compiled as a doc-test. It runs a path along the floor of `V = (1 - x²)² + ½ k(x) y²` with `k = 1.5 + x/2`, where the free-energy barrier is the potential barrier of 1 plus `½ kT ln 1.5`, and checks the barrier against that value.
+
+To rerun until the barrier is known to a given error, set `target_error`. Passes after the first take between 2 and 8 times `samples`, by the square of the ratio of the barrier error to the target, with half the thermalization and fresh noise, and are combined with the earlier ones by inverse variance. `max_rounds` bounds the passes. Reaching it is not an error, so read `barrier_error` afterwards.
+
+
+## Reading FreeEnergyProfile
+
+The vectors have one entry per plane, in the order of `arcs`.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">Field</th>
+<th scope="col" class="org-left">Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>arc</code></td>
+<td class="org-left">the parameter of each plane</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>gradient</code></td>
+<td class="org-left"><code>dF/ds</code> on each plane, in energy per unit of <code>s</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>gradient_error</code></td>
+<td class="org-left">its standard error</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>free_energy</code></td>
+<td class="org-left"><code>F(s)</code>, trapezoid-integrated from the first plane, so zero at the first</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>free_energy_error</code></td>
+<td class="org-left">its propagated standard error</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>barrier</code></td>
+<td class="org-left">the maximum of <code>free_energy</code>; zero when it never rises above the first</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>barrier_error</code></td>
+<td class="org-left">the standard error of <code>barrier</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>dividing</code></td>
+<td class="org-left">the index of that maximum, the first if there are ties</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>samples</code></td>
+<td class="org-left">recorded samples summed over planes and passes</td>
+</tr>
+</tbody>
+</table>
+
+The errors of the planes are added in quadrature with the trapezoid weights, as if the planes were independent. They do not contain the error of the quadrature over the planes, so a profile on a coarse set of planes can carry a small error and a bias.
+
+The reverse barrier is `free_energy[dividing] - free_energy[last]`. If the last plane is the product minimum it is the reverse hop from the same samples. A path between two equivalent states should give the two barriers equal, and the difference measures how far the integration has drifted. Integrating `path.reversed()` from the other end gives the same check on a second set of planes.
+
+
+## Reading HyperplaneAverage
+
+One entry per plane.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">Field</th>
+<th scope="col" class="org-left">Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>gradient</code></td>
+<td class="org-left">the average of <code>(∇E · n)(1 - ψ)</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>error</code></td>
+<td class="org-left">its standard error</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>psi</code></td>
+<td class="org-left">the mean of <code>ψ</code>; the paper's locality condition is <code>1 - ψ &gt; 0</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>samples</code></td>
+<td class="org-left">recorded samples</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>tau</code></td>
+<td class="org-left">integrated autocorrelation time of the retained tail, in samples</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>n_eff</code></td>
+<td class="org-left"><code>(samples - discard) / max(1, 2 τ)</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>equilibration</code></td>
+<td class="org-left">the <code>EquilibrationReport</code> of the series: discard, drift test and its outcome</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>evaluations</code></td>
+<td class="org-left">force evaluations on this plane, the quenches of <code>max_jump</code> included, summed over passes</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>retained</code></td>
+<td class="org-left"><code>retain</code> configurations from the recorded series, evenly spaced from the first sample through the last</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>rejected</code></td>
+<td class="org-left">thermalizations and stretches sampled again for leaving the basin, summed over passes</td>
+</tr>
+</tbody>
+</table>
+
+
+### How the standard error is computed
+
+The recorded gradients are a correlated series. After the equilibration test drops its head, the autocorrelation time `τ` of the tail is Sokal's integrated one, summed over lags until the autocorrelation first goes non-positive. The tail is cut into blocks. The block length is the larger of its length over `blocks` and `ceil(2 τ)`, and the number of blocks is the tail length divided by that length, but never fewer than 2. The error is
+
+    sqrt( var(block means) / number of blocks )
+
+with the variance over the block means, divided by one less than their number. So when `τ` is large, the blocks are longer and fewer than `blocks`. Before returning an error estimate, the equilibration check also requires at least two complete blocks whose width is `ceil(2 τ)`; otherwise it returns `SaddleError::InsufficientEffectiveSamples` with twice that width as the reported requirement. An accepted error can therefore still come from only a few block means. Read `error` together with `n_eff`.
+
+With several passes, the gradients are combined by inverse variance, the errors as `1 / sqrt(Σ 1/error²)`, `samples` and `n_eff` are summed, and `tau` is the largest of the passes. The `equilibration` report is that of the first pass.
+
+
+# A sanity check at zero temperature
+
+`zero_temperature_barrier(&surface, &path, &arcs)` integrates `∇E · X'` along the spline, with 64 points on each span between neighboring `arcs`. That is the energy along the path, `E(X(s)) - E(X(first))`, up to the quadrature, and it passes through the energies of the images. It samples nothing and returns a `FreeEnergyProfile` with zero errors.
+
+On a converged minimum-energy path the force within each hyperplane vanishes, so this is also the `kT → 0` limit of the PAFI integral, and its barrier is the potential barrier. Run it before sampling, and compare `barrier` with the highest image energy less the first:
+
+```rust
+let cold = zero_temperature_barrier(&surface, &path, &path.arcs())?;
+println!("potential barrier along the path {}", cold.barrier);
+```
+
+A barrier well below the highest image energy means the path is not a minimum-energy path, or the surface is not the one the images were relaxed on, or the images are not ordered. Sampling then has nothing to repair. Two tests of `tests/pafi_analytic.rs` use it: the potential barrier of a one-dimensional well to 3e-3, and a corner between three images, where the spline passes through the corner image and the integral reaches the corner's energy within 2e-3 instead of cutting it.
+
+
+# What the tests check
+
+Every reference is computed independently of the sampler: closed forms, quadrature, or the reference code.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">Test file</th>
+<th scope="col" class="org-left">Reference</th>
+<th scope="col" class="org-left">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>tests/pafi_analytic.rs</code></td>
+<td class="org-left">the potential on a line; quadrature of the transverse free energy; line quadrature on a bent valley; a harmonic plane in closed form; quadrature over a plane of two wells</td>
+<td class="org-left">the barrier on a line within 2e-3 of 1; on the widening well within 0.02 of <code>1 + ½ kT ln 1.5</code> and within four of its errors (at least 0.005); each plane of the bent valley within four errors plus 2e-3 of the derivative of its quadrature free energy; the harmonic plane at <code>μ k dt = 1.2</code> within four errors of <code>kT / (4 k)</code>; the basin test holds the plane to the basin of the path, and the same plane without it is more than 0.25 above the quadrature</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>tests/pafi_analytic.rs</code></td>
+<td class="org-left">cubics and parabolas</td>
+<td class="org-left">the spline reproduces a cubic and its first two derivatives to 1e-12, two frames are a line, three a parabola, and the reversed path is the same curve</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>tests/pafi_reference.rs</code></td>
+<td class="org-left">the reference PAFI code of Swinburne and Marinica</td>
+<td class="org-left">see below</td>
+</tr>
+</tbody>
+</table>
+
+
+## Against tomswinburne/pafi
+
+The pinned reference code at github.com/tomswinburne/pafi ships two NEB paths with their embedded-atom tables: a vacancy hop in tungsten on the Marinica04 potential (`EAM-VAC-W`) and a dumbbell hop in iron on the Marinica07 potential (`EAM-SIA-Fe`). `tests/pafi_reference.rs` reads the LAMMPS `eam/fs` tables and data files, builds the path as the reference code does, and runs rgsaddle's PAFI on it. It makes three comparisons.
+
+-   The nine zero-temperature gradients of the iron path, from `test_zero_temperature_run` in the reference `tests/test_pafi.py` (0.0, 0.614145, 0.846192, 0.59226, 0.089912, -0.426347, -0.853405, -0.792713, 0.0), agree within 1e-3. The assertion is in an ignored test.
+-   The barriers of the tungsten vacancy hop at 0, 1000 and 2000 K on 9 and 33 planes are compared between the committed `benchmarks/pafi_reference.csv` and `benchmarks/pafi_reference_code.csv`, where the reference file tabulates only the forward integral and σ combines rgsaddle's block error with the reference code's worker-trajectory spread in quadrature. The forward column differs from the reference barrier by up to 1.1e-5 eV at 0 K, and at 1000 and 2000 K by up to 0.29σ on 33 planes and 1.93σ on 9 planes (the largest gap being the 9-plane trapezoid barrier at 2000 K). Against the same forward reference column, the reversed column differs by up to 2.86e-3 eV on 33 planes and 2.94e-2 eV on 9 planes at 0 K, and at 1000 and 2000 K by up to 0.41σ on 33 planes while reaching 0.0513 eV (6.08σ) on 9-plane trapezoid at 1000 K and 0.0504 eV (3.98σ) at 2000 K (9-plane remeshed stays within 0.17σ). That 9-plane reversed gap is a coarse-grid quadrature asymmetry rather than a reversal bug: the reference parameter `r = |X - X₀| / |X_end - X₀|` shifts interior knots toward `r = 1` on a curved path, so 9 planes leave a non-zero endpoint drift `F(1) - F(0)` in both codes (+0.026 eV trapezoid and -0.029 eV remeshed at 0 K; +0.040 to +0.055 eV trapezoid at 1000 K) that separates the reversed barrier `F_max - F(1)` from the forward reference `F_max - F(0)`. Compared against the reversed integral of the reference plane gradients in `benchmarks/pafi_reference_code_planes.csv`, the reversed column differs by up to 1.4e-5 eV at 0 K and up to 1.20σ on 9 planes (0.52σ on 33 planes) at 1000 and 2000 K. That comparison is read from the CSV files, not asserted in a test. The thermal runs use 5000 thermalization steps, then 400 000 steps recorded every tenth in 40 blocks, with the basin test at 0.4 Å.
+-   Six tungsten planes at 1000 K sampled at `μ dt` of 1e-3 and 8e-3 with other seeds have gradients that agree within four errors in quadrature.
+
+The reference runs need the data of the reference code, which `benchmarks/pafi_reference.sh` fetches at the pinned commit with checksums, and are ignored in a plain `cargo test`. The script writes `benchmarks/pafi_reference.csv` and `benchmarks/pafi_reference_planes.csv`. With `PAFI_REFERENCE_CODE=1` it also runs the reference code itself, which needs its Python package, the LAMMPS Python module and mpi4py, and writes `benchmarks/pafi_reference_code.csv` and `benchmarks/pafi_reference_code_planes.csv`. What does run in CI is the `eam/fs` reader against LAMMPS on a synthetic table, the integral of the reference `ResultsProcessor` against scipy on the nine gradients, and the pipeline on a small hop.
+
+The test file computes two integrals of a profile. One is the trapezoid sum of `FreeEnergyProfile` itself. The other is that of the reference `ResultsProcessor`, a not-a-knot cubic through the plane gradients on `10 n` evenly spaced points, then the cumulative trapezoid and its maximum. The two differ on a coarse set of planes, and the CSV has both.
+
+
+# Related methods
+
+Optimal hyperplanar transition state theory (OH-TST), in `rgsaddle::ohtst`, also works with free energies on hyperplanes, but it asks a different question. PAFI fixes the path first. It integrates the mean force across a series of planes normal to that path, and the result is a profile along it. OH-TST optimizes one hyperplane variationally, both its position and its orientation, to the maximum of its free energy, which gives the smallest hyperplanar TST rate (Jóhannesson and Jónsson, J. Chem. Phys. 115, 9644 (2001); Bligaard and Jónsson, Comput. Phys. Commun. 169, 284 (2005)). Its plane is not tied to a path, though `PlanePath` can integrate along the planes of one. See .
+
+
+# Limits
+
+-   The equilibration test is statistical. It refuses a series that drifts beyond four standard errors, and it cannot see a slow mode that the recorded series does not show.
+-   The integral over the planes is the trapezoid rule. The standard errors do not include its error, so use enough planes.
+-   The Jacobian term of the paper's Eq. (8) is included only with `PafiMeanForce::PublishedEquation8`. An external sampler that returns no positions and no gradient cannot supply it, and that setting then fails.
+-   The path is a spline through the frames. Frames that are far apart, or an unconverged band, give a curve and a set of planes that are not those of the minimum-energy path, and nothing in PAFI repairs that.
+-   `fix_com` needs three entries per atom and at least two atoms; for any other vector it is ignored.
+-   The in-plane quench of `max_jump` is a local test. It detects a walk in another basin of the plane.

@@ -1,0 +1,196 @@
+
+
+# Step a band from C
+
+Enable `capi`. The header is `rgsaddle.h`. ABI major 1. Every wire struct opens with `rgsaddle_version_t`. The host:
+
+1.  creates a session
+2.  calls `step` until the report says converged, or until host policy stops
+3.  reads `rgsaddle_band_evaluation` for the energies and forces at the new band instead of evaluating it again
+4.  calls `rgsaddle_band_restart` to restart the optimizer on the same surface, `rgsaddle_band_reset` at a surface-epoch boundary
+5.  frees
+
+`rgsaddle_band_set_positions` with the band the host read back (even wrapped into its cell) costs no evaluation; only moved rows retire the cached values. `rgsaddle_report_t.evaluations` counts the image evaluations of each step.
+
+There is no run-to-completion C entry point. Units are the caller's. Positions are unwrapped Cartesian, image-major, stride `3 * n_atoms`.
+
+
+# Use the headers from meson
+
+The top-level `meson.build` provides the headers as the dependency `rgsaddle-headers` (also `rgsaddle`), from a wrap or from an installed `rgsaddle-headers.pc`. It does not build the library. `howto/meson` has the wrap, the migration from a packagefiles overlay, and the run-time loading.
+
+
+# Grow the band with AutoNEB
+
+`howto/autoneb` is the AutoNEB loop: insert where the resolution is worst, relax a local window, and climb. The tuning sits on `BandConfig::autoneb`. A weighted spring supplied by the host is refused for now; zoom-NEB will recompute it.
+
+
+# Fixed-energy tunnelling path (LI-NEB)
+
+`howto/line-neb` is `LineNebSession`: the optimal JWKB tunnelling path at a fixed energy below the barrier, found by the line-integral extension of the nudged elastic band of Ásgeirsson, Arnaldsson, and Jónsson (2018). The action is the trapezoid over every image, and an endpoint below the fixed energy is refused. A running session defaults to the restrained endpoint update. `EndpointBelowEnergy::Strict` stops with `SaddleError::Invalid` and `LineNebEndpointViolation`, and the error enum is unchanged. `fixed_energy_mep_seed` builds the starting band from a saddle and its mode. `Converged` needs the transverse action force, the interior spring force, and the endpoint force within tolerance. `FixedEnergyTrajectory` integrates the motion along the converged path.
+
+
+# Choose linear, IDPP, or TRICS initialization
+
+`howto/path-initialization` compares the generic `PathInitializer` choices,
+shows how TRICS refines a linear or IDPP seed, and gives the C entry point.
+
+
+# Pick tangents, springs, projections
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">Kind</th>
+<th scope="col" class="org-left">Variants</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>TangentKind</code></td>
+<td class="org-left"><code>Simple</code> (Mills–Jónsson–Schenter), <code>Improved</code> (Henkelman–Jónsson)</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>SpringKind</code></td>
+<td class="org-left"><code>Uniform { k }</code>, energy-weighted, Onsager–Machlup</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>ProjectionKind</code></td>
+<td class="org-left">plain elastic band, <code>Neb</code>, <code>Dneb</code></td>
+</tr>
+</tbody>
+</table>
+
+Defaults: improved tangent, uniform spring `k = 5`, NEB projection, and
+a climbing image that arms when the largest force component falls below
+the absolute threshold 0.5 in the host's force units. The relative
+trigger factor is 0.
+`BandConfig::with_string(StringConfig::default())` opts out of springs and tangent projection for the simplified string method of E, Ren, and Vanden-Eijnden (2007), evolving interior images under the full potential force and reparametrizing to equal arc length on the not-a-knot cubic spline or the polyline; see .
+
+
+# Interpolate a geodesic initial path
+
+`howto/geodesic` minimizes the redundant coordinate length of Zhu, Thompson, and Martinez, J. Chem. Phys. 150, 164103 (2019), https://doi.org/10.1063/1.5090303. The chart is caller supplied. `MorsePairChart` is their Eq. (7). The endpoints stay fixed. This is an initial path, not a band step: it does not evaluate a potential.
+
+
+# Leave a minimum with ART nouveau
+
+`howto/art` is the phased search: a host seed and mask, perpendicular relaxation, Lanczos, a lowest-mode climb, an index-1 certificate, a push both ways off the saddle, and the two quenches. `ArtStatus::Reverted` is not a completed exit.
+
+
+# Choose search directions from a minimum
+
+`howto/direction-cover` is `DirectionCover`: a signed cover of unit vectors on every active atom's sphere, an optional Gaussian kick on its neighbours, and a picker that orders the arms by angular gap or by expected improvement of the barrier. Each arm is one `ArtSession`. The coverage readout has the covering radius per atom, a record per arm, and the distinct saddles against draws.
+
+
+# Step one point with a stencil
+
+`howto/stencil` builds `Stencil::point` for a minimiser, the dimer, Lanczos, ART, or eigen following. `Stencil::band` validates its array but band presets are not implemented. The C names are `rgsaddle_stencil_*` and `rgsaddle_last_error`. Python is `rgsaddle.Stencil.point` and `rgsaddle.ase.Point`.
+
+
+# Solid-state dimer
+
+`howto/solid-dimer` is the minimum-mode search on atoms plus cell strain, the dimer analogue of the generalized solid-state band. A frozen cell is the fixed-cell dimer. The saddle stress is `V σ`, the elastic dipole.
+
+
+# Solid-state NEB on the dimer chart
+
+`howto/ssneb` is the climbing-image band on that same chart. A frozen cell is the ordinary band. A free cell uses `E + V0 σ_ext : ε`.
+
+
+# Defect-pair hop rates
+
+`howto/defect-pair-rates` is `defect_pair_rates`: a solid-state dimer and an index check for every hop in a caller-supplied catalogue, a fixed climbing-image band through the saddle, a PAFI free-energy barrier, and a Bennett–Chandler transmission coefficient. The rate is `κ ν exp(-ΔF/kT)`. The document is `rgsaddle.defect_pair_rates`. Copper is only in the tests.
+
+
+# NPT lattice parameter
+
+`howto/npt-lattice` is `npt_lattice`: Langevin dynamics with a Berendsen barostat that samples the zero-pressure lattice of a crystal. The report carries the mean lattice parameter and pressure with blocking standard errors, and `pressure_converged` is an indicative screen, not a proof of equilibrium. `NptConfig` is non-exhaustive and the seed expands through SplitMix64.
+
+
+# Free-energy profile along a path
+
+`howto/pafi` is projected average force integration (PAFI; Swinburne and Marinica, Phys. Rev. Lett. 120, 135503 (2018)): the free energy along a path such as converged NEB images, from `dF/ds = ⟨(∇E · n)(1 - ψ)⟩` averaged on the hyperplanes normal to the path. The input is a `PointSurface`, an `ArcPath` from the images (`ArcPath::from_positions`) and the arcs of the planes; the output is a `FreeEnergyProfile` with the barrier and its standard error, and one `HyperplaneAverage` per plane with `tau` and `n_eff`. `zero_temperature_barrier` is the check that the path and the surface agree. The page also says how the warm-up floor and the automated equilibration test treat each plane.
+
+
+# Optimal hyperplane rates
+
+`howto/oh-tst` is optimal hyperplanar TST: a plane seeded from a converged dimer and climbed to the maximum of its free energy, a reactant normalization from parallel planes through the minimum, and the reversible work between them by integration with a BAR check. The rate is `sqrt(kT/2π) (Z_H/Z_R) exp(-ΔA/kT)` in mass-weighted coordinates. Only Hessian actions are used. The plane optimizer uses rgmin's product manifold of the point and normal.
+
+
+# Sample hyperplanes with LAMMPS
+
+`howto/lammps-hyperplane` configures `LammpsHyperplaneSampler` through rgpot's pinned `PotentialConfig` profile. lammpc keeps one in-process LAMMPS instance for the ensemble and applies the plane to position, velocity, and force on every BAOAB step. The `lammps` Cargo feature is opt-in.
+
+
+# Use an rgpot potential
+
+`howto/rgpot` wraps `rgpot-pair`, the zero-dependency half of the sibling rgpot project, as a `PointSurface` and runs a relaxation, a dimer search and a PAFI barrier check over it: nothing downstream of `PointSurface` distinguishes an rgpot potential from an analytic one.
+
+
+# Restart PAFI or OH-TST sampling
+
+`howto/pafi-ohtst-restarting` covers `PafiConfig::target_error` and `max_rounds`, which run extra sampling rounds automatically inside `pafi_profile`, and `sample_plane`'s `start` argument with `PlaneSample::last`, which lets a host extend an OH-TST chain by hand with no repeated burn-in.
+
+
+# Parallel sampling for PAFI and OH-TST
+
+`howto/pafi-ohtst-parallel-sampling`: `pafi_profile` already samples every plane in parallel on rayon's global pool. OH-TST's own calls sample one plane at a time, since each node starts from the one before, but independent calls over several temperatures or several hops parallelize at the host's level with `rayon::par_iter`, bit-identical to running them one at a time.
+
+
+# Checking PAFI and OH-TST convergence
+
+`howto/pafi-ohtst-checking-convergence` reads `tau` and `n_eff` on a PAFI or OH-TST sample, the equipartition virial check on an OH-TST plane, and `ReversibleWorkConfig::min_overlap` and `ReversibleWork::warnings`, against a run that has not settled and one that has.
+
+
+# Optimal tunneling paths
+
+`howto/lineb` is the line integral nudged elastic band: the fixed-energy JWKB path in mass-weighted coordinates, its half period and instanton temperature, a ladder of energies from a minimum energy path, and the ring-polymer harmonic quantum TST rate from Hessian-vector products at the distinct replicas.
+
+
+# Strain response of a hop
+
+`howto/strain-rate` is `StrainResponse`: the elastic dipoles of one minimum and one saddle, the symmetry images of that hop, and `barrier(ε)`. The line is trusted inside a radius, a quadratic error bound, or a curvature-softening bound. Past that bound `refine` runs a fixed-cell solid dimer and caches the explicit barrier. On the Mishin copper dumbbell that refine does not reproduce the explicit barrier, and the trusted line does not reproduce the rate. The measured calls are in the same page.
+
+
+# Minimum-mode instead of a band
+
+`MinModeSession` refreshes the lowest curvature mode (dimer rotation or Lanczos on finite-difference Hessian actions), inverts the force along it, and takes one solver step. Same host loop. `PointSurface` evals a single geometry.
+
+A host that climbs with its own optimizer keeps one session for the whole search: `set_position` (`rgsaddle_minmode_set_position`) with the gradient it already has, then `estimate_mode` (`rgsaddle_minmode_estimate`). The previous mode seeds the next rotation, so a mode that still holds costs one evaluation. The dimer's Polak-Ribiere force and direction survive that move; `set_mode` and `reset` clear them, and a failed callback leaves them unchanged. Lanczos through the C estimate advances one Hessian action and keeps the Krylov basis until `set_position`, `set_mode`, or `reset`. The basis grows to the free dimension. After k actions the mode also takes its component on the residual direction, from the Lanczos polynomials at an extrapolated lowest eigenvalue, at no extra surface call; the reported curvature is the Ritz value of the k vectors. `MinModeSession::estimate_mode` and `step` still finish their own stop, the residual test or the torque window, before a translation. A dimer estimate is the full rotation.
+
+
+# Index-k minimum mode
+
+`indexk_step` and `IndexKSession` reflect the force in the k lowest modes and take one translator step. `k = 1` is the dimer or Lanczos step, bit for bit. The block solver is LOBPCG or block Lanczos. See `howto/indexk`. From C, ABI minor 37, the names are `rgsaddle_indexk_*` and `rgsaddle_reflect_force`.
+
+
+# Solution landscape
+
+`LandscapeSession` pushes a certified saddle along each unstable eigenvector and follows index-(k-1) minimum-mode dynamics down to minima. The result is a `PathwayMap`. See `howto/landscape`. From C, ABI minor 69, the names are `rgsaddle_landscape_*`. Python is `Landscape`.
+
+
+# Index-1 Newton
+
+`Index1Session` takes a restricted-step partitioned rational function optimization (RFO) step on a dense Hessian and updates it with Powell or Bofill. Pass an initial Hessian, or leave it empty and the first step builds one by central differences. `Index1Config` is non-exhaustive. `with_sparse_pattern` builds that seed from a distance-2 colouring instead. The flag stays off unless set. The trust radius is the Euclidean bound on the Cartesian step. See .
+
+From C, `rgsaddle_index1_create` / `rgsaddle_index1_step` follow the same loop. The vector length is `3 * n_atoms`; a bead polymer passes `n_atoms * n_beads`. A host that owns the Hessian calls `rgsaddle_prfo_step`. `rgsaddle_nichols_step` is the i-PI shift on a spectrum (`nmode` may be smaller than `n` when external modes were dropped). `rgsaddle_hessian_bofill` or `rgsaddle_hessian_powell` updates the Hessian. The gradient on the wire is dE/dx.
+
+
+# Drive an ASE band with NEBOptimizer
+
+`howto/neb-optimizer` is `rgsaddle.ase.NEBOptimizer`. It takes the band of ASE images and the ASE keywords `method`, `alpha`, `rtol`, `C1`, `C2`, and `verbose`. `method='ODE'` is the adaptive ODE12r step. `method='static'` is the fixed step. `run(fmax, steps)` stops on `NEB.get_residual`.
+
+
+# Do not keep solver history across a potential change
+
+Call `reset` after any model update. That is the documented boundary. A host that skips it mixes two surfaces in one L-BFGS memory. `restart` is the optimizer-only reset for the same surface; it keeps the cached endpoint energies and the last evaluation.

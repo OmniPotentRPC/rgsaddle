@@ -1,0 +1,22 @@
+The climbing image with a zero doubly-nudged term is the Householder reflection of the true force. Goswami, Gunde, and Jónsson, Front. Chem. (2026), https://doi.org/10.3389/fchem.2026.1807063, Eq. 9, is the identity used first. The same reflection is the negative-curvature dimer translation. Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999), https://doi.org/10.1063/1.480097, define that step. The improved tangent is Henkelman and Jónsson, J. Chem. Phys. 113, 9978 (2000), https://doi.org/10.1063/1.1323224.
+
+
+# Check
+
+```console
+$ cd formal && ./check.sh
+$ (cd formal && lake exe mirror)
+$ cargo test --features capi --test formal_mirror
+```
+
+`formal/check.sh` builds the pinned Lean toolchain and refuses `sorry`, `admit`, and axioms beyond `propext`, `Classical.choice`, and `Quot.sound`. `lake exe mirror` writes `formal/golden/stencil.json`. The Rust test compares those bits.
+
+The MPFR comparison is a separate feature so a default build does not link GMP.
+
+```console
+$ cargo test --features capi,verify --lib differential -- --nocapture
+```
+
+That test asserts only the dot-product bound in Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., SIAM, 2002, https://doi.org/10.1137/1.9780898718027, Section 3.1. It prints the largest ULP it saw.
+
+The two-dimensional reflected Hessian `diag(-a, b)` has eigenvalues of positive real part exactly when the mode's first component exceeds `1/sqrt(2)`. The same threshold in dimension 3 and higher is open. `validation/stencil/fortyfive.py` records the search.

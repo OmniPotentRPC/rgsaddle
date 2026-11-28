@@ -1,0 +1,1523 @@
+
+
+# Runnable example: dimer, Lanczos, soft-mode seeding, and surrogate Hessian actions (GP methods)
+
+The dimer and Lanczos minimum-mode searches share one Householder reflection of the force: Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), https://doi.org/10.3389/fchem.2026.1807063, Eq. 9, and Goswami, arXiv:2603.10992 (2026), https://doi.org/10.48550/arXiv.2603.10992, Eqs. 2.14-2.16. Gaussian process (GP) accelerated saddle searches and adaptive pruning of the GP training set follow Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), https://doi.org/10.1021/acs.jctc.5c00866, and Goswami and Jónsson, ChemPhysChem 27, e202500730 (2026), https://doi.org/10.1002/cphc.202500730, with performance and force-call accounting from Goswami, AIP Advances 15, 085210 (2025), https://doi.org/10.1063/5.0283639. The dimer rotation follows Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999), https://doi.org/10.1063/1.480097, Heyden, Bell, and Keil, J. Chem. Phys. 123, 224101 (2005), https://doi.org/10.1063/1.2104507, and Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008), https://doi.org/10.1063/1.2815812; the Lanczos mode estimate follows Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys. 121, 9776 (2004), https://doi.org/10.1063/1.1809574. `soft_mode_then_full_directions` (`SoftModeDirectionPlan`, `spectral_gap_rank`) recovers a sparse Hessian at a minimum, picks the soft-subspace rank from the largest spectral gap, and emits unit initial directions.
+
+A Gaussian-process surrogate or analytic potential implements `PointSurface` and can supply exact directional Hessian actions through `PointSurface::hessian_vector` (or `WithHessian` in `indexk`) so Lanczos and block-Lanczos mode estimates run on the surrogate without finite-difference probes, while `MinModeSession::reset` drops optimizer history at each surrogate model-update boundary.
+
+```rust
+use ndarray::{Array1, ArrayView1, array};
+use rgsaddle::{
+    MinModeConfig, MinModeKind, MinModeSession, MinModeStatus, PointSurface, SaddleError,
+};
+
+struct SurrogateDoubleWell;
+
+impl PointSurface for SurrogateDoubleWell {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (px, py, pz) = (x[0], x[1], x[2]);
+        let e = (px * px - 1.0).powi(2) + 2.0 * py * py + 2.0 * pz * pz;
+        Ok((e, array![4.0 * px * (px * px - 1.0), 4.0 * py, 4.0 * pz]))
+    }
+
+    fn hessian_vector(
+        &self,
+        x: ArrayView1<f64>,
+        v: ArrayView1<f64>,
+    ) -> Result<Option<Array1<f64>>, SaddleError> {
+        let hxx = 12.0 * x[0] * x[0] - 4.0;
+        Ok(Some(array![hxx * v[0], 4.0 * v[1], 4.0 * v[2]]))
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    let start = array![0.3, 0.2, 0.0];
+    let seed = array![1.0, 0.0, 0.0];
+
+    let mut dimer = MinModeSession::new(
+        MinModeConfig::default().with_kind(MinModeKind::Dimer),
+        start.clone(),
+        seed.clone(),
+    )?;
+    let d_rep = dimer.run(&SurrogateDoubleWell, 200)?;
+    assert_eq!(d_rep.status, MinModeStatus::Converged);
+
+    let mut lanczos = MinModeSession::new(
+        MinModeConfig::default().with_kind(MinModeKind::Lanczos),
+        start,
+        seed,
+    )?;
+    let l_rep = lanczos.run(&SurrogateDoubleWell, 200)?;
+    assert_eq!(l_rep.status, MinModeStatus::Converged);
+    Ok(())
+}
+```
+
+`MinModeSession` estimates a low-curvature direction by dimer rotation or Lanczos, then advances on the min-mode force. L-BFGS takes `Accept::Step` and rgmin's NEB guards: the reflected force is not a potential gradient (Goswami, Gunde, and Jónsson, Front. Chem. (2026), https://doi.org/10.3389/fchem.2026.1807063, Eq. 9), an empty memory scales the step by 0.01, and a two-loop step that reaches the per-atom cap or faces away from the force drops its pairs. In Rust, a `MinModeConfig` with `rotation_tol < 1e-4` drops the default five-degree dimer angle stop unless `with_rotation_angle_tol` set it explicitly. Lanczos reads `rotation_tol` as a dimensionless tolerance on the lowest Ritz residual divided by the absolute Ritz value and, while `set_lanczos_rel_tol` is unset, as its relative Ritz-value tolerance. A Ritz value whose magnitude is at most 1e-14 of the curvature scale, the largest Hessian action norm the estimate has formed, divides the residual by that scale. Only in that unset case and with `rotation_tol >= 1e-4` does Lanczos infer the classic torque window, which stops once two vectors leave that ratio under 1, dividing by the same scale when the Ritz value is that small. A repeat visit whose Rayleigh quotient still agrees with the retained curvature returns after one product (Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys. 121, 9776 (2004), https://doi.org/10.1063/1.1809574; eOn `quit_early`). While the curvature along that mode is not negative the step moves the largest atom by `max_move` along the mode, as eOn's FIRE and L-BFGS do, and the perpendicular force is dropped. Under `set_cg_translate` that step has Euclidean norm `max_move`, as in eOn's conjugate gradients. A parallel gradient within half that step of the minimum of the parabola along the mode keeps the mode's orientation. Once the curvature is negative the perpendicular force stays and the parallel part is reflected, and the L-BFGS pairs and the FIRE velocity survive a mode turn inside 45 degrees. A turn past that cone drops the memory and zeros the FIRE velocity. FIRE opens at timestep 1.0 and has a ceiling of 2.5. When the per-atom cap shortens a negative-curvature step and the arrival is no longer negative, the move is replaced from the last negative point by 0.01 times the reflected force, the empty-memory scale of the L-BFGS guard. A capped step that stays negative is kept. L-BFGS is unchanged, and no C field was added. Lanczos uses the same translation. `FiniteDifference` selects forward or central Hessian actions. A surface can supply analytic actions and excluded directions through `PointSurface`.
+
+The reported force norm must satisfy the selected `ForceGate`, and the estimated curvature must be negative. If a translation reaches a stationary point, the session measures curvature at that accepted position before reporting convergence. This directional test does not certify the full Hessian index; the saddle check below does.
+
+`set_kappa` selects the basin constraint. `set_highs` selects the optional feasible-step control. Call `reset` at a surface change and use `set_force_gate` to select the physical stopping norm.
+
+
+## Certify the saddle index
+
+`MinModeConfig::saddle_check` holds a `SaddleIndexCheck`, on by default.
+At the first converged step at a position the session estimates the lowest curvatures there by block Lanczos on forward-difference Hessian actions, one gradient each, seeded with its own mode and pseudo-random vectors, off the directions that `PointSurface::excluded_modes` names; `index` counts those under `-negative_tol` (1e-3).
+The controls and the method are those of the band's check in `howto/band`.
+A coordinate that is zero in the gradient and stays zero under one forward action along all such coordinates is left out as well, so a host that zeroes the force on the atoms it holds needs no exclusion for them.
+`MinModeReport::saddle_index` carries the result and its evaluations count in `MinModeReport::evaluations`; `MinModeSession::saddle_index` returns it while the session stays at that position, and `saddle_evaluations` and `saddle_escapes` sum the session's.
+The search takes the same steps with the check on or off, and `with_saddle_check(None)` or `set_saddle_check(None)` turns it off.
+A first-order saddle has one negative Hessian eigenvalue, the count eOn requires of the saddle Hessian it builds for a prefactor.
+A start that shares a symmetry with the surface can stop the search on a saddle of higher index, since a mode the symmetry keeps out of the force never moves the point; Zhang and Du, SIAM J. Numer. Anal. 50, 1899 (2012), https://doi.org/10.1137/110843149, Theorem 3.2, show that such a point is a fixed point of the Euler scheme of shrinking dimer dynamics, though not a contractive one.
+
+With `SaddleIndexCheck::escape` set to a `SaddleEscape`, a converged point of index two or more keeps the negative Ritz vector closest to the session's mode as the reaction mode, moves by `push` (0.1, the largest per-atom displacement) along the other negative modes, each to the side of lower energy that two evaluations find, and searches again from there along the reaction mode.
+That is the downward search of Yin, Wang, Chen, Zhang, and Zhang, Phys. Rev. Lett. 124, 090601 (2020), https://doi.org/10.1103/PhysRevLett.124.090601, at index one.
+The step that pushes reports `Running` with the index it left; a later attempt pushes twice as far, and after `max_attempts` (2) the session reports the index it has.
+`set_position` to a new point, `reset` and `set_saddle_check` start the attempts again.
+
+On the frozen-layer Morse slab of `tests/band_fixed_atoms.rs`, Lanczos started on the stationary point of index 3 that the symmetric band converges to, with the band tangent as its mode and `force_tol` 1e-4, certifies index 3, pushes once, and converges on the first-order saddle at -50.6761672669 with index 1, in 1292 evaluations, 126 of them for the two certificates and the push.
+At `force_tol` 1e-3 the dimer and Lanczos both stop after two pushes at index 2, near -50.67580, with curvatures -1.147 and -0.0076: the force falls under the tolerance on that soft second mode before the search leaves it.
+The band's escape, whose climb steps on a quasi-Newton model, reaches the first-order saddle at 1e-3 from the same band (`howto/band`).
+
+
+## Sweep every Hessian mode of a minimum
+
+`hessian_mode_sweep_directions` seeds a saddle search from the Hessian modes of a minimum, soft to stiff, where `soft_mode_then_full_directions` draws random vectors. It recovers the Hessian by central differences over an all-pairs sparsity pattern and diagonalizes it in full, so it costs `6 N` gradient evaluations, `O((3N)^3)` time and `O((3N)^2)` memory for `N` atoms. Above 128 degrees of freedom the diagonalization needs the `faer` feature, and without it the call returns `SaddleError::Solver`.
+
+`rigid_modes` is the number of lowest eigenpairs left out, and it assumes they are the rigid modes of a stable minimum. Each eigenvector takes the sign that makes its first largest-magnitude component positive, so the directions do not follow the sign the eigensolver chose. A direction is the mode plus `carrier` times itself, with the first copy optionally scaled atom by atom by one row of `localization_weights` (entries in `[0, 1]`, rows assigned to modes cyclically), then normalized. Its squared overlap with the mode is at least `(carrier / (1 + carrier))^2`, for every finite positive carrier: the combination is formed at a scale that cannot overflow or underflow, so a carrier of 1e160 or a carrier of 1e-13 on an all-zero weight row still gives the mode direction. A direction that cannot be formed, because the Hessian is not finite, is an error and never a stand-in coordinate axis. The Hessian is recovered with one colour per atom, which is the colouring of the all-pairs pattern, so the call skips the colouring search.
+
+The call returns a `ModeSweepDirectionPlan`. `eigenvalues` is the whole spectrum, ascending. `mode_indices` and `directions` list one entry for every mode that was not skipped, and `minimum_squared_mode_weight` is the overlap bound above.
+
+`mode_sweep_schedule(total_modes, draws)` picks which of those modes to try. The values it returns are positions inside the band `0..total_modes`, not eigenvector columns. A schedule shorter than the band takes the midpoint of each equal-width stratum, so the longest run of modes that nobody visits, ends included, is at most `ceil(total_modes / draws)`. A schedule at least as long as the band visits every mode once before it cycles. The arithmetic is integer, so the schedule is the same on every platform. Neither function draws random numbers, so a sweep is reproducible without a seed.
+
+
+## Run the ART nouveau push, then relax protocol
+
+`ArtNConfig` is an opt-in protocol around the Lanczos session. The `mode` passed to `MinModeSession::new` is the random basin-exit direction. Before activation, one outer step pushes along that fixed direction and takes a bounded number of steepest-descent steps with the gradient projected perpendicular to it. Lanczos starts only after `lanczos_start` pushes. When its lowest Ritz value is below `eigenvalue_threshold`, activation starts: each outer step warm-starts Lanczos from the previous mode, takes the bounded $ |F_\parallel|/\max(|\lambda|,\lambda_{\rm floor}) $ displacement toward the saddle, and relaxes perpendicular to that mode. `MinModeConfig::default()` has `artn = None`, so dimer and ordinary Lanczos searches do not enter this code.
+
+These are the primary-source protocol statements, quoted rather than inferred from the later efficiency comparisons.
+
+-   Malek and Mousseau write that the configuration is "first pushed along a random direction until a negative eigenvalue appears" and "at each step &#x2026; relaxed in the hyperplane perpendicular to it"; after the lowest eigenvalue passes their threshold, it is pushed along that eigenvector while the other directions are minimized (Phys. Rev. E 62, 7723 (2000), https://doi.org/10.1103/PhysRevE.62.7723, Sec. II, p. 7724). The same paragraph on Lanczos says its iterative scheme "can use the direction of the previous step as a seed".
+-   Marinica, Willaime, and Mousseau use ARTn for the iron interstitial landscape and introduce efficiency modifications in that application (Phys. Rev. B 83, 094119 (2011), https://doi.org/10.1103/PhysRevB.83.094119). The implementation-level account by Cancès, Legoll, Marinica, Minoukadeh, and Willaime describes basin relaxation in the hyperplane orthogonal to the fixed random deformation and activation as alternating an eigenvector move with projected steepest descent. It reports 15 Lanczos iterations for each eigenpair calculation (J. Chem. Phys. 130, 114711 (2009), https://doi.org/10.1063/1.3088532, Sec. III, pp. 114711-6–8).
+-   Jay et al. describe the standard workflow as random increments followed by hyperplane relaxation, with Lanczos delayed for "a few iterations"; activation follows the lowest eigenvector and each push is again followed by perpendicular relaxation (J. Chem. Theory Comput. 16, 6726 (2020), https://doi.org/10.1021/acs.jctc.0c00541, "Previous ARTn workflow"). The "ARTn parameters" section reports "6 steps of perpendicular relaxations, after each push", the first eigenpair evaluation "after the third pushing step", an activation count "increased from 5 to 25", and 16 Lanczos iterations (Jay et al. 2020, "ARTn parameters"). Equation 2 gives the 0.5 eV/Angstrom squared denominator floor and says the push cap is "set to 0.2 Angstrom". These reported values set the unit-bearing defaults here. `eigenvalue_threshold` defaults to -0.01 eV/Angstrom squared, at the conservative end of the commonly used -0.01 to -0.05 range; it remains a setter because the papers use system- and unit-dependent thresholds (Malek and Mousseau use a magnitude of $10^{-3}$ in Lennard-Jones units, while Cancès et al. tabulate -2 for their iron tests). `relaxation_step` is likewise explicit because a steepest-descent scale is unit dependent.
+
+```rust
+use rgsaddle::{ArtNConfig, MinModeConfig, MinModeKind, MinModeSession};
+
+let config = MinModeConfig::default()
+    .with_kind(MinModeKind::Lanczos)
+    .with_artn(ArtNConfig::default());
+let mut search = MinModeSession::new(config, displaced_minimum, random_direction)?;
+```
+
+The point builder selects the same path with `Stencil::point(x).preset(Preset::Art)`; adding `.artn(ArtNConfig::default().with_eigenvalue_threshold(...))` directly enables it with changed controls. A benchmarking checkout whose optbench template maps the `[ini.SaddleSearch.artn]` table to this builder can reproduce a bounded smoke campaign with:
+
+```sh
+OPTBENCH_ROOT=/path/to/optbench RGSADDLE_LIB=target/release/librgsaddle.so RGSADDLE_SRC=$PWD \
+  python3 validation/benchmark/pt_island/campaign.py rgsaddle/saddle-artn-lanczos artn-lanczos.json 50
+```
+
+The command keeps the campaign's repetition 1, seed 20261016 and displacement sequence. This repository does not record a result from that smoke run.
+
+
+## Keep one session across a host search
+
+A host that climbs with its own optimizer keeps one session for the whole search. At each new centre it calls `set_position` (`rgsaddle_minmode_set_position`) with the gradient it already has, so the session does not evaluate the centre, then `estimate_mode` (`rgsaddle_minmode_estimate`). The previous mode seeds the next rotation. Dimer rotations also retain their Polak&#x2013;Ribiere force and direction across a translation; a repeated estimate at exactly one centre restarts that rotational history. A failed surface evaluation leaves the retained rotation history unchanged, so a recoverable callback error does not silently turn the next estimate into a fresh rotation. `set_mode` (`rgsaddle_minmode_set_mode`) replaces the seed and clears both rotational history and the carried curvature. `reset` clears them at a surface-epoch boundary. All three need ABI minor 5 and do not extend the minimum-mode configuration layout.
+
+Lanczos through `rgsaddle_minmode_estimate` advances one Hessian action and keeps the Krylov basis until `set_position`, `set_mode`, or `reset`. Repeat the call until the host's own test on the mode passes. The basis grows to the free dimension rather than stopping at `krylov_dim`. After k actions the returned mode lies in the k + 1 Lanczos vectors: the last is the residual direction the k-th action already produced. In the Lanczos basis an eigenvector's components are the Lanczos polynomials at its eigenvalue (Parlett, The Symmetric Eigenvalue Problem, SIAM (1998), https://doi.org/10.1137/1.9781611971163, Ch. 7), and only the known k rows of the tridiagonal enter. The session evaluates them at an estimate of the lowest eigenvalue: the next Ritz value predicted with the last Lanczos diagonal, extrapolated with the two previous Ritz values by Aitken's delta-squared (Aitken, Proc. R. Soc. Edinburgh 46, 289 (1927), https://doi.org/10.1017/S0370164600022070) when those fall with shrinking steps. At the Ritz value the same formula is the plain Ritz vector. No surface call is added, and the reported curvature is still the Ritz value of the k vectors, an upper bound on the lowest eigenvalue. Sella 0.1.1 (Hermes, Sargsyan, Najm, and Zádor, J. Chem. Theory Comput. 15, 6536 (2019), https://doi.org/10.1021/acs.jctc.9b00869) expands by the same residual at this stage, where it has no Hessian yet to precondition with, and tests the Ritz vector of the vectors it has applied the Hessian to. On `lowest-eigenvector/lj38` that iteration and the plain Ritz vector both take about 16.8 actions per start. `MinModeSession::estimate_mode` and `step` still finish their own stop, the residual test or the torque window, before a translation (Olsen, Kroes, Henkelman, Arnaldsson, and Jónsson, J. Chem. Phys. 121, 9776 (2004), https://doi.org/10.1063/1.1809574). A dimer estimate is the full rotation.
+
+These `MinModeConfig` fields set the cost of an estimate and of the translation:
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">Field</th>
+<th scope="col" class="org-left">Effect</th>
+<th scope="col" class="org-left">Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>difference</code></td>
+<td class="org-left"><code>Forward</code>: one gradient per Hessian action, error \(O(dr)\). <code>Central</code>: two, error \(O(dr^2)\)</td>
+<td class="org-left"><code>Forward</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>rotation_angle_tol</code></td>
+<td class="org-left">The dimer stops rotating when an iteration's trial or fitted optimal angle falls under this many radians; 0 turns the test off</td>
+<td class="org-left">five degrees</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>rotation_tol</code></td>
+<td class="org-left">Dimer rotational force, in curvature units. At 1e-4 and any looser value a dimer with <code>rotation_angle_tol</code> set to 0 also stops after one rotation once that force is under 1. An improved dimer with positive <code>rotation_angle_tol</code> leaves the classic window off unless <code>set_torque_window(Some(true))</code> enables it. A tighter value drops the default angle stop unless <code>with_rotation_angle_tol</code> set it explicitly. Lanczos reads this value as a dimensionless residual, the lowest Ritz residual divided by the absolute Ritz value, and, with <code>set_lanczos_rel_tol</code> unset, as the relative change of the lowest Ritz value; a Ritz value whose magnitude is at most 1e-14 of the curvature scale, the largest Hessian action norm the estimate has formed, divides the residual by that scale. Only then and at 1e-4 or looser does it infer the window that stops once two vectors leave that ratio under 1, dividing by the same scale when the Ritz value is that small</td>
+<td class="org-left">1e-4</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>max_rotations</code></td>
+<td class="org-left">Rotation cap for one dimer estimate</td>
+<td class="org-left">20</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>max_move</code></td>
+<td class="org-left">Largest per-atom translation. A curvature that is not negative takes one step along the mode that moves the largest atom by this length, or one of this Euclidean norm under <code>set_cg_translate</code>. The L-BFGS pairs and the FIRE velocity are kept while the mode turns by at most 45 degrees, and dropped past that cone</td>
+<td class="org-left">0.2</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>seed_curvature</code></td>
+<td class="org-left">The first empty L-BFGS step uses \(H_0 = 1/\lvert\lambda\rvert\), and the first FIRE displacement uses that scale, when the step fits in <code>max_move</code>. Later steps are the stepper's own. <code>set_seed_curvature</code> sets the same switch on a live session</td>
+<td class="org-left">off</td>
+</tr>
+</tbody>
+</table>
+
+From C, `difference` and `rotation_angle_tol` sit in `rgsaddle_minmode_config_t` and are read only when the config's `version.minor` is 5 or more. For config minors 5 through 62, `rotation_angle_tol` is read as given and a zeroed C struct keeps the angle test off. From minor 63, `rotation_angle_tol` set to 0 keeps the default five-degree angle stop at every `rotation_tol` unless flag bit 0, `RGSADDLE_MINMODE_EXPLICIT_ROTATION_ANGLE_TOL`, is set. The C++ helper `minmode_config` leaves that flag clear and `rotation_angle_tol` at 0, so at minor 63 it resolves to the five-degree stop and at older minors it keeps the stop off. Its `rotation_tol` value of 1e-3 is a rotational force in curvature units for the dimer, with the resolved angle stop keeping the inferred dimer torque window off. If the caller changes the helper's kind to Lanczos and leaves `set_lanczos_rel_tol` unset, that value is also the dimensionless Ritz tolerance and infers the Lanczos torque window. The Python point stencil does not take `rotation_angle_tol`; its dimer builder explicitly keeps the default five-degree stop at every `rotation_tol`. `rotation_tol` on that stencil defaults to 1e-4.
+
+`set_torque_window` sets the torque window apart from `rotation_tol`.
+From C ABI minor 32 `rgsaddle_minmode_set_torque_window` does the same.
+`Some(false)` keeps a loose residual without the window.
+eOn's improved dimer does that with its `torque_min` of 0.1.
+`Some(true)` adds the window to a tighter residual or to an improved dimer.
+`None`, the default, infers the window from `rotation_tol` for Lanczos and for a dimer whose angle stop is off.
+Lanczos reads the same window, from C ABI minor 41 as well.
+Its first two vectors span the plane of a steepest-descent dimer rotation, and their Ritz vector is that dimer turned to the lowest curvature in the plane (Zeng, Xiao, and Henkelman, J. Chem. Phys. 140, 044115 (2014), https://doi.org/10.1063/1.4862410), so the window ends both estimates on the same rotational force.
+`Some(false)` runs a Lanczos estimate to its residual, as before minor 41.
+Under a host relative tolerance (`set_lanczos_rel_tol`, which the climbing image of a band and the connection driver set), `None` leaves the window off and `Some(true)` adds it.
+
+`examples/minmode_calls.rs` with `RGSADDLE_BENCH_LANCZOS_WINDOW=1` runs Lanczos from the twelve seeded starts of that benchmark with the window off and at the default, into `validation/minmode_lanczos_window.csv`.
+The window-off searches are those of the estimate before minor 41, call for call.
+Calls are the median and interquartile range over the starts that converge in both arms, and steps and Hessian actions are summed over the same starts.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-right" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">System</th>
+<th scope="col" class="org-left">Translator</th>
+<th scope="col" class="org-left">Converged off / on</th>
+<th scope="col" class="org-right">Same saddle</th>
+<th scope="col" class="org-left">Calls off → on</th>
+<th scope="col" class="org-left">Steps off → on</th>
+<th scope="col" class="org-left">Actions off → on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">4 / 3</td>
+<td class="org-right">0</td>
+<td class="org-left">26726 → 15489</td>
+<td class="org-left">2149 → 1267</td>
+<td class="org-left">24513 → 14179</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12 / 12</td>
+<td class="org-right">3</td>
+<td class="org-left">454 [411, 485] → 422 [358, 476]</td>
+<td class="org-left">850 → 938</td>
+<td class="org-left">5453 → 4597</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12 / 12</td>
+<td class="org-right">7</td>
+<td class="org-left">3316 [2860, 3680] → 3106 [2614, 3380]</td>
+<td class="org-left">5196 → 6164</td>
+<td class="org-left">35313 → 32857</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12 / 12</td>
+<td class="org-right">10</td>
+<td class="org-left">628 [607, 680] → 534 [506, 588]</td>
+<td class="org-left">967 → 1004</td>
+<td class="org-left">7157 → 5564</td>
+</tr>
+
+<tr>
+<td class="org-left">vacancy, 255 atoms</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12 / 12</td>
+<td class="org-right">5</td>
+<td class="org-left">992 [892, 1137] → 1190 [871, 1464]</td>
+<td class="org-left">1631 → 2178</td>
+<td class="org-left">10894 → 17236</td>
+</tr>
+
+<tr>
+<td class="org-left">vacancy, 255 atoms</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12 / 12</td>
+<td class="org-right">3</td>
+<td class="org-left">238 [129, 385] → 340 [150, 549]</td>
+<td class="org-left">522 → 679</td>
+<td class="org-left">3153 → 4529</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12 / 12</td>
+<td class="org-right">12</td>
+<td class="org-left">348 [322, 381] → 347 [321, 380]</td>
+<td class="org-left">1584 → 1584</td>
+<td class="org-left">2349 → 2334</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12 / 12</td>
+<td class="org-right">12</td>
+<td class="org-left">42 [39, 43] → 41 [38, 42]</td>
+<td class="org-left">151 → 151</td>
+<td class="org-left">329 → 314</td>
+</tr>
+</tbody>
+</table>
+
+One LJ13 FIRE start converges in both arms.
+Where both arms converge, the window takes fewer calls on the two clusters, though LJ13 FIRE converges from one start fewer, and about the same on Müller-Brown.
+On the vacancy it takes more, with more steps and more actions.
+The climbs follow a different mode, and most LJ13 and vacancy starts reach another saddle, against five of twelve on LJ38 with FIRE and two with L-BFGS.
+The window's constants are the dimer's, eOn's `dimer_torque_max` after one rotation; nothing is fitted to these systems or to the pt-island campaign below.
+
+
+## Stop the rotation on the force error it leaves
+
+`set_rotation_stop_length` turns on the curvature-aware stop of Kästner and Sherwood (J. Chem. Phys. 128, 014106 (2008), https://doi.org/10.1063/1.2815812).
+From the rotational force $F$ and the curvature $C$ the dimer estimates the rotation still to come as $\omega = \tfrac12 \arctan(F / \lvert C\rvert)$, the trial angle it already uses.
+A translation of length $L$ along a mode that is $\omega$ off leaves a force error of about $\lvert C\rvert L \lvert\sin\omega\rvert$, and the rotation stops once that is at most `force_tol`.
+The curvature magnitude taken is the larger of $\lvert C\rvert$ and the two-mode estimate after the rotation, $C - F\tan\omega$: halfway between a negative and a positive mode the dimer reads $C \approx 0$ with 45 degrees still to turn (`validation/rotation_force_stop.py`).
+The stop adds to `rotation_tol`, the angle test, the torque window and `max_rotations`; whichever fires first ends the rotation.
+
+Lanczos stops on the same bound.
+After $j$ actions the residual of the lowest Ritz pair, $\lVert H y - \theta y\rVert$, is the rotational force of the Ritz vector $y$ and $\theta$ is its curvature, so a positive length also accepts a Ritz pair whose residual satisfies the bound, beside the dimensionless `rotation_tol` residual and the relative Ritz-value test.
+
+The length is the host's translation scale; 0, the default, turns the stop off, and a negative or non-finite length is an error.
+From C ABI minor 38 `rgsaddle_minmode_set_rotation_stop_length` does the same, the C++ `MinMode` wrapper has `set_rotation_stop_length`, and Python's `MinMode` takes `rotation_stop_length`.
+
+`examples/minmode_calls.rs` with `RGSADDLE_BENCH_ROTATION_STOP=max_move` runs every system and translator of that benchmark from 12 seeded starts with the stop off and on at $L$ equal to `max_move` (0.2) and `force_tol` 1e-3.
+The sums below are over the starts where both arms reach the same saddle (energy within 1e-6, aligned RMSD within 1e-3).
+Their Lanczos rows predate the torque window of minor 41.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">System</th>
+<th scope="col" class="org-left">Estimator</th>
+<th scope="col" class="org-left">Translator</th>
+<th scope="col" class="org-left">Same saddle</th>
+<th scope="col" class="org-left">Force calls off → on</th>
+<th scope="col" class="org-left">Rotations off → on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">dimer</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">10415 → 10182</td>
+<td class="org-left">3929 → 3828</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">dimer</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">748 → 748</td>
+<td class="org-left">326 → 326</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">4013 → 4001</td>
+<td class="org-left">2369 → 2357</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">492 → 480</td>
+<td class="org-left">329 → 317</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">dimer</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">10/12</td>
+<td class="org-left">4211 → 4056</td>
+<td class="org-left">1639 → 1514</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">dimer</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">1143 → 1143</td>
+<td class="org-left">381 → 381</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">9003 → 9003</td>
+<td class="org-left">7241 → 7241</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">6315 → 6315</td>
+<td class="org-left">5453 → 5453</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">dimer</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">9/12</td>
+<td class="org-left">19159 → 19399</td>
+<td class="org-left">7063 → 7035</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">dimer</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">8/12</td>
+<td class="org-left">3335 → 3334</td>
+<td class="org-left">1731 → 1730</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">12824 → 12824</td>
+<td class="org-left">10456 → 10456</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">8136 → 8136</td>
+<td class="org-left">7157 → 7157</td>
+</tr>
+
+<tr>
+<td class="org-left">vacancy, 255 atoms</td>
+<td class="org-left">dimer</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">6/12</td>
+<td class="org-left">12907 → 12771</td>
+<td class="org-left">5881 → 5745</td>
+</tr>
+
+<tr>
+<td class="org-left">vacancy, 255 atoms</td>
+<td class="org-left">dimer</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">2685 → 2683</td>
+<td class="org-left">1395 → 1393</td>
+</tr>
+
+<tr>
+<td class="org-left">vacancy, 255 atoms</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">3687 → 3687</td>
+<td class="org-left">3153 → 3153</td>
+</tr>
+</tbody>
+</table>
+
+The vacancy Lanczos FIRE row converges from no start in either arm.
+The starts that differ are dimer FIRE and LJ38 dimer L-BFGS runs where both arms converge, to different saddles, or where neither converges; the stop changes the trajectory, and FIRE amplifies the change.
+At $L$ equal to the finite-difference `dr` (1e-3, `RGSADDLE_BENCH_ROTATION_STOP=dr`) the stop fires far earlier.
+It cuts the calls on every matched row, but fewer starts reach the same saddle, and three LJ38 dimer L-BFGS starts and one LJ38 dimer FIRE start that converge with the stop off do not converge with it on.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">System</th>
+<th scope="col" class="org-left">Estimator</th>
+<th scope="col" class="org-left">Translator</th>
+<th scope="col" class="org-left">Same saddle</th>
+<th scope="col" class="org-left">Force calls off → on</th>
+<th scope="col" class="org-left">Rotations off → on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">dimer</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">10415 → 5206</td>
+<td class="org-left">3929 → 1158</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">dimer</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">748 → 659</td>
+<td class="org-left">326 → 241</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">4013 → 3639</td>
+<td class="org-left">2369 → 1957</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">492 → 401</td>
+<td class="org-left">329 → 238</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">dimer</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">11/12</td>
+<td class="org-left">4615 → 3389</td>
+<td class="org-left">1795 → 779</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">dimer</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">1143 → 972</td>
+<td class="org-left">381 → 176</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">10/12</td>
+<td class="org-left">7147 → 4153</td>
+<td class="org-left">5733 → 2676</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">1/12</td>
+<td class="org-left">447 → 362</td>
+<td class="org-left">383 → 286</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">dimer</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">3/12</td>
+<td class="org-left">4095 → 2797</td>
+<td class="org-left">1497 → 571</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">dimer</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">8/12</td>
+<td class="org-left">3335 → 3096</td>
+<td class="org-left">1731 → 1462</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">12824 → 8158</td>
+<td class="org-left">10456 → 5706</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">8/12</td>
+<td class="org-left">4904 → 3592</td>
+<td class="org-left">4303 → 2913</td>
+</tr>
+
+<tr>
+<td class="org-left">vacancy, 255 atoms</td>
+<td class="org-left">dimer</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">2/12</td>
+<td class="org-left">2246 → 602</td>
+<td class="org-left">868 → 74</td>
+</tr>
+
+<tr>
+<td class="org-left">vacancy, 255 atoms</td>
+<td class="org-left">dimer</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">9/12</td>
+<td class="org-left">863 → 677</td>
+<td class="org-left">319 → 133</td>
+</tr>
+
+<tr>
+<td class="org-left">vacancy, 255 atoms</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">4/12</td>
+<td class="org-left">505 → 396</td>
+<td class="org-left">389 → 279</td>
+</tr>
+</tbody>
+</table>
+
+Neither length is better on every row, so the stop stays off unless a host asks for it.
+
+
+## Seed the first translation from the mode curvature
+
+`MinModeConfig::seed_curvature` is off unless a host sets it, and `MinModeSession::set_seed_curvature` does the same on a session that already exists. The C configuration and the point stencil leave it off, so those searches step as before. While the curvature `λ` along the mode is negative, no basin constraint is set, and the displacement `F/|λ|` fits in `max_move`, one translation uses that scale. L-BFGS does it when its memory is still empty, and stores the secant of that step. FIRE does it on its first move. Every later step is the stepper's own update, still capped by `max_move`. A step that would only hit the cap is left to the stepper: that capped move does not depend on `|λ|`. `reset` arms the seed again.
+
+eOn 3.6.0 is the source of the L-BFGS half. `MinModeObjectiveFunction::knownCurvature` returns `-λ` once the mode curvature is negative, and `LBFGS::getStep` sets `H0 = 1/known` on the optimizer's first iteration (<https://github.com/TheochemUI/eOn/blob/v3.6.0/client/MinModeSaddleSearch.cpp> and `client/LBFGS.cpp`). The record https://doi.org/10.5281/zenodo.18529496 is TheochemUI/eOn v2.9.0.1. In that release, and at tag v2.17.0, the opening scale is still a finite difference along the force, so that record is not this seed. After the first step the scale is `s·y / y·y` (Liu and Nocedal, Math. Program. 45, 503 (1989), https://doi.org/10.1007/BF01589116). The reflected force those steps follow is Equation 3 of Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), https://doi.org/10.3389/fchem.2026.1807063. FIRE's later steps are its own integrator (Bitzek, Koskinen, Gähler, Moseler, and Gumbsch, Phys. Rev. Lett. 97, 170201 (2006), https://doi.org/10.1103/PhysRevLett.97.170201).
+
+The comparison below is the median of seven serial release runs after one warmup. Force calls are the cost counted by Goswami, AIP Advances 15, 085210 (2025), https://doi.org/10.1063/5.0283639. `examples/minmode_trust.rs` is the run. Both columns use the dimer. Calls count every gradient, the centre and the rotations included. The step cap is 400 on the quadratic, 800 on the double well and the 12-dimensional diagonals, and 1500 on Müller-Brown. Every search converged.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">System</th>
+<th scope="col" class="org-left">Translator</th>
+<th scope="col" class="org-right">Calls off</th>
+<th scope="col" class="org-right">ms off</th>
+<th scope="col" class="org-right">Calls on</th>
+<th scope="col" class="org-right">ms on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left">quadratic</td>
+<td class="org-left">FIRE</td>
+<td class="org-right">35</td>
+<td class="org-right">0.023</td>
+<td class="org-right">35</td>
+<td class="org-right">0.023</td>
+</tr>
+
+<tr>
+<td class="org-left">quadratic</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-right">11</td>
+<td class="org-right">0.006</td>
+<td class="org-right">11</td>
+<td class="org-right">0.006</td>
+</tr>
+
+<tr>
+<td class="org-left">double well</td>
+<td class="org-left">FIRE</td>
+<td class="org-right">42</td>
+<td class="org-right">0.027</td>
+<td class="org-right">42</td>
+<td class="org-right">0.028</td>
+</tr>
+
+<tr>
+<td class="org-left">double well</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-right">18</td>
+<td class="org-right">0.010</td>
+<td class="org-right">18</td>
+<td class="org-right">0.010</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">FIRE</td>
+<td class="org-right">543</td>
+<td class="org-right">0.322</td>
+<td class="org-right">491</td>
+<td class="org-right">0.290</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-right">46</td>
+<td class="org-right">0.032</td>
+<td class="org-right">84</td>
+<td class="org-right">0.058</td>
+</tr>
+
+<tr>
+<td class="org-left">12-D, curvature 2</td>
+<td class="org-left">FIRE</td>
+<td class="org-right">27</td>
+<td class="org-right">0.017</td>
+<td class="org-right">27</td>
+<td class="org-right">0.018</td>
+</tr>
+
+<tr>
+<td class="org-left">12-D, curvature 2</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-right">9</td>
+<td class="org-right">0.005</td>
+<td class="org-right">9</td>
+<td class="org-right">0.006</td>
+</tr>
+
+<tr>
+<td class="org-left">12-D, curvature 40</td>
+<td class="org-left">FIRE</td>
+<td class="org-right">131</td>
+<td class="org-right">0.082</td>
+<td class="org-right">131</td>
+<td class="org-right">0.088</td>
+</tr>
+
+<tr>
+<td class="org-left">12-D, curvature 40</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-right">11</td>
+<td class="org-right">0.007</td>
+<td class="org-right">11</td>
+<td class="org-right">0.007</td>
+</tr>
+</tbody>
+</table>
+
+Müller-Brown with FIRE is the row that improves. Müller-Brown with L-BFGS takes 84 calls instead of 46, because that one secant is a poor scale for the rest of the surface. The curvature-40 searches take the same number of calls either way. The switch stays off.
+
+
+## A stalled FIRE step on a stiff mode
+
+FIRE 2.0 keeps its opening timestep through the initial delay (Guénolé, Nöhring, Vaid, Houllé, Xie, Prakash, and Bitzek, Comput. Mater. Sci. 175, 109584 (2020), https://doi.org/10.1016/j.commatsci.2020.109584). Minimum mode FIRE opens at 1.0 with a ceiling of 2.5, matching eOn. On a stiff mode the harmonic length `|F|/|λ|` can still be far under the atom cap. `set_fire_curvature`, on by default, waits until neither the force nor the energy has dropped for 2000 steps and `|λ|` is past 4, then takes one step of length `|F|/slope` along the reflected force of Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), https://doi.org/10.3389/fchem.2026.1807063, at most 0.05, provided the energy does not rise by more than 1e-3. A shorter trial is tried when that step would. The probe then stays in place while the curvature remains that steep, so the integrator cannot rebuild the cycle. A search that is still descending is unchanged. `set_fire_curvature(false)` is the previous integrator. L-BFGS does not read the switch. No C field was added. `RGSADDLE_ABI_MINOR` is 34.
+
+`set_cg_translate` replaces the translator with a Polak-Ribiere step perpendicular to the mode and a Newton step along it (Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008), https://doi.org/10.1063/1.2815812; Baker, J. Comput. Chem. 7, 385 (1986), https://doi.org/10.1002/jcc.540070402). `set_lbfgs_project` drops the component of each stored L-BFGS pair along the mode after a turn inside the 45 degree cone. Both are off.
+
+`set_lbfgs_rotate` chooses the dimer rotation plane by L-BFGS in the tangent space of the axis (Kästner and Sherwood, J. Chem. Phys. 128, 014106 (2008), https://doi.org/10.1063/1.2815812). The angle in that plane and the extrapolated trial gradient stay the modified Newton step, the memory restarts at each estimate, and the switch is off unless a host sets it. Lanczos does not read it.
+
+The table is twelve seeds from base 20261111, release, cap 0.2, from `examples/minmode_calls.rs`. Force calls are counted as in Goswami, AIP Advances 15, 085210 (2025), https://doi.org/10.1063/5.0283639, without the energy read after the search. A pair is the same saddle when both searches converge, the energies agree to 1e-6, and the aligned root-mean-square distance is under 1e-3. The calls and the milliseconds are the median of the matched pairs, and the bracket is the interquartile range. `validation/minmode_translator.csv` is every seed. Its Lanczos rows predate the torque window of minor 41.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">System</th>
+<th scope="col" class="org-left">Kind</th>
+<th scope="col" class="org-left">Method</th>
+<th scope="col" class="org-left">Matched</th>
+<th scope="col" class="org-left">Calls off</th>
+<th scope="col" class="org-left">Calls on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">dimer</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">409 [365, 458]</td>
+<td class="org-left">409 [365, 458]</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">dimer</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">94 [93, 96]</td>
+<td class="org-left">94 [93, 96]</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">726 [677, 764]</td>
+<td class="org-left">726 [677, 764]</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ13</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">454 [411, 485]</td>
+<td class="org-left">454 [411, 485]</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">dimer</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">2038 [1746, 2449]</td>
+<td class="org-left">2038 [1746, 2449]</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">dimer</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">408 [374, 784]</td>
+<td class="org-left">408 [374, 784]</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">1070 [1062, 1086]</td>
+<td class="org-left">1070 [1062, 1086]</td>
+</tr>
+
+<tr>
+<td class="org-left">LJ38</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">628 [607, 680]</td>
+<td class="org-left">628 [607, 680]</td>
+</tr>
+
+<tr>
+<td class="org-left">vacancy-255</td>
+<td class="org-left">dimer</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">11/12</td>
+<td class="org-left">3319 [1536, 5447]</td>
+<td class="org-left">3319 [1536, 5447]</td>
+</tr>
+
+<tr>
+<td class="org-left">vacancy-255</td>
+<td class="org-left">dimer</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">98 [94, 104]</td>
+<td class="org-left">98 [94, 104]</td>
+</tr>
+
+<tr>
+<td class="org-left">vacancy-255</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">0/12</td>
+<td class="org-left">-</td>
+<td class="org-left">-</td>
+</tr>
+
+<tr>
+<td class="org-left">vacancy-255</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">238 [129, 385]</td>
+<td class="org-left">238 [129, 385]</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">dimer</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">860 [662, 921]</td>
+<td class="org-left">860 [662, 921]</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">dimer</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">59 [49, 64]</td>
+<td class="org-left">59 [49, 64]</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">FIRE</td>
+<td class="org-left">12/12</td>
+<td class="org-left">342 [315, 346]</td>
+<td class="org-left">342 [315, 346]</td>
+</tr>
+
+<tr>
+<td class="org-left">Müller-Brown</td>
+<td class="org-left">Lanczos</td>
+<td class="org-left">L-BFGS</td>
+<td class="org-left">12/12</td>
+<td class="org-left">42 [39, 43]</td>
+<td class="org-left">42 [39, 43]</td>
+</tr>
+</tbody>
+</table>
+
+Vacancy Lanczos FIRE with the probe off converges on 0 of 12 seeds. With the probe on it converges on 12 of 12, so the matched column is empty. Those twelve searches take 25820 [25310, 27241] calls and 9396.760 [8944.507, 9878.244] ms. The unmatched vacancy dimer seed, 10372713005381289396, converges on neither side. LJ38 dimer L-BFGS uses 408 calls where FIRE uses 2038, but on LJ13 dimer only 4 of 12 L-BFGS searches land on the FIRE saddle. Conjugate gradients match 0/12 there, projected L-BFGS 4/12, Barzilai-Borwein 2/12, and quick-min 1/12. The default translator stays FIRE. The Gaussian-process surrogate in Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), https://doi.org/10.1021/acs.jctc.5c00866, is a different method and is not used here.
+
+
+## Buffers
+
+A dimer estimate keeps one set of buffers for all its rotations: the
+rotational force, its conjugate direction, and the trial and rotated
+dimers.
+Lanczos keeps its Krylov vectors, residual, coefficients and the tables
+of its Ritz solve in the session, and moves each Hessian action into the
+Krylov block it hands back.
+A finite-difference action shifts the point in a buffer of its call and
+forms the difference in the gradient the surface returned.
+Outside the surface, a longer rotation or a larger Krylov space
+allocates nothing more, and every estimate and step is bitwise what it
+was.
+The dimer is the reflection of Goswami, Gunde and Jonsson,
+Front. Chem. 14 (2026), https://doi.org/10.3389/fchem.2026.1807063, Eq. 9,
+and Goswami (2026), arXiv:2603.10992, Eqs. 2.14-2.16, on the rotation
+of Henkelman and Jonsson, J. Chem. Phys. 111, 7010 (1999),
+https://doi.org/10.1063/1.480097.
+The Lanczos estimate is that of Olsen, Kroes, Henkelman, Arnaldsson
+and Jonsson, J. Chem. Phys. 121, 9776 (2004), https://doi.org/10.1063/1.1809574.
+
+`examples/band_scaling.rs` runs up to 300 steps of each search from
+the midpoint of its adatom hop, seeded with the hop direction, in the
+paired runs of `howto/band`.
+The time saved per surface call is fixed, so it shows only where the
+surface is cheap: Lanczos runs 1.11 (1.07-1.13) times as fast as the
+parent at 38 atoms, 1.04 (1.03-1.04) at 128 and 1.01 (1.00-1.02) at 256,
+and the dimer 1.03, 1.02 and 1.02, with 8 to 11 of 12 pairs won.
+At 256 atoms both searches converge at step 108, as they do on the
+parent.
+These runs predate the torque window of minor 41, which changes the
+Lanczos searches.
+
+
+## Read a pt-island campaign miss
+
+The optbench pt-island campaign displaces the Pt island from its
+minimum, climbs, pushes off the saddle 0.2 along the mode on either
+side and minimizes both, as eOn's client does (Chill, Welborn,
+Terrell, Zhang, Berthet, Pedersen, Jónsson, and Henkelman, Modelling
+Simul. Mater. Sci. Eng. 22, 055002 (2014),
+https://doi.org/10.1088/0965-0393/22/5/055002; Goswami, Gunde, and Jónsson,
+Front. Chem. 14 (2026), https://doi.org/10.3389/fchem.2026.1807063; Goswami,
+arXiv:2510.21368 (2025)).
+Its goal is 27 distinct saddles under 1.5 eV that connect to the
+reactant.
+The driver files every other converged index-1 saddle under
+`divergence`: one whose endpoints both leave the reactant
+(disconnected), one 1.5 eV or more up, and a repeat (duplicate).
+None of these is a climb that ran away.
+`validation/benchmark/pt_island/export.py` gives each search the first
+of disconnected, over 1.5 eV and duplicate that applies, and
+`wrong_stationary` for a converged point of another index.
+
+A disconnected search is a saddle that does not border the reactant,
+not a bad push-off.
+`pushoff.py` replays the first 100 catalog searches of each method and
+compares the mode the driver pushes off along with the lowest
+eigenvector of its central-difference Hessian.
+On develop f5eb736 the mode is a unit vector within 0.971 of that
+eigenvector on all 400, and pushing off along the eigenvector instead
+gives the same verdict on all 400.
+On 8fa0eb15 the verdicts of FIRE and rotation-skip agree on 198 of 199
+index-1 points, and the one that differs connects only along the
+session mode.
+For the dimer methods the largest atom displacement of a disconnected
+saddle from the reactant has median 2.6 to 3.6 A, against 1.8 to 1.9 A
+for a connected one.
+
+What changed the disconnected count is the dimer rotation history
+that 116b92e keeps across translations (`explanation`, the dimer of
+Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999),
+https://doi.org/10.1063/1.480097).
+0.2.2 (2db34b42) and 8fa0eb15 lack it; develop has it from
+ef1fd64, a merge that main fast-forwards to.
+Over the first 40 searches rotation-skip leaves 31 disconnected on
+06c55c5, 16 with 116b92e on that base, 29 on 8fa0eb15 and 9 from
+ef1fd64 on (`validation/benchmark/pt_island/results/bisect.csv`).
+`pinned.py` replays dimer FIRE searches 1, 2, 5 and 18 and
+rotation-skip search 62. It fails on 2db34b42 and 8fa0eb15, where FIRE
+1 reaches a 1.2 eV saddle between two other states and rotation-skip
+62 an index-3 point 16 A out, and passes on develop, where FIRE 1 is
+the 0.60 eV hop, FIRE 2 repeats it and rotation-skip 62 is an index-1
+saddle at 3.4 eV.
+FIRE 18 is disconnected on 8fa0eb15, on develop and in eOn.
+
+The table is the first 200 catalog searches (seed 20261016) on
+8fa0eb15 and then 2000 on develop f5eb736, from `results/main` and
+`results/develop` under `validation/benchmark/pt_island`, with eOn 3.5.0's classic
+dimer and L-BFGS (conda-forge build 7ec1840) on the same starts,
+judged on optbench's surface by `eon_catalog.py`.
+Connected counts the saddles toward the goal and unique the
+distinct connected saddles of any barrier.
+eOn's aborts are climbs past its 5 eV `max_energy`.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">Code</th>
+<th scope="col" class="org-left">Method</th>
+<th scope="col" class="org-right">Searches</th>
+<th scope="col" class="org-right">Connected</th>
+<th scope="col" class="org-right">Disconnected</th>
+<th scope="col" class="org-right">Over 1.5 eV</th>
+<th scope="col" class="org-right">Duplicate</th>
+<th scope="col" class="org-right">Wrong stationary</th>
+<th scope="col" class="org-right">eOn abort</th>
+<th scope="col" class="org-right">Unique</th>
+<th scope="col" class="org-right">Force calls per search</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left">8fa0eb15</td>
+<td class="org-left">dimer FIRE</td>
+<td class="org-right">200</td>
+<td class="org-right">15</td>
+<td class="org-right">84</td>
+<td class="org-right">36</td>
+<td class="org-right">65</td>
+<td class="org-right">0</td>
+<td class="org-right">&#xa0;</td>
+<td class="org-right">33</td>
+<td class="org-right">1020</td>
+</tr>
+
+<tr>
+<td class="org-left">8fa0eb15</td>
+<td class="org-left">dimer L-BFGS</td>
+<td class="org-right">200</td>
+<td class="org-right">14</td>
+<td class="org-right">92</td>
+<td class="org-right">40</td>
+<td class="org-right">54</td>
+<td class="org-right">0</td>
+<td class="org-right">&#xa0;</td>
+<td class="org-right">31</td>
+<td class="org-right">472</td>
+</tr>
+
+<tr>
+<td class="org-left">8fa0eb15</td>
+<td class="org-left">rotation-skip</td>
+<td class="org-right">200</td>
+<td class="org-right">11</td>
+<td class="org-right">134</td>
+<td class="org-right">30</td>
+<td class="org-right">23</td>
+<td class="org-right">2</td>
+<td class="org-right">&#xa0;</td>
+<td class="org-right">29</td>
+<td class="org-right">548</td>
+</tr>
+
+<tr>
+<td class="org-left">8fa0eb15</td>
+<td class="org-left">Lanczos L-BFGS</td>
+<td class="org-right">200</td>
+<td class="org-right">10</td>
+<td class="org-right">8</td>
+<td class="org-right">19</td>
+<td class="org-right">163</td>
+<td class="org-right">0</td>
+<td class="org-right">&#xa0;</td>
+<td class="org-right">23</td>
+<td class="org-right">637</td>
+</tr>
+
+<tr>
+<td class="org-left">eOn</td>
+<td class="org-left">classic dimer</td>
+<td class="org-right">200</td>
+<td class="org-right">13</td>
+<td class="org-right">65</td>
+<td class="org-right">29</td>
+<td class="org-right">59</td>
+<td class="org-right">0</td>
+<td class="org-right">34</td>
+<td class="org-right">26</td>
+<td class="org-right">482</td>
+</tr>
+
+<tr>
+<td class="org-left">f5eb736</td>
+<td class="org-left">dimer FIRE</td>
+<td class="org-right">2000</td>
+<td class="org-right">20</td>
+<td class="org-right">618</td>
+<td class="org-right">316</td>
+<td class="org-right">1045</td>
+<td class="org-right">0</td>
+<td class="org-right">&#xa0;</td>
+<td class="org-right">72</td>
+<td class="org-right">1049</td>
+</tr>
+
+<tr>
+<td class="org-left">f5eb736</td>
+<td class="org-left">dimer L-BFGS</td>
+<td class="org-right">2000</td>
+<td class="org-right">22</td>
+<td class="org-right">729</td>
+<td class="org-right">359</td>
+<td class="org-right">888</td>
+<td class="org-right">2</td>
+<td class="org-right">&#xa0;</td>
+<td class="org-right">86</td>
+<td class="org-right">460</td>
+</tr>
+
+<tr>
+<td class="org-left">f5eb736</td>
+<td class="org-left">rotation-skip</td>
+<td class="org-right">2000</td>
+<td class="org-right">23</td>
+<td class="org-right">721</td>
+<td class="org-right">388</td>
+<td class="org-right">868</td>
+<td class="org-right">0</td>
+<td class="org-right">&#xa0;</td>
+<td class="org-right">86</td>
+<td class="org-right">445</td>
+</tr>
+
+<tr>
+<td class="org-left">f5eb736</td>
+<td class="org-left">Lanczos L-BFGS</td>
+<td class="org-right">2000</td>
+<td class="org-right">17</td>
+<td class="org-right">63</td>
+<td class="org-right">177</td>
+<td class="org-right">1743</td>
+<td class="org-right">0</td>
+<td class="org-right">&#xa0;</td>
+<td class="org-right">56</td>
+<td class="org-right">620</td>
+</tr>
+
+<tr>
+<td class="org-left">eOn</td>
+<td class="org-left">classic dimer</td>
+<td class="org-right">2000</td>
+<td class="org-right">23</td>
+<td class="org-right">622</td>
+<td class="org-right">286</td>
+<td class="org-right">659</td>
+<td class="org-right">0</td>
+<td class="org-right">410</td>
+<td class="org-right">62</td>
+<td class="org-right">463</td>
+</tr>
+</tbody>
+</table>
+
+One FIRE search on f5eb736 stops short of an index-1 point.
+The first 200 of f5eb736 leave 56, 67, 65 and 8 disconnected for the
+four methods, against eOn's 65.
+eOn reaches the goal at search 5678, with 23 at search 1467 and 24 at
+
+1.  
+
+Force calls per search include both endpoint minimizations and not the
+Hessian of the index check.
+The wall seconds in `summary.csv` are the driver's whole search,
+Hessian included, on eight shared cores, and eOn's are its client
+alone.
+
+The Lanczos estimate (Olsen, Kroes, Henkelman, Arnaldsson, and
+Jónsson, J. Chem. Phys. 121, 9776 (2004), https://doi.org/10.1063/1.1809574)
+follows the lowest mode out of the basin to the nearest saddles:
+1729 of its 1743 duplicates are the 0.60, 0.62 and 0.99 eV hops, from
+epicentres spread 273 to 302 over the seven island atoms.
+The displacement is the host's and is eOn's: a random atom of the
+island and its neighbours within 3.3 A, each search drawing in turn
+from one generator seeded with the campaign seed.
+On the first 200 starts eOn's Lanczos repeats the 0.60 and 0.62 eV hops
+in 157 of its 171 connected repeats (`searches_eon_lanczos.csv`).
+
+The repeats came from where the estimate stopped, not from the mode it
+reached.
+`results/torque_window` runs the campaign again on 8bb8f88, before the
+torque window of minor 41, and on 3b67101, with it.
+`modes.py` replays the first 300 climbs of a method through
+`rgsaddle_minmode_step` and follows the session mode, here for stock
+Lanczos and the dimer on 8bb8f88 and for Lanczos in the window and a
+dimer without it on 3b67101.
+In all four every climb converges to a point of Hessian index 1, where
+the session mode overlaps the lowest eigenvector by 0.98 or more but
+for one saddle of the dimer without the window, at 0.92.
+After the first estimate the modes of stock Lanczos and of the dimer
+overlap the lowest eigenvector at the start by a median 0.60 and 0.59.
+Stock Lanczos then runs every estimate to its residual, a median 7.2
+surface calls per translation against the dimer's 3.3.
+Converged afresh at each step, the mode leads its climbs to negative
+curvature sooner and lower: at a median step 3, 1.37 eV over the
+reactant with no atom more than 0.53 A from it, against step 4, 1.85 eV
+and 0.75 A for the dimer.
+They end on the nearest saddles, with a median barrier of 0.62 eV
+against 1.20 eV.
+The dimer with `rotation_tol` 1e-6 (`dimer-lbfgs-tight.toml`), which
+leaves the window off and rotates up to its `max_rotations` of 20 at
+almost every step, climbs as stock Lanczos does: 22 calls per
+translation, step 3, 1.30 eV, 0.52 A and a 0.60 eV barrier.
+From 196 of 300 starts it reaches the saddle stock Lanczos reaches,
+where the stock dimer does from 94 (`same_saddle.py`).
+Lanczos in the window climbs as the dimer does: 3.2 calls per
+translation, step 4, 1.94 eV, 0.76 A and a 1.48 eV barrier, and it
+reaches the dimer's saddle from 134 of 300 starts.
+The translator, the start, the frozen atoms and the judging are the same
+in all four, so the climbs part where the estimates stop.
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+
+<col  class="org-right" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">Code</th>
+<th scope="col" class="org-left">Method</th>
+<th scope="col" class="org-right">Searches</th>
+<th scope="col" class="org-right">Connected</th>
+<th scope="col" class="org-right">Disconnected</th>
+<th scope="col" class="org-right">Over 1.5 eV</th>
+<th scope="col" class="org-right">Duplicate</th>
+<th scope="col" class="org-right">Wrong stationary</th>
+<th scope="col" class="org-right">Unique</th>
+<th scope="col" class="org-right">Force calls per search</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left">8bb8f88</td>
+<td class="org-left">dimer L-BFGS</td>
+<td class="org-right">300</td>
+<td class="org-right">16</td>
+<td class="org-right">106</td>
+<td class="org-right">50</td>
+<td class="org-right">128</td>
+<td class="org-right">0</td>
+<td class="org-right">42</td>
+<td class="org-right">461</td>
+</tr>
+
+<tr>
+<td class="org-left">3b67101</td>
+<td class="org-left">dimer L-BFGS, <code>rotation_tol</code> 1e-6</td>
+<td class="org-right">300</td>
+<td class="org-right">15</td>
+<td class="org-right">8</td>
+<td class="org-right">18</td>
+<td class="org-right">259</td>
+<td class="org-right">0</td>
+<td class="org-right">30</td>
+<td class="org-right">1762</td>
+</tr>
+
+<tr>
+<td class="org-left">8bb8f88</td>
+<td class="org-left">Lanczos L-BFGS</td>
+<td class="org-right">300</td>
+<td class="org-right">11</td>
+<td class="org-right">12</td>
+<td class="org-right">22</td>
+<td class="org-right">255</td>
+<td class="org-right">0</td>
+<td class="org-right">25</td>
+<td class="org-right">621</td>
+</tr>
+
+<tr>
+<td class="org-left">3b67101</td>
+<td class="org-left">Lanczos L-BFGS</td>
+<td class="org-right">300</td>
+<td class="org-right">16</td>
+<td class="org-right">140</td>
+<td class="org-right">50</td>
+<td class="org-right">94</td>
+<td class="org-right">0</td>
+<td class="org-right">36</td>
+<td class="org-right">465</td>
+</tr>
+
+<tr>
+<td class="org-left">both</td>
+<td class="org-left">dimer FIRE</td>
+<td class="org-right">2000</td>
+<td class="org-right">21</td>
+<td class="org-right">615</td>
+<td class="org-right">326</td>
+<td class="org-right">1035</td>
+<td class="org-right">0</td>
+<td class="org-right">70</td>
+<td class="org-right">1018</td>
+</tr>
+
+<tr>
+<td class="org-left">both</td>
+<td class="org-left">dimer L-BFGS</td>
+<td class="org-right">2000</td>
+<td class="org-right">22</td>
+<td class="org-right">729</td>
+<td class="org-right">359</td>
+<td class="org-right">888</td>
+<td class="org-right">2</td>
+<td class="org-right">86</td>
+<td class="org-right">459</td>
+</tr>
+
+<tr>
+<td class="org-left">both</td>
+<td class="org-left">rotation-skip</td>
+<td class="org-right">2000</td>
+<td class="org-right">23</td>
+<td class="org-right">721</td>
+<td class="org-right">388</td>
+<td class="org-right">868</td>
+<td class="org-right">0</td>
+<td class="org-right">86</td>
+<td class="org-right">445</td>
+</tr>
+
+<tr>
+<td class="org-left">8bb8f88</td>
+<td class="org-left">Lanczos L-BFGS</td>
+<td class="org-right">2000</td>
+<td class="org-right">17</td>
+<td class="org-right">63</td>
+<td class="org-right">177</td>
+<td class="org-right">1743</td>
+<td class="org-right">0</td>
+<td class="org-right">56</td>
+<td class="org-right">620</td>
+</tr>
+
+<tr>
+<td class="org-left">3b67101</td>
+<td class="org-left">Lanczos L-BFGS</td>
+<td class="org-right">2000</td>
+<td class="org-right">21</td>
+<td class="org-right">944</td>
+<td class="org-right">364</td>
+<td class="org-right">671</td>
+<td class="org-right">0</td>
+<td class="org-right">74</td>
+<td class="org-right">463</td>
+</tr>
+
+<tr>
+<td class="org-left">3b67101</td>
+<td class="org-left">Lanczos L-BFGS</td>
+<td class="org-right">18171</td>
+<td class="org-right">27</td>
+<td class="org-right">8430</td>
+<td class="org-right">3663</td>
+<td class="org-right">6046</td>
+<td class="org-right">3</td>
+<td class="org-right">145</td>
+<td class="org-right">465</td>
+</tr>
+</tbody>
+</table>
+
+In the window Lanczos misses as the dimers do, on disconnected and
+over-barrier saddles, and in 2000 searches it finds 21 connected saddles
+where it found 17 and 74 distinct ones where it found 56, at 463 force
+calls a search instead of 620.
+Run on to the catalog's stop of 27 connected saddles or 20000
+searches, it finds its 26th at search 3776 and the 27th, a sixth
+1.49 eV saddle, at search 18171 (`saddles_lanczos_3b67101.csv`), in
+8445282 force calls.
+The dimer rows are those of both commits: their searches agree one for
+one (`searches_sha256` in `summary.csv`).
+Three dimer FIRE searches and two of the long Lanczos run stop at the
+1000-step cap short of an index-1 point.
+Wall seconds in `summary.csv` are on one core each of a shared
+eight-core machine and are not compared.
+
+`validation/benchmark/pt_island/campaign.py` runs a method;
+`OPTBENCH_ROOT` names an optbench checkout (18fa13dca), `RGSADDLE_LIB`
+the library and `RGSADDLE_SRC` its source.
+For `results/torque_window`, `proxy.py` wrote `summary.csv` at 300 and
+2000 searches and at the end of each run, and the saddles both Lanczos
+runs found, and `same_saddle.py` numbered the saddles of the four
+`modes.py` replays (`same_saddle.csv`).

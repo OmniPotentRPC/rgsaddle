@@ -1,0 +1,649 @@
+
+# Table of Contents
+
+1.  [Scope and provenance](#orgbe0b808)
+2.  [Symmetry-unique hard regions and rate multiplicity](#org8e012fd)
+3.  [One constraint and its metric](#org7a5d4ac)
+4.  [PAFI: a fixed family of planes](#orgfd8fa33)
+5.  [OH-TST: optimise the dividing plane](#orgcbfe966)
+    1.  [Twisted-path PAFI and OH-TST observables](#org19f1589)
+6.  [The constrained ensemble belongs to an MD engine](#org061d3cb)
+    1.  [Restricted MD, curvature, and thermodynamic integration](#org9ddddcb)
+    2.  [Complete OH-TST workflow on engine traits](#orgd564012)
+    3.  [Derived equilibration and drift rejection](#org40ddf6e)
+    4.  [Production backends](#org3afa9f0)
+7.  [Dimer, Lanczos, bands, and Sella are one operator family](#org15a882f)
+8.  [Reproducing the OH-TST paper is a separate validation piece](#orge4e352f)
+9.  [Ranked remaining unification pieces](#orgb867241)
+
+
+
+<a id="orgbe0b808"></a>
+
+# Scope and provenance
+
+The implementation starts from the operator construction used by Goswami,
+Gunde, and Jónsson, *Enhanced climbing image nudged elastic band method with
+Hessian eigenmode alignment*, *Frontiers in Chemistry* 14 (2026),
+https://doi.org/10.3389/fchem.2026.1807063: dimer translation and climbing-image
+translation are reflections made from the same rank-one projector.  Goswami,
+*A Tutorial Review of Bayesian Optimization with Gaussian Processes to
+Accelerate Stationary Point Searches* (2026), arXiv:2603.10992, writes the
+dimer construction in the same form.  The cost accounting used when these
+operators are compared follows Goswami, *Bayesian hierarchical models for
+quantitative estimates for performance metrics applied to saddle search
+algorithms*, *AIP Advances* 15 (2025), https://doi.org/10.1063/5.0283639.  These papers
+are cited first because they are the direct provenance of the implementation
+and its comparisons; they did not introduce PAFI or OH-TST.
+
+The method sources are:
+
+-   Swinburne and Marinica, *Unsupervised Calculation of Free Energy Barriers
+    in Large Crystalline Systems*, *Physical Review Letters* 120, 135503
+    (2018), https://doi.org/10.1103/PhysRevLett.120.135503 (PAFI).
+-   Jóhannesson and Jónsson, *Optimization of hyperplanar transition states*,
+    *The Journal of Chemical Physics* 115, 9644-9656 (2001),
+    https://doi.org/10.1063/1.1415499 (OH-TST).
+-   Bligaard and Jónsson, *Optimization of hyperplanar transition states:
+    Application to 2D test problems*, *Computer Physics Communications* 169,
+    284-288 (2005), https://doi.org/10.1016/j.cpc.2005.03.064 (the twisted-path
+    validation).
+-   Hermes, Sargsyan, Najm, and Zádor, *Sella, an Open-Source
+    Automation-Friendly Molecular Saddle Point Optimizer*, *Journal of Chemical
+    Theory and Computation* 18, 6974-6988 (2022),
+    https://doi.org/10.1021/acs.jctc.2c00395.
+-   Absil, Mahony, and Sepulchre, *Optimization Algorithms on Matrix
+    Manifolds*, Princeton University Press (2008),
+    https://doi.org/10.1515/9781400830244.
+
+
+<a id="org8e012fd"></a>
+
+# Symmetry-unique hard regions and rate multiplicity
+
+A dividing hyperplane is infinite.  In a crystal it can therefore intersect
+several symmetry-equivalent images of the same transition.  Sampling all of
+them is wasteful and can mix images.  `SymmetryUniqueRegion` instead builds
+the Voronoi cell of one representative configuration under point- or
+space-group operations that leave the plane invariant.  Its faces are hard
+half-spaces.  MD reflects the in-plane velocity normal to a crossed face;
+GHMC rejects an outside proposal.  There is no collective variable, spring,
+window, or soft wall.
+
+The region reports the number of distinct in-plane images as its
+`degeneracy`.  `RateMultiplicity` keeps that number separate from the number
+of paths or hop directions:
+
+$$
+k_{\rm total}=m_{\rm path}m_{\rm plane}k_{\rm unique}.
+$$
+
+Each symmetry orbit belongs in exactly one factor.  The twelve fcc
+nearest-neighbour vacancy-hop directions are `m_path=12`.  They are not the
+degeneracy of one hop's dividing plane.  That factor is the order of the
+subgroup that fixes both the reactant and the chosen saddle, the in-plane
+symmetry of that plane.  Jóhannesson and Jónsson, Secs. II D and III D,
+sample one such part of the hyperplane; the construction is in
+.
+Putting the twelve directions into `m_plane` as well as `m_path` counts each
+hop twice.
+
+`AffineSymmetry` and `SymmetrySource` accept generic configuration-space
+point- or space-group maps.  `PeriodicSymmetryOperations` evaluates their
+per-atom displacements with `minimage::Cell`.  `readcon-core` currently
+supplies structures and cells but no generic symmetry-operation source, while
+`minimage` supplies periodic geometry but no space-group finder.  Automatic
+discovery therefore belongs as a future patch to one of those owning
+libraries; rgsaddle consumes operations supplied by the host and does not
+duplicate crystallographic symmetry discovery.
+
+`RegionIntersection` composes the primary symmetry cell with `PathSlab`
+(between neighbouring path planes) and `QuenchedTransitionRegion` (outside
+either rgmin-quenched basin).  It rejects more than one non-unit degeneracy,
+preventing accidental multiplication of overlapping symmetry counts.
+Predicate faces without a geometric penetration depth return to the last
+contained point before velocity reflection.
+
+The engine-neutral sampling budget carries the same region.  The analytic
+BAOAB/GHMC implementation consumes it through its existing drift or proposal
+step.  LAMMPS hard-region sampling is pending a lammpc capability that applies
+a host boundary callback after every `lammpc_session_md_step`, restores a
+complete accepted state on rejection, and refreshes forces after reflection.
+The callback registration entry points already exist, but current lammpc main
+does not apply them to constrained MD steps.  Until lammpc advertises that
+behavior, the LAMMPS adapter fails closed when a sampling budget carries a
+region.
+
+
+<a id="org7a5d4ac"></a>
+
+# One constraint and its metric
+
+Let Cartesian coordinates be $x$, let $M$ be a positive diagonal mass
+matrix, and put
+
+$$
+q=M^{1/2}x .
+$$
+
+A Cartesian plane with covector $a$ through $x_0$ is
+$a^{T}(x-x_0)=0$.  In mass-weighted coordinates it has unit normal
+
+$$
+\nu={M^{-1/2}a\over\sqrt{a^{T}M^{-1}a}},\qquad q_0=M^{1/2}x_0 .
+$$
+
+Its tangent space and Euclidean projector in $q$ are
+
+$$
+T_q{\cal H}=\{v:\nu^Tv=0\},\qquad
+P_q=I-\nu\nu^T .
+$$
+
+Mapping a tangent displacement back to Cartesian coordinates gives
+
+$$
+P_x=M^{-1/2}P_qM^{1/2}
+   =I-{M^{-1}aa^T\over a^TM^{-1}a}.
+$$
+
+Forces are covectors, so their Cartesian map is $P_x^T$, not $P_x$.
+The code therefore performs all OH-TST geometry in $q$.  PAFI without
+explicit masses is the unit-mass case.  `MassWeighted`,
+`Hyperplane::from_cartesian`, and the fixed-energy path take those maps
+from `MassMetric` rather than hiding a metric in a dot product.
+
+The affine level set is a flat embedded manifold.  Its retraction is exact:
+
+$$
+R_q(v)=q+P_qv,\qquad
+\Pi_{\cal H}(y)=y-\nu\nu^T(y-q_0).
+$$
+
+For a non-unit normal $n$, both occurrences of $\nu\nu^T$ become
+$nn^T/(n^Tn)$.  This is the arithmetic retained by PAFI.
+
+
+<a id="orgfd8fa33"></a>
+
+# PAFI: a fixed family of planes
+
+Let $X(s)$ be a path parameterised by arc length, $n(s)=X'(s)$, and
+$n'(s)=X''(s)$.  PAFI samples the canonical distribution restricted to
+
+$$
+{\cal H}_s=\{q:(q-X(s))^Tn(s)=0\}.
+$$
+
+Projected Brownian dynamics removes the normal part of drift and noise with
+$P_s=I-nn^T$, then applies the exact affine restoration.  With
+
+$$
+\psi(q,s)=(q-X(s))^Tn'(s),
+$$
+
+the mean-force estimator used in `pafi.rs` is
+
+$$
+{dF\over ds}
+ =\left\langle
+   \bigl(\nabla V(q)^Tn(s)\bigr)\bigl(1-\psi(q,s)\bigr)
+  \right\rangle_{{\cal H}_s}.
+$$
+
+`average_hyperplane` estimates this expression and its block error.
+`pafi_profile` evaluates independent fixed planes along the path.
+`integrate_profile` applies the trapezoid rule and propagates the plane
+errors.  PAFI optimises neither $X$ nor a plane normal; path quality and
+sampling error are separate inputs to the result.
+
+
+<a id="orgcbfe966"></a>
+
+# OH-TST: optimise the dividing plane
+
+Write a plane using a pivot $c$, unit normal $\nu$, and offset $d$:
+
+$$
+{\cal H}(\nu,d;c)=\{q:\nu^T(q-c)=d\}.
+$$
+
+Its configurational free energy, up to the common normalisation, is
+
+$$
+A(\nu,d)
+=-k_BT\log\int
+ \delta\!\left(\nu^T(q-c)-d\right)
+ e^{-V(q)/(k_BT)}\,dq .
+$$
+
+Transition-state theory is variational: maximizing $A$ minimizes the rate
+within this family of hyperplanar dividing surfaces.  An unoriented plane
+normal is a point of $\mathrm{Gr}(D,1)$.  When the reactant-to-product sign
+is retained it is represented on $S^{D-1}$; antipodal normals describe the
+same geometric plane with opposite side labels.  Thus the outer problem is
+
+$$
+\max_{([\nu],d)\in\mathrm{Gr}(D,1)\times\mathbb R} A(\nu,d),
+$$
+
+or the oriented sphere equivalent.  At $\nu$, a normal update $w$ is
+projected by $P_\nu=I-\nu\nu^T$, and the retraction is
+$(\nu+w)/\|\nu+w\|$.  Held translations, rotations, or user directions
+replace the sphere by rgmin's `SubspaceSphere`.  The offset is a Euclidean
+factor.  `PlaneOptimizer` assembles those factors as an rgmin
+`ProductManifold` and minimizes $-A$ with its Riemannian trust region.
+In ambient dimension $D=3N$, a unit normal on $S^{D-1}$ has $D-1=3N-1$
+degrees of freedom and the signed offset has one, so the combined family has
+$D$ degrees of freedom before held rigid modes. `PlaneOptimizer` optimizes
+all $D-1$ orientational ones. Johannesson and Jonsson (2001) describe the
+orientational optimization as $D-2$ dimensional, as a size comparison with
+the one-dimensional translation along the reaction coordinate; they do not
+say which direction that count leaves out.
+
+Sample sizing and convergence are separate.  The gradient norm test may grow
+the constrained ensemble up to `max_records`.  It does not decide
+convergence: the accepted translation and orientation steps must instead be
+smaller than `confidence` times their gradient errors propagated through the
+current model curvature, or smaller than `tolerance`, for `patience`
+consecutive accepted steps.  `max_iterations` and `max_evaluations` return a
+finite last estimate with `PlaneOptimizerStatus::MaxIterations` or
+`PlaneOptimizerStatus::MaxEvaluations`; sampling noise cannot make the run
+unbounded.
+
+Sampling gives the ambient derivatives
+
+$$
+{\partial A\over\partial p}
+ =\langle\nu^T\nabla V\rangle\nu,\qquad
+{\partial A\over\partial\nu}
+ =-\left\langle(\nu^T\nabla V)(q-p)\right\rangle ,
+$$
+
+followed by tangent projection.  Moving the pivot inside the plane is a
+gauge.  Recentering it at the sample centroid leaves the plane unchanged
+and expresses the rotational derivative as the corresponding covariance.
+
+The `ohtst` Cargo feature is opt-in.  There is one shared `Hyperplane` type;
+`Hyperplane::new` stores a unit normal and `Hyperplane::from_path` retains
+PAFI's path derivative only to preserve the historical $nn^T/(n^Tn)$
+operation order.  The analytic two-dimensional unit test uses
+$V(x,y)=-x^2/2+y^2$, whose constrained Gaussian has its closed-form
+optimal plane at $x=0$, normal to the unstable mode.
+
+
+<a id="org19f1589"></a>
+
+## Twisted-path PAFI and OH-TST observables
+
+For Bligaard and Jónsson's
+$$
+V(x,y)={V_0\over\cosh^2(\alpha x/2)}
+       +{1\over2}\mu\omega^2(y-Cx)^2 ,
+$$
+the checked analytic reference integrates each line through the saddle only
+to the stated $V_0+22k_BT$ energy cutoff.  It scans the line orientation
+and compares free energies relative to the paper's reference orientation.
+The same test then exercises the rotation-only `PlaneOptimizer` through
+`AnalyticSurfaceSampler` and `HyperplaneSampler`.
+
+At $T=0.01E_a/k_B$, the cutoff quadrature gives a low-angle maximum of
+$1.16954^\circ$; the paper quotes $1.24^\circ$.  The test records that
+measured discrepancy and does not weaken quadrature or manufacture the
+published number.
+
+PAFI and OH-TST answer different questions on this surface.  PAFI fixes a
+reaction path $X(s)$, samples planes normal to that path, estimates
+$dF/ds$, and integrates a one-dimensional potential of mean force.  It
+does not rotate those planes.  OH-TST instead holds a candidate dividing
+line through the saddle and varies its orientation to maximize its
+constrained free energy.  The abrupt low-angle/high-angle branch switch is
+therefore an OH-TST variational result; PAFI sees it only if a separately
+chosen path supplies the corresponding family of plane normals.
+
+
+<a id="org061d3cb"></a>
+
+# The constrained ensemble belongs to an MD engine
+
+rgsaddle owns plane geometry and statistical estimators, not production
+molecular dynamics.  `HyperplaneSampler` is the engine boundary.  Its input
+is a `HyperplaneSampleBudget` containing $k_BT$, seed, equilibration,
+stride, record count, position-retention request, and an explicit coordinate
+convention.  `MassWeighted` means $q=M^{1/2}x$, with a Euclidean unit
+normal.  `Cartesian` means the engine applies its configured masses when it
+projects momenta and forces.
+
+Each `HyperplaneObservation` reports the mechanical constraint force
+$-\nu^T\nabla V$, an optional complete PAFI gradient record, the PAFI
+Jacobian term $\psi$, an optional position, the force after constrained
+directions have been removed, and any velocity component removed by the
+integrator.  A general engine need only return positions and the unit-normal
+constraint force for PAFI: rgsaddle derives $\psi$ and the path-normal
+scaling from the path geometry.  The complete PAFI record is used by the
+analytic reference backend to retain its historical floating-point operation
+order.  `HyperplaneEnsemble` adds engine force-call accounting and an
+acceptance fraction.  PAFI and OH-TST consume these records; they compute
+means, torques, Jacobian corrections, autocorrelation times, block errors,
+and retained configurations without knowing the engine handle type.
+
+`AnalyticSurfaceSampler<S: PointSurface>` is the named reference backend.
+It keeps the existing projected BAOAB/GHMC dynamics for analytic-surface
+tests only.  PAFI's historical overdamped analytic sampler also implements
+the interface so its seeded bit dump remains unchanged.  Neither is the
+production path.
+
+
+<a id="org9ddddcb"></a>
+
+## Restricted MD, curvature, and thermodynamic integration
+
+Restricted molecular dynamics and proton-transfer thermodynamic integration
+use the same boundary rather than a second constrained eigensolver or Gaussian
+sampler.
+
+For a plane with additional orthonormal constrained rows $U$, define
+$$
+Q=I-\nu\nu^T-U^TU,\qquad H_{\cal H}v=QH(Qv).
+$$
+The implemented API is
+
+```rust
+Hyperplane::hessian_vector(
+    surface: &impl PointSurface,
+    vector: ArrayView1<f64>,
+    constrained_rows: ArrayView2<f64>,
+    config: &MinModeConfig,
+) -> Result<Array1<f64>, SaddleError>;
+
+Hyperplane::lowest_modes(
+    surface: &impl PointSurface,
+    constrained_rows: ArrayView2<f64>,
+    count: usize,
+    config: &MinModeConfig,
+    ) -> Result<HyperplaneModes, SaddleError>;
+```
+
+Both calls are thin public entries to rgsaddle's existing
+`PointSurface::hessian_vector` / finite-difference action and block-Lanczos
+implementation.  They must project the trial vector before the action and
+the result afterwards.  `HyperplaneModes` reports the shared workspace's
+Hessian-action and finite-difference evaluation counts.  The analytic test
+checks the restricted Ritz values and vectors against the exact projected
+Hessian.
+
+An `ExactGaussianPlaneSampler` implements `HyperplaneSampler` for a
+quadratic model $V(q)=V_c+g^T(q-c)+\tfrac12(q-c)^TH(q-c)$.  It obtains the
+positive in-plane spectrum from `Hyperplane::lowest_modes`, draws independent
+normal coordinates with variance $k_BT/\lambda_i$, and reports the same
+positions, normal constraint forces, projected forces, and Jacobian fields
+as an MD engine.  Zero or negative free curvatures are typed model errors.
+
+Thermodynamic integration uses
+$$
+V_\lambda=(1-\lambda)V_{\rm harmonic}+\lambda V_{\rm full},\qquad
+{dF\over d\lambda}
+=\left\langle V_{\rm full}-V_{\rm harmonic}\right\rangle_{\lambda,{\cal H}} .
+$$
+The sampler request has an extensible observable selector and each returned
+record has named scalar observables.  The implemented estimator API is:
+
+```rust
+trait HyperplaneSampler {
+    fn sample_hyperplane(
+        &mut self,
+        plane: &Hyperplane,
+        budget: &HyperplaneSampleBudget,
+    ) -> Result<HyperplaneEnsemble, SaddleError>;
+}
+
+fn thermodynamic_integration<E: HyperplaneSampler>(
+    sampler: &mut E,
+    plane: &Hyperplane,
+    config: &ThermodynamicIntegrationConfig,
+) -> Result<ThermodynamicIntegrationEstimate, SaddleError>;
+```
+
+The TI estimator selects Gauss-Legendre nodes, consumes the named
+$V_{\rm full}-V_{\rm harmonic}$ series, applies the same automated
+equilibration and `block_mean` implementation as PAFI and OH-TST, and uses
+independent per-node block errors.  Backend-specific Hamiltonian
+interpolation remains behind the sampler.  The
+`restricted_thermodynamic_integration` spelling documents the Amsel-style
+fixed-plane MD/TI use: it does not optimize or move the chosen plane.
+
+
+<a id="orgd564012"></a>
+
+## Complete OH-TST workflow on engine traits
+
+Amsel's Cu run demonstrates why a sampled plane factor must not be labelled
+OH-TST by itself.  The complete path has three first-class operations:
+
+```rust
+optimize_plane(&mut impl HyperplaneSampler, initial, config)
+    -> Result<PlaneOptimum, SaddleError>;
+reversible_work(&mut impl HyperplaneSampler, path, config)
+    -> Result<WorkEstimate, SaddleError>;
+transmission_coefficient(&mut impl HyperplaneDynamics, plane, config)
+    -> Result<TransmissionCoefficient, SaddleError>;
+```
+
+`optimize_plane` and `reversible_work` use repeated constrained ensembles and
+depend only on `HyperplaneSampler`.  BAR and MBAR request optional arbitrary
+configuration energies through the same engine trait.  The transmission coefficient
+$\kappa$ does not: it launches flux-weighted configurations from the plane
+and propagates unconstrained trajectories to basin commitment.  A separate
+`HyperplaneDynamics` engine trait exposes that shooting operation.
+`AnalyticSurfaceDynamics` is the BAOAB/Newtonian analytic reference.
+Pretending that `sample_hyperplane` can provide those operations would hide
+the recrossing correction.  `ohtst_rate` combines the free-energy factor and
+$\kappa$ only when both typed results are present.
+
+
+<a id="org40ddf6e"></a>
+
+## Derived equilibration and drift rejection
+
+`thermalize` (PAFI) and `burn_in` (OH-TST) are minimum engine warm-up floors,
+not declarations that equilibrium has been reached.  After that floor the
+estimator applies John D. Chodera, *A Simple Method for Automated
+Equilibration Detection in Molecular Simulations*, *Journal of Chemical
+Theory and Computation* 12, 1799-1805 (2016),
+https://doi.org/10.1021/acs.jctc.5b00784.  For every candidate discard $t_0$, it
+estimates the statistical inefficiency
+
+$$
+g(t_0)=\max(1,2\tau(t_0))
+$$
+
+and selects the tail maximizing
+
+$$
+N_{\mathrm{eff}}(t_0)={N-t_0\over g(t_0)}.
+$$
+
+The candidate scan is coarse-to-fine for bounded cost, followed by an exact
+scan around the best coarse candidate.  PAFI applies it to the plane-gradient
+series; OH-TST applies it to the constraint-force series.  Statistics are
+then computed only from the selected tail.
+
+A second, independent stationarity guard splits that tail in half.  It
+requires
+
+$$
+\left|\bar f_1-\bar f_2\right|\le 4\sqrt{\mathrm{SE}_1^2+\mathrm{SE}_2^2},
+$$
+
+where each standard error comes from correlation-length block means.  The
+factor four is a conservative four-sigma guard: it rejects visible drift
+without treating an ordinary finite-sample fluctuation as failed
+equilibration; a 32-ulp scale floor handles analytically constant series.
+`EquilibrationReport` records the floor plus selected
+discard, $\tau$, $N_{\mathrm{eff}}$, drift, error, threshold, and
+pass/fail.  A failed guard returns `SaddleError::NotEquilibrated`; no plane
+estimate is silently emitted.
+
+
+<a id="org3afa9f0"></a>
+
+## Production backends
+
+-   **LAMMPS through OmniPotentRPC/lammpc.** `LammpsHyperplaneSampler` loads the
+    pinned rgpot potential profile and creates a lammpc session. lammpc's
+    projected BAOAB stepper constrains $\nu^T(q-p)=0$, projects force and
+    velocity in the selected coordinate convention, thermostats tangent
+    velocity, and restores the plane after each drift. It returns the scalar
+    constraint force, removed velocity, position, projected force, and force
+    call count. Hard-region enforcement remains pending the constrained-step
+    callback capability described above. No LAMMPS class or pointer appears in
+    the Rust trait.
+-   **OpenMM.**  The adapter may represent the signed plane coordinate with a
+    `CustomCVForce` plus a constraint-force readback, or use a
+    constraint-projection integrator.  It must expose the same scalar
+    constraint force, projected velocity, positions, mass/unit convention,
+    step budget, and seed mapping.  A penalty restraint without exact
+    constraint-force recovery is not equivalent.
+-   **GROMACS.**  The adapter uses pull code configured for a plane coordinate,
+    reached through the supported API.  It must return the pull constraint
+    force, removed momentum or the Jacobian term, optional positions, units,
+    masses, step/evaluation accounting, and seed mapping.  Text-log scraping
+    is not an API.
+
+The C ABI is callback based so the engine retains ownership:
+
+```c
+typedef struct rgsaddle_hyperplane_sampler rgsaddle_hyperplane_sampler;
+typedef struct rgsaddle_hyperplane_budget rgsaddle_hyperplane_budget;
+typedef struct rgsaddle_hyperplane_observation rgsaddle_hyperplane_observation;
+
+typedef int32_t (*rgsaddle_sample_hyperplane_fn)(
+    void *engine_context,
+    const double *point,
+    const double *unit_normal,
+    size_t dimension,
+    const rgsaddle_hyperplane_budget *budget,
+    int32_t (*emit)(void *, const rgsaddle_hyperplane_observation *),
+    void *emit_context);
+
+int32_t rgsaddle_hyperplane_thermodynamic_integration(
+    rgsaddle_hyperplane_sampler *, /* plane, config, output */);
+```
+
+The opaque sampler stores the callback, engine context, coordinate
+convention, units, and masses.  The observation uses borrowed arrays valid
+only during `emit`.  Construction, destruction, fixed-layout budget and
+observation structs, and fixed-plane TI are implemented at ABI minor 42.
+The Python binding presents the same operation as
+`hyperplane_thermodynamic_integration` and calls a Python-owned sampler at
+every Gauss-Legendre node.
+The callback receives the plane point and normal, the coupling lambda, the
+thermal energy, the seed, and the thermalize, stride, and sample counts, and
+returns float64 C-contiguous observations of `V_full - V_harmonic`.
+Callback bindings for plane optimization,
+reversible work, PAFI profiles, and unconstrained shooting remain designed
+but not implemented.
+
+
+<a id="org15a882f"></a>
+
+# Dimer, Lanczos, bands, and Sella are one operator family
+
+For a unit direction $u$, define
+
+$$
+P_u=I-uu^T,\qquad H_u=I-2uu^T=2P_u-I .
+$$
+
+`P_u` keeps the perpendicular component and `H_u` reflects the parallel
+component.  NEB uses $P_tF$ for the true force and the complementary
+rank-one part for its spring force.  A climbing image uses $H_tF$.
+Dimer translation and Lanczos min-mode following use $H_uF$ after their
+different procedures have supplied $u$.  The projection is identical;
+only the source and update of the direction differ.
+
+Sella equalities $c(x)=0$ have Jacobian $J$.  Their tangent projector is
+
+$$
+P_J=I-J^T(JJ^T)^+J .
+$$
+
+For one normalized row $J=\nu^T$, $P_J=P_\nu$.  Sella's
+internal-coordinate constraints, a PAFI plane, an OH-TST plane, NEB
+nudging, and min-mode force splitting are therefore rank-$k$ members of
+the same projector family.  Nonlinear Sella constraints differ only because
+$J(x)$ and the restoration retraction must be recomputed at each point.
+
+The first shared code piece is deliberately small:
+
+-   `TangentProjector` owns force/vector projection.
+-   `ProjectedConstraint` adds level-set restoration.
+-   `Hyperplane` is shared by PAFI and OH-TST and retains PAFI's raw path
+    derivative only for bitwise-stable projection.
+-   `HyperplaneSampler` is the engine-neutral constrained-ensemble boundary.
+-   `UnitNormal` retains the historical band/dimer/Lanczos arithmetic.
+-   `ManifoldTangent` binds any rgmin `Manifold`, including Sella's
+    `Constraints`, at a point.
+-   PAFI, OH-TST, and `stencil::perp` use these shared implementations.
+
+The checked-in before/after bit dump covers a seeded PAFI sample and the
+unit-normal projector.  It is in addition to the existing PAFI, band,
+min-mode, Sella, and rgmin manifold tests.
+
+
+<a id="orge4e352f"></a>
+
+# Reproducing the OH-TST paper is a separate validation piece
+
+The present change validates the implementation; it does not claim to
+reproduce published numbers.  A reproduction of Jóhannesson and Jónsson requires all of the
+following to be pinned in a separate validation directory:
+
+1.  the paper's Appendix-B potential and derivatives, parameters, reduced
+    units, masses, and every reported temperature;
+2.  the initial saddle plane and the allowed position/orientation degrees of
+    freedom for each model;
+3.  a converged line integral or constrained-sampling protocol for every
+    trial plane, including domain truncation, quadrature tolerance or
+    thermostat, friction, time step, equilibration, stride, and sample count;
+4.  the outer-plane stopping rule and the handling of the $\nu\sim-\nu$
+    gauge;
+5.  reactant partition-function boundaries and the flux prefactor used to
+    convert the optimized plane free energy to the OH-TST rate;
+6.  the dynamical transmission-coefficient definition, launch distribution,
+    basin commitment rule, trajectory length, and recrossing convention when
+    comparing corrected rates;
+7.  deterministic seeds plus raw per-plane force, torque, uncertainty, free
+    energy, and rate outputs;
+8.  digitized paper tables/figures with provenance, units, and an explicit
+    numerical acceptance tolerance chosen before the comparison.
+
+Without those inputs, agreement with a plotted or rounded paper value is not
+a reproducible test.
+
+
+<a id="orgb867241"></a>
+
+# Ranked remaining unification pieces
+
+1.  **Rank-$k$ metric projector.** Move Sella's row-space orthogonalisation,
+    held-mode projection, and OH-TST subspace projection behind one
+    rank-revealing $J$-projector with Euclidean and diagonal-mass metrics.
+    This removes the largest remaining duplication and must preserve the
+    present rank threshold and operation order.
+2.  **Point-dependent constraint adapter.** Add a fallible constraint API that
+    returns $J(x)$, projects tangents, and restores a trial point.  Migrate
+    Sella `Constraints` and then expose it as an rgmin manifold without
+    swallowing shape or restoration errors.
+3.  **Shared Householder functions.** Express climbing image, dimer translation,
+    Lanczos translation, and band perpendicular splitting through paired
+    `project/reflect` functions while retaining each call site's current
+    arithmetic and golden hashes.
+4.  **Additional production engine adapters.** Implement OpenMM and GROMACS
+    against `HyperplaneSampler` and the C ABI contract above.
+5.  **Production callback bindings.** Complete callback-owned C and Python
+    engine adapters for optimization, work, TI, and shooting without exposing
+    an engine pointer to Rust.
+6.  **Paper reproduction suite.** Implement the eight pinned inputs above and
+    compare paper observables only after independent quadrature references
+    pass.

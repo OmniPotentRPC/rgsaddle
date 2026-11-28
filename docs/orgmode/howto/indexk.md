@@ -1,0 +1,63 @@
+`IndexKSession` and `indexk_step` take one minimum-mode step in a k-dimensional unstable subspace. `k = 1` is `MinModeSession`: the same dimer or Lanczos estimate, the same translated force, and the same translator step. A Gaussian-process surrogate supplies the Hessian action through `PointSurface::hessian_vector`, or through `WithHessian` when the product is a separate callback. With no action, the session uses the finite difference on `MinModeConfig`.
+
+The translated force is `F - 2 Σ_i v_i (v_i · F)` once every one of the k curvatures is negative (Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), https://doi.org/10.3389/fchem.2026.1807063, Equation 3, for one mode). While any of those curvatures is not negative the step climbs inside the subspace and drops the orthogonal force, the one-mode rule of Henkelman and Jónsson, J. Chem. Phys. 111, 7010 (1999), https://doi.org/10.1063/1.480097. `reflect_force` is the Householder product alone. `translated_force` applies the sign rule. By default `IndexKConfig::negative_tol` is `0.0`, so convergence requires every requested curvature to be strictly negative (`curvature < 0.0`) and the force to be within tolerance. Chain `IndexKConfig::with_negative_tol` with a finite non-negative threshold so every requested curvature lies strictly below `-negative_tol`. `SaddleIndexCheck::negative_tol` defaults to `NEGATIVE_CURVATURE_TOL` (1e-3), and that positive value is a valid argument. `IndexKSession::new` rejects a negative threshold.
+
+The k lowest pairs are a local block iteration behind `LowestEigenpairs`. LOBPCG keeps the previous block and its conjugate direction (Knyazev, SIAM J. Sci. Comput. 23, 517 (2001), https://doi.org/10.1137/S1064827500366124). Lanczos selects a reorthogonalized block Lanczos. Either slot can later call rgmin's `lowest_eigenpairs`. The step does not loop the one-vector eigenpair.
+
+Gould, Ortner, and Packwood, Math. Comp. 85, 2939 (2016), https://doi.org/10.1090/mcom/3096, analyse the dimer; the third author is Packwood, not Zhang. The shrinking-dimer convergence they use is Zhang and Du, SIAM J. Numer. Anal. 50, 1899 (2012), https://doi.org/10.1137/110843149. The index-k dimer is Yin, Zhang, and Zhang, SIAM J. Sci. Comput. 41, A3576 (2019), https://doi.org/10.1137/19M1253356. The surrogate that owns the Hessian product is the one in Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), https://doi.org/10.1021/acs.jctc.5c00866.
+
+From C, ABI minor 37 adds `rgsaddle_indexk_create`, `rgsaddle_indexk_step`, `rgsaddle_indexk_modes`, `rgsaddle_indexk_translated`, `rgsaddle_indexk_position`, `rgsaddle_indexk_set_position`, `rgsaddle_indexk_free`, and `rgsaddle_reflect_force`. `modes` is row-major n-by-k with `n = 3 * n_atoms`, and may be NULL. A null Hessian callback estimates the action from the surface. The report's `curvature` is the lowest of the k values. The translator is FIRE. `k = 1` with `RGSADDLE_MINMODE_LOBPCG` uses Lanczos. `k < 1` or `k` larger than the dimension makes `rgsaddle_indexk_create` return NULL. `rgsaddle_hessian_fn` receives the vector only. A host that needs the geometry calls `rgsaddle_indexk_step_at` (ABI minor 69), which takes a `rgsaddle_hessian_at_fn` that also receives the position. The C++ owner is `rgsaddle::IndexK` in `include/rgsaddle/session.hpp`, with `step` and `step_at`. There is no Python session name.
+
+The runnable example is the doctest on `IndexKSession`: an index-2 quadratic, an analytic Hessian action, and a search that finishes at the origin. `cargo test --doc indexk` runs it.
+
+
+# Runnable example: index-k minimum-mode search
+
+```rust
+use ndarray::{Array1, Array2, ArrayView1, array};
+use rgsaddle::{
+    BlockEigenKind, HessianProduct, IndexKConfig, IndexKSession, MinModeConfig, MinModeStatus,
+    PointSurface, SaddleError, WithHessian, indexk_step, reflect_force, translated_force,
+};
+
+struct Index2Quad;
+
+impl PointSurface for Index2Quad {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let e = -0.5 * x[0] * x[0] - x[1] * x[1] + 2.0 * x[2] * x[2];
+        Ok((e, array![-x[0], -2.0 * x[1], 4.0 * x[2]]))
+    }
+}
+
+struct AnalyticHessian;
+
+impl HessianProduct for AnalyticHessian {
+    fn product(
+        &self,
+        _x: ArrayView1<f64>,
+        v: ArrayView1<f64>,
+    ) -> Result<Array1<f64>, SaddleError> {
+        Ok(array![-v[0], -2.0 * v[1], 4.0 * v[2]])
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    let start = array![0.3, 0.2, 0.4];
+    let (_, g0) = Index2Quad.eval(start.view())?;
+    let modes = Array2::from_shape_vec((3, 2), vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0]).unwrap();
+    let search = MinModeConfig::default().with_force_tol(1e-5).with_max_move(0.1);
+    let config = IndexKConfig::new(2, search.clone()).with_block(BlockEigenKind::Lobpcg);
+    let surface = WithHessian {
+        surface: &Index2Quad,
+        hessian: &AnalyticHessian,
+    };
+    let one = indexk_step(start.clone(), g0, &surface, 2, Some(modes.clone()), &search)?;
+    let _reflected = reflect_force(one.translated_force.view(), one.modes.view())?;
+    let _trans =
+        translated_force(one.translated_force.view(), one.modes.view(), one.curvatures.view())?;
+    let mut session = IndexKSession::new(config, start, Some(modes))?;
+    let report = session.run(&surface, 200)?;
+    assert_eq!(report.status, MinModeStatus::Converged);
+    Ok(())
+}
+```

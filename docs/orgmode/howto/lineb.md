@@ -1,0 +1,335 @@
+
+
+# What is computed
+
+At a fixed energy `E` below a barrier, the optimal tunneling path minimizes the JWKB action between two points on the surface `V = E`. Ásgeirsson, Arnaldsson and Jónsson, J. Chem. Phys. 148, 102334 (2018), https://doi.org/10.1063/1.5007180, find it with a line integral extension of the nudged elastic band (LI-NEB). In mass-weighted coordinates `q = M^{1/2} x` the discretized action of `n` images is
+
+    W = sum_j (sigma_j + sigma_{j+1}) |q_{j+1} - q_j| / 2,   sigma = sqrt(2 (V - E))
+
+Interior images move along the perpendicular gradient of `W`, springs keep them evenly spaced, and each end moves along the force until it sits on `V = E`. The half period of the periodic orbit on the inverted potential then sets the temperature `hbar / (2 k_B half_period)` at which the path is an instanton, and the ring polymer built on it gives the harmonic quantum TST rate.
+
+The module takes any `PointSurface`. Energies, lengths and masses are in the surface's own units, and `LinebConfig::hbar` and `LinebConfig::boltzmann` are given in the same units. Both default to one.
+
+`LinebConfig::gradient_end_tangents` is false by default. `with_gradient_end_tangents(true)` evaluates the two endpoint gradients, converts them to unit mass-weighted directions oriented along increasing path parameter, and supplies them as the endpoint tangents of the measured path spline.
+
+
+# One energy
+
+```rust
+let config = LinebConfig::new(opt_tol, perp_tol);
+let masses = Masses::coordinates(mass.view())?;
+let mut session = LinebSession::new(config, masses, images, energy)?;
+let report = session.run(&surface, 1000)?;
+assert_eq!(report.status, LinebStatus::Converged);
+let path = session.path(&surface)?;
+```
+
+`images` is one row per image in Cartesian coordinates, endpoints included. For a full path between two minima, use `LinebSession::from_seed(&surface, config, masses, images, energy)`. When both ends lie below the requested energy, it interpolates the two turning points around the highest seed image. The C and Python solvers support the same input. The two tolerances have no default. `opt_tol` stops the nudged force on every image and `perp_tol` the perpendicular action gradient on the interior ones. Both are norms in mass-weighted coordinates, so they carry units of the square root of an energy. A tolerance stated on the dimensionless action `W / hbar` per Cartesian length converts by `tol = g hbar / sqrt(m)`; the paper's 1e-2 per Angstrom for H, in eV, Angstrom and amu, is 6.44e-4.
+
+For the paper’s convergence test, set `with_endpoint_convergence(true)`. The optimizer compares `opt_tol` with the larger endpoint force and `perp_tol` with the largest perpendicular action gradient among the interior images. The spring still redistributes interior images. The report gives the full-band, endpoint, and perpendicular maxima separately.
+
+To interpret an interior image's perpendicular action gradient in force
+units, use its two adjacent mass-weighted chord lengths, `d_prev` and
+`d_next`. Write `sigma` for the momentum used in the discrete action and
+`c = (d_prev + d_next) * (d sigma / dV) / 2`. This is the coefficient
+of the mass-weighted physical force in the image's action gradient.
+For a perpendicular drive component `g_perp[k]`, the equivalent Cartesian
+force imbalance is `sqrt(m[k]) * g_perp[k] / c`. Thus the same `perp_tol`
+can admit different force imbalances across images or atoms. This
+conversion applies to interior images. Check the physical residual on
+the equal-time orbit separately, including at both turns.
+
+The default endpoint restraint has magnitude `endpoint_scale |V − E| / |∇V|` in mass-weighted coordinates. To use a constant coefficient as in Eqs. (19) and (21), set `with_endpoint_kappa(kappa)` in Rust, pass `endpoint_kappa` to Python, or call `rgsaddle_lineb_solve_with_kappa` from C. Its force magnitude is `kappa |V − E|`. Express the coefficient and the spring constant in the units of the action and coordinates used by the solver.
+
+`Masses::coordinates` takes one mass per coordinate and leaves rigid motions alone. Use it for atoms in an external field, such as adsorbates over a fixed slab. `Masses::molecule` takes one mass per atom for a free molecule. It centers each image and fits it to the first image by a mass-weighted quaternion rotation. `Masses::with_adjacent_alignment(true)` fits each image to the preceding aligned image instead. Each chord then has the minimum length over relative rigid motions, so reversing the band preserves its discrete action. `Masses` stores a `MassMetric`. Both constructors refuse a mass that is not finite and positive. The metric multiplies a `MetricPoint` and a `MetricTangent` by the square root of the mass and divides a `MetricCovector` by it.
+
+`time_step` is the initial FIRE step. From rest a step moves an image by about `time_step^2 |F|`. The default 0.1 converges the Müller-Brown continuation at every other default; a surface with a stiffer action needs a smaller step. `max_move` caps the step of one atom with molecular masses and the whole band step otherwise. An interior image may not fall below `E + w`, where `w` is `turning_width` times the height of the highest starting image above `E`; a step that would put one there is retried at a shorter length. Any other error from the surface ends the step and is returned.
+
+The optimizer uses a smooth momentum near a turning point. For an image with energy gap `d = V - E`, its momentum in mass-weighted coordinates is `sqrt(d + hypot(d, w))`. At the turning surface this gives `sqrt(w)`. Equation (12) of Ásgeirsson, Arnaldsson and Jónsson gives zero there. The default `turning_width` is 0.001 and the accepted range is strictly between zero and one. For a width sensitivity check, rerun the same starting band and energy with a smaller positive `turning_width` and compare the optimized coordinates, period and rate. The endpoint convergence option selects which force norms stop optimization. The momentum still uses the configured width.
+
+`LinebPath` holds the action, the half period from the quadrature of the action's energy derivative (`half_period`) and from constrained dynamics along the path (`half_period_dynamics`), both temperatures, and `calls`: the force calls of the optimizer, of the period quadrature and time table, and of the dynamics, counted apart.
+
+Set `with_interpolated_force_clock(true)` in Rust or
+`interpolated_force_clock=True` in Python to use the signed force in
+Eq. (27) of Ásgeirsson, Arnaldsson and Jónsson (2018). At each prepared
+image the solver projects the inverted potential gradient onto the
+normalized derivative of the mass-weighted cubic coordinate spline at
+that image. The band optimizer uses the higher-energy neighboring chord
+on monotonic energy segments, following Eqs. (15) and (16). These two
+tangent estimates can differ for a curved path at finite image spacing.
+The clock interpolates the projected forces with a cubic
+spline in arc length and integrates the resulting one-dimensional
+motion by velocity Verlet. The period, temperature, equally spaced
+replicas and rate all use this orbit. Both reported periods agree by
+construction when the independent dynamics fields are requested.
+
+The spline force can integrate to nonzero work between the two
+optimized turning images. The solver launches at rest from the end
+whose trajectory turns inside the measured interval, locates the first
+velocity reversal, and orders the replicas in increasing path coordinate
+on the outgoing half. The opposite turning replica can therefore be
+displaced from its nominal endpoint. The `LinebTurning` value in `turning` records the launch image, the return arc coordinate,
+the full spline length, the largest Cartesian component of the
+displacement from the opposite image, and two energy differences
+measured on the supplied surface. The first is relative to the target
+energy and the second is relative to the opposite prepared image. A
+short orbit can turn away from its nominal endpoint. Report
+`max_cartesian_displacement` in the input length units. To measure the
+fraction of the mass-weighted path missed at the return, set
+`L = path_arc_length` and `s = return_arc`. The fraction is `(L - s) / L`
+for a launch at image zero and `s / L` for a launch at the last image.
+Compare the energy residual with the barrier height above the target.
+At fixed `E`, repeat the path optimization with more images and compare
+the return geometry, energy residual and half period. Increasing
+the number of replicas on a fixed path leaves the Verlet return turn
+and its energy unchanged.
+
+For path length `L`, maximum absolute image force `F` and
+`Q` quadrature pairs per chord, the integration step is
+`sqrt(L/F)/(64 Q)`. The cubic coordinate spline is parameterized by
+mass-weighted chord length. Its arc-length map uses `8 Q` Simpson
+panels per chord. The dynamics counter includes one energy-gradient
+request for each image plus one at the return point for the energy
+check. Verlet integration adds no potential requests.
+The measure counter includes the Simpson samples for the action.
+
+In Rust, `LinebConfig::with_gradient_end_tangents(true)` aligns the
+coordinate spline tangents with the surface gradients at both turning
+images, using two extra surface evaluations. Compare the force residual
+at the turn and at its neighbouring replicas to check how well the
+band resolves the turning region. The default uses not-a-knot tangents.
+
+
+# An energy ladder from a minimum energy path
+
+```rust
+let ladder = Continuation::new(delta, images, levels);
+let paths = continue_from_mep(&surface, mep.view(), &masses, &config, &ladder)?;
+```
+
+The first energy is the highest MEP energy minus `delta`, seeded by the MEP segment between its two crossings of that energy. With `with_linear_seed(true)`, the first path follows the straight line joining the two crossings, as in the Cu(110) example in section II. Each lower energy is `delta` further down and starts from the previous path with both ends walked downhill to the new energy. The MEP has to fall below the lowest energy on both sides of the barrier. A level still running after `max_steps` (1000 by default) is an error. `path.calls.total_with_seed()` includes the seed for that energy. To measure backend work, use `continue_from_mep_with_observer` with the same arguments and a final closure `|level, path|` returning `Result<(), SaddleError>`. The closure runs after the path converges and before the next energy is seeded. Take a snapshot before the ladder and at each callback to include the work of preparing each seed in its level.
+
+A saved turning-to-turning band can supply another energy ladder. Pass its
+Cartesian images and tunneling energy to `continue_from_path_with_observer`.
+A first target equal to the saved energy refines the image resolution.
+A lower target walks both endpoints along the mass-weighted force before
+resampling the band. The new ladder counts these seed evaluations.
+
+
+# The rate
+
+```rust
+let rate = hqtst_rate(&surface, &path, beads)?;
+```
+
+`beads` replicas are placed at equal imaginary times along the path. The ring-polymer Hessian is applied block by block from Hessian-vector products at the `beads / 2 + 1` distinct replicas, and its log-determinant comes from Lanczos with the zero mode and any rigid modes deflated. Without an analytic `hessian_vector` each product is a central difference, so the rate costs `(beads / 2 + 1) (1 + 2 dof)` force calls. `log_rate_over_reactant` is `ln(k Z_r)` on the surface's own energy zero. On a total energy far from zero `rate_over_reactant` overflows or underflows while the log stays finite.
+
+For the interpolated rate, the solver eliminates successive bead blocks from the ring Hessian. It retains the closing bead, the permutation direction and any whole-ring rigid directions in a border. The gauge Gram determinant removes the dependence on gauge-vector normalization. Summing the signed pivot inertias gives the number of unstable modes in the projected space. For a fixed molecular size the cost grows linearly with the bead count. An ill-conditioned bead pivot selects a dense Householder projection and symmetric eigensolve.
+
+Select `interpolated_hessian=True` in Python or
+`RGSADDLE_LINEB_INTERPOLATED_HESSIAN` in the C solve to interpolate image
+Hessians onto the ring. In Rust, `hqtst_rate_interpolated_hessian_observed`
+takes an optional Cartesian displacement and a flag to retain the measured
+orbit. The `lineb-interpolated-hessian` feature provides this rate. Building
+the C interface with `--features capi` includes it, as does the
+`lineb-oracle` compatibility feature.
+
+For `N` path images with `D` Cartesian degrees of freedom and `P` replicas,
+image interpolation requests `2 N D` displaced gradients for curvature and
+`P` replica energies and gradients. The returned `curvature_evaluations`
+and `bead_evaluations` sum to the rate count. The optional observed orbit
+uses those same measured replica positions and gradients. In Python,
+`image_hessian_step` selects the displacement in the surface's length
+units, and the result reports the applied value. C callers can discover
+`rgsaddle_lineb_solve_counted_rate` at link time and read the same fields
+from `rgsaddle_lineb_rate_diagnostics_t`.
+
+To check the image-Hessian approximation, evaluate `hqtst_rate` and
+`hqtst_rate_interpolated_hessian` on the same `LinebPath` with the same
+surface and bead count. Subtract the direct result's `log_rate_over_reactant`
+from the interpolated result's value. Exponentiating this difference gives
+the ratio of the two fluxes because their common energy zero cancels. Check the
+mode counts for both results. Increasing the bead count samples the
+interpolant more densely. Increasing the number of path images supplies
+additional curvature measurements and also lets the optimized path change.
+
+For an electronic-structure potential, `hqtst_rate_interpolated_hessian_with_step(surface, path, beads, step)` uses the same Cartesian displacement for every atom. Halving the displacement tests the sensitivity of the fluctuation spectrum to gradient noise. The result records `image_hessian_displacement` in the surface's length units and `negative_modes` on the gauge-deflated ring. A first-order instanton has one unstable mode.
+
+With the `lineb-oracle` feature, `cartesian_image_hessian(surface, cartesian, step)` measures one Cartesian energy Hessian. It evaluates the positive and negative displacement along each coordinate in one ordered batch. The matrix contains the raw gradient differences before symmetrization or mass weighting.
+
+`hqtst_rate_from_image_hessians(surface, path, beads, blocks)` takes one Cartesian energy Hessian per path image in path order. Evaluate each block at the corresponding row of `path.cartesian`, using the same Cartesian axes and atom order. For a free molecule these rows contain the aligned geometries. If an external calculator rotates a molecule to its own axes, rotate the Hessian back to the axes of that row before supplying it. The library mass weights the blocks and interpolates them onto the ring. It issues `beads` additional geometry requests for the replica energies. Measure the cost of the supplied blocks at their provider. For finite differences the cost is `2 * dof * images + beads` geometry requests. A surface implementing `PointSurface::eval_batch` can evaluate the independent displacements for each image and the replica energies in parallel. Return the results in input row order.
+
+
+# Python
+
+`LinebResult.surface_calls` gives integer configuration evaluations for `seed`, `optimization`, `path_preparation`, `quadrature`, `dynamics` and `rate`. Their sum is `total`. The rate entry is zero on a path-only run. In C, pass a `rgsaddle_lineb_counts_t` to `rgsaddle_lineb_solve_counted` (ABI minor 47). The combined `optimizer_calls` and `measure_calls` on the original result remain available.
+
+`rgsaddle.lineb_solve(surface, positions, atom_masses, energy, opt_tol, perp_tol, molecular=False, max_steps=1000, beads=0, ...)` is the run-to-completion binding (`howto/python`). `positions` is `(n_images, 3N)`, `atom_masses` is one mass per atom, and `surface(x)` is the one-image `(energy, gradient)` callback used by `connect`. `molecular=False` expands each atom mass to three coordinates; `molecular=True` aligns the free molecule. `beads=0` returns the path only with `log_rate_over_reactant` set to NaN. `LinebResult` exposes the optimized `positions`, the quadrature temperature `temperature` and the constrained-dynamics estimate `temperature_dynamics`, their half periods, the log rate, and the per-phase call counts. A calculator exception propagates; an unconverged search raises with the C status.
+
+Pass `batch_surface=True` when `surface` can evaluate a matrix of Cartesian
+geometries. A callback receives an array of shape `(rows, 3N)` and returns
+energies of shape `(rows,)` and gradients of shape `(rows, 3N)`, in input
+order. Independent band, quadrature and curvature evaluations can use
+multiple rows. Adaptive queries can still use a single row. The reported
+call counts count geometries. The corresponding option in C is
+`RGSADDLE_LINEB_BATCH_SURFACE` (ABI minor 48).
+
+For a rate calculation, `LinebResult.modes` gives the number of retained
+fluctuation eigenvalues and `LinebResult.negative_modes` counts those below
+zero. A first-order instanton has one retained negative eigenvalue. Both
+properties are `None` for a path-only solve. C consumers can check for
+`RGSADDLE_HAS_LINEB_RATE_DIAGNOSTICS` and pass the two optional `int64_t`
+outputs to `rgsaddle_lineb_solve_counted_diagnostics`. Each receives `-1`
+when the rate is unavailable.
+
+For the Cu example in the 2018 paper, pass `linear_seed=True` and `endpoint_convergence=True` to `lineb_solve` with a full MEP and the converted `spring` and `endpoint_kappa`. The first flag selects a straight path between the two energy crossings. The second applies the endpoint and perpendicular force tolerances separately. Pass `projected_verlet=True` (Rust `with_projected_verlet(true)`, C `RGSADDLE_LINEB_PROJECTED_VERLET`) to select the projected Verlet band integrator.
+
+The following dimensionless Eckart barrier has turning points at
+`x = ±arccosh(2)` when `E = 0.25`. The two transverse coordinates are
+independent unit-mass harmonic oscillators. The callback returns an energy for each input row and the
+Cartesian energy gradient with the same shape as the coordinates.
+
+```python
+import numpy as np
+from rgsaddle import lineb_solve
+
+def barrier(x, omega=1.0):
+    energy = 1.0 / np.cosh(x[:, 0])**2
+    gradient = omega**2 * x.copy()
+    gradient[:, 0] = -2.0 * energy * np.tanh(x[:, 0])
+    return energy + 0.5 * omega**2 * (x[:, 1:]**2).sum(axis=1), gradient
+
+seed = np.zeros((9, 3))
+seed[:, 0] = np.linspace(-2.0, 2.0, len(seed))
+path = lineb_solve(
+    barrier, seed, np.ones(1), energy=0.25, opt_tol=1e-5, perp_tol=1e-5,
+    endpoint_kappa=0.2, linear_seed=True, endpoint_convergence=True,
+)
+np.testing.assert_allclose(
+    np.asarray(path.positions)[[0, -1], 0], np.array([-1, 1]) * np.arccosh(2)
+)
+print(path.action, path.temperature)
+```
+
+The exact action is `pi / sqrt(2)` and the exact temperature is
+`1 / (2 pi sqrt(2))` in these units. The nine-image example gives
+2.221443 and 0.1125395 respectively.
+
+The same seed provides a check of the fluctuation factor. Doubling both
+transverse frequencies leaves the longitudinal path and period unchanged.
+Each oscillator contributes its finite-bead partition function to the
+flux. This makes the change in `log_rate_over_reactant` calculable
+without a reactant reference.
+
+```python
+from functools import partial
+
+P = 32
+def flux(omega):
+    return lineb_solve(
+        partial(barrier, omega=omega), seed, np.ones(1), 0.25, 1e-5, 1e-5,
+        endpoint_kappa=0.2, linear_seed=True, endpoint_convergence=True,
+        beads=P, return_orbit=True, interpolated_hessian=True,
+        image_hessian_step=0.001,
+    )
+
+low, high = flux(1.0), flux(2.0)
+def log_partition(omega):
+    a = P * np.arcsinh(low.half_period * omega / P)
+    return -np.log(2 * np.sinh(a))
+
+shift = high.log_rate_over_reactant - low.log_rate_over_reactant
+np.testing.assert_allclose(shift, 2 * (log_partition(2) - log_partition(1)))
+print(low.negative_modes, low.modes, low.surface_calls["rate"], round(shift, 5))
+```
+
+This prints `1 95 86 -8.69356`. The 86 rate requests comprise two
+displacements for each of three coordinates at nine images, plus
+32 orbit observations. A cache can serve repeated geometries among
+these requests.
+
+
+# C ABI
+
+```c
+rgsaddle_lineb_config_t cfg;
+rgsaddle_lineb_config_default(opt_tol, perp_tol, &cfg);
+rgsaddle_lineb_result_t out;
+rgsaddle_status_t st = rgsaddle_lineb_solve(
+    &cfg, n_images, n_atoms, positions, atom_masses, molecular,
+    energy, max_steps, beads, surface, user, optimized, &out);
+```
+
+`rgsaddle_lineb_config_default` writes the same defaults as `LinebConfig::new`. Positions are contiguous image, atom, xyz. `molecular` 0 expands each of the `n_atoms` masses onto the three Cartesian coordinates without rigid alignment (`Masses::coordinates`); `molecular` 1 uses quaternion alignment to the first image (`Masses::molecule`) and `molecular` 2 aligns each image to its neighbour (`Masses::with_adjacent_alignment`). `beads` 0 returns the path only and leaves `log_rate_over_reactant` as NaN; otherwise `beads` must be at least 2. An unconverged search returns `RGSADDLE_STALLED` after writing the last images. Read `rgsaddle_last_error()` on the calling thread for the force residuals and their tolerances when the iteration budget is exhausted. See `howto/c-abi` and `tests/c/lineb_abi.c`.
+
+
+# Comparing surfaces and rates
+
+For a surface with fixed substrate atoms, pass the coordinates and masses of the mobile atoms to the solver and reconstruct the full geometry in the surface callback. Use identical substrate coordinates, mass conventions and energy zeros when comparing barriers or rates. Record the image and bead counts, both force tolerances, and the temperature estimator with each result.
+
+
+# Checking the orbit and reporting a rate
+
+Repeat the calculation at fixed tunneling energy with more path images and
+more ring replicas independently. The images determine the spatial path,
+whereas the replicas sample that path in imaginary time. Record the
+quadrature temperature at each image resolution. Compare different
+replica counts at the same path and period to isolate the ring
+discretization.
+
+The inverse time map uses monotone cubic Hermite interpolation. The
+spline speed comes from the tunneling energy at each quadrature knot
+and vanishes at both turning points. The reflected orbit therefore
+has a continuous velocity at each turn. For comparisons,
+`with_linear_replica_clock(true)` selects piecewise-linear interpolation
+on the same time knots. Vary `with_quadrature_pairs` independently of
+the bead count to check the resolution of the time integral.
+
+For a ring of `P` Cartesian configurations over a full period `tau`, let
+`dt = tau / P`. With energies, masses, lengths and times in a consistent
+unit system, the discrete stationarity residual at atom `i` and bead `j`
+is
+
+    R[j,i] = grad_V(x[j])[i] + m[i] * (2*x[j,i] - x[j-1,i] - x[j+1,i]) / dt**2
+
+Request `return_orbit=True` when calling `lineb_solve` with a positive
+`beads` value. The optional `LinebOrbit` returned as `result.orbit` contains `positions` and
+`gradients`, both shaped `(beads, 3 * n_atoms)`. Each returning bead has
+the exact coordinates of its outbound partner. With bead Hessians the
+solver reuses the outbound measurement. With interpolated image Hessians
+it requests the full ring in one batch, so an exact-coordinate cache
+can serve the repeated geometries.
+`orbit.max_abs_residual` and `orbit.rms_residual` are in energy per
+length. `orbit.max_bead` and `orbit.max_coordinate` are zero-based.
+A path-only solve returns `None`. The rate evaluation count is the
+same with or without the observations.
+
+The C entry point `rgsaddle_lineb_solve_counted_orbit` accepts a nullable
+`rgsaddle_lineb_orbit_t`; each supplied coordinate or gradient buffer
+must hold `beads * 3 * n_atoms` doubles. A caller requesting only the
+summary may leave both buffer pointers null. In Rust, use
+`hqtst_rate_with_orbit` to obtain the rate and its `LinebRateOrbit`.
+
+Wrap both neighbor indices around the ring. Use the physical Cartesian
+energy gradient at each stored bead and restrict the check to mobile
+coordinates. Report the maximum absolute component and the RMS residual
+in force units. Inspect the turning-point beads individually. A stable
+logarithmic prefactor and one unstable mode can coexist with a large
+turning-point residual.
+
+The rate uses adjacent beads to normalize translation around the
+periodic orbit. For mass-weighted coordinates `q`, the squared length
+in the prefactor is the sum of `|q[j] - q[j-1]|^2` over the full ring.
+The same differences define the direction removed from the fluctuation
+determinant. When comparing with Eq. (8) of Ásgeirsson et al., record
+the indexing convention. The printed expression uses the displacement
+from bead `j-1` to bead `j+1`. This spans two time intervals, so a
+centered estimate of displacement per interval includes a factor of
+one half before squaring.
+
+For an absolute thermal rate, subtract the logarithm of the reactant
+partition function from `log_rate_over_reactant` using the same energy
+zero, period and unit convention. Account for molecular rotation,
+translation and the number of equivalent reaction paths consistently on
+both sides of the comparison. Convert the inverse time unit to inverse
+seconds before comparing with a published rate.

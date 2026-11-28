@@ -1,0 +1,345 @@
+`SellaMinSession` uses order-zero quasi-Newton steps. `SellaSaddleSession` partitions a rational function optimization (RFO) step into uphill and downhill subspaces. Both retain a Hessian model and a trust radius, and expose one outer step at a time.
+
+
+# Runnable example: P-RFO, restricted P-RFO, Index1Session, Sella, internal coordinates, cell charts, and SAMD
+
+Partitioned rational function optimization (P-RFO) follows Baker, J. Comput. Chem. 7, 385 (1986), https://doi.org/10.1002/jcc.540070402 , on the rational-function form of Banerjee, Adams, Simons, and Shepard, J. Phys. Chem. 89, 52 (1985), https://doi.org/10.1021/j100247a015 . Restricted-step P-RFO scales the augmented Hessian so the Cartesian step stays within the Euclidean trust sphere, following Besalú and Bofill, Theor. Chem. Acc. 100, 265 (1998), https://doi.org/10.1007/s002140050387 , and Bofill's Hessian update mixes Powell and SR1 as in Bofill, J. Comput. Chem. 15, 1 (1994), https://doi.org/10.1002/jcc.540150102 . The i-PI level shift in `nichols_step` and `nichols_displacement` is the step of Nichols, Taylor, Schmidt, and Simons, J. Chem. Phys. 92, 340 (1990), https://doi.org/10.1063/1.458435 , with the local quadratic strategies of Simons and Nichols, Int. J. Quantum Chem. 38 (S24), 263 (1990), https://doi.org/10.1002/qua.560382427 . Sella's order-1 and order-0 sessions, equality `Constraints` and `InternalPes` charts, cell log-deformation chart (`CellChart::LogDeform`), and surface-adapted molecular dynamics (`SamdSession`) follow Hermes, Sargsyan, Najm, and Zádor, J. Chem. Theory Comput. 18, 6974 (2022), https://doi.org/10.1021/acs.jctc.2c00395 , with the canonical velocity-rescaling thermostat of Bussi, Donadio, and Parrinello, J. Chem. Phys. 126, 014101 (2007), https://doi.org/10.1063/1.2408420 ; the Cartesian GP dimer comparison against Sella internal coordinates is Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), https://doi.org/10.1021/acs.jctc.5c00866 .
+
+```rust
+use ndarray::{Array1, Array2, ArrayView1, array};
+use rgsaddle::{
+    CellCartesianPes, CellChart, Constraints, HessianUpdate, Index1Config, Index1Session,
+    Index1Status, InternalPes, NicholsMode, PartitionedRationalFunctionOptimization, PointSurface,
+    PrfoKind, RationalFunctionOptimization, SaddleError, SamdConfig, SamdSession, SellaMinConfig,
+    SellaMinSession, SellaSaddleConfig, SellaSaddleSession, VelocitySofteningConfig, VocnFound,
+    bofill_update, cap_max_abs, expm_3x3, logm_3x3, nichols_displacement, nichols_step,
+    niggli_reduce_cell, partitioned_rfo_eigen, place_perp_dummy, powell_update, prfo_get_s,
+    prfo_stepper, prfo_trust_region, restricted_prfo_displacement, rfo_stepper,
+    soften_velocity_on,
+};
+
+struct QuadraticSaddle;
+
+impl PointSurface for QuadraticSaddle {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let mut e = -0.5 * x[0] * x[0];
+        let mut g = Array1::zeros(x.len());
+        g[0] = -x[0];
+        for i in 1..x.len() {
+            e += x[i] * x[i];
+            g[i] = 2.0 * x[i];
+        }
+        Ok((e, g))
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    // 1. P-RFO, RFO, restricted P-RFO, and Nichols steps on a 2x2 spectrum
+    let evals = array![-1.0, 2.0];
+    let evecs = Array2::<f64>::eye(2);
+    let grad = array![0.4, 0.6];
+    let _eig_step = partitioned_rfo_eigen(evals.view(), grad.view(), 1.0, PrfoKind::Index1)?;
+    let _sella_prfo = prfo_get_s(&evals, &evecs, &grad, 1, 1.0);
+    let _sella_tr = prfo_trust_region(&evals, &evecs, &grad, 1, 0.2);
+    let _prfo_opt = prfo_stepper("prfo", 1).unwrap_or(PartitionedRationalFunctionOptimization::new(1));
+    let _rfo_opt = rfo_stepper("rfo", 0).unwrap_or(RationalFunctionOptimization::new(0));
+
+    let mut h = array![[-1.0, 0.0], [0.0, 2.0]];
+    let mut dx = restricted_prfo_displacement(h.view(), grad.view(), None, 0.2, PrfoKind::Index1)?;
+    cap_max_abs(&mut dx, 0.15)?;
+    let _nichols_eig = nichols_step(grad.view(), evals.view(), evecs.view(), None, 0.2, NicholsMode::Index1)?;
+    let _nichols_cart = nichols_displacement(h.view(), grad.view(), None, 0.2, NicholsMode::Index1)?;
+    powell_update(&mut h, dx.view(), grad.view())?;
+    bofill_update(&mut h, dx.view(), grad.view())?;
+
+    // 2. Index1Session on QuadraticSaddle
+    let mut index1 = Index1Session::new(
+        Index1Config::default().with_update(HessianUpdate::Bofill),
+        array![0.2, 0.3, -0.1],
+        None,
+        None,
+    )?;
+    let rep1 = index1.run(&QuadraticSaddle, 20)?;
+    assert_eq!(rep1.status, Index1Status::Converged);
+
+    // 3. SellaSaddleSession and SellaMinSession
+    let x0 = array![0.0, 0.0, 0.0, 0.96, 0.0, 0.0, -0.24, 0.93, 0.0];
+    let masses = array![16.0, 1.0, 1.0];
+    let mut sella_sad = SellaSaddleSession::new(SellaSaddleConfig::default(), x0.clone(), masses.clone())?;
+    let _sad_step = sella_sad.step(&QuadraticSaddle)?;
+    let mut sella_min = SellaMinSession::new(SellaMinConfig::default(), x0.clone(), masses.clone())?;
+    let _min_step = sella_min.step(&QuadraticSaddle)?;
+
+    // 4. Internal coordinates (vocn + Constraints + InternalPes) and CellChart::LogDeform
+    let found = VocnFound::from_parts([[0, 1], [0, 2]], [[1, 0, 2]], []);
+    let mut ipes = InternalPes::from_find(x0.clone(), masses.clone(), &found)?;
+    let _ = ipes.kick(&QuadraticSaddle, array![0.01, -0.01, 0.02].view())?;
+    let _dummy = place_perp_dummy(x0.view(), 0, 1)?;
+    let mut cons = Constraints::new(3)?;
+    cons.fix_com(x0.view())?;
+
+    let cell = rgsaddle::mic::Cell::ortho(10.0, 10.0, 10.0).unwrap();
+    let mut cpes = CellCartesianPes::new(x0.clone(), masses, cell)?;
+    cpes.set_chart(CellChart::LogDeform);
+    let mut raw_cell = cpes.cell9();
+    let _ = niggli_reduce_cell(&mut raw_cell, 20.0)?;
+    let _ = logm_3x3(expm_3x3([[0.01, 0.0, 0.0], [0.0, -0.01, 0.0], [0.0, 0.0, 0.0]]))?;
+
+    // 5. SAMD and velocity softening
+    let soft = soften_velocity_on(
+        &cons,
+        x0.view(),
+        array![0.2, -0.1, 0.0, -0.1, 0.2, 0.0, -0.1, -0.1, 0.0].view(),
+        &QuadraticSaddle,
+        VelocitySofteningConfig::default().with_steps(2),
+    )?;
+    let mut samd = SamdSession::with_chart(SamdConfig::default(), x0, soft.direction, &QuadraticSaddle, cons)?;
+    let draw = Array1::from_elem(9, 0.1);
+    let samd_rep = samd.step(&QuadraticSaddle, draw.view())?;
+    assert!(samd_rep.energy.is_finite());
+    Ok(())
+}
+```
+
+`SellaGeom` selects a named geometry or an equality `Constraints` chart. The steppers project onto the tangent space, retract the displacement, and transport vectors. Cartesian sessions use the rigid quotient when internal molecular modes are available. `InternalPes` maps host-supplied bonds, angles and dihedrals through the Wilson matrix. `CellCartesianPes` and `CellInternalPes` include the active cell entries; their energy and gradients are evaluated in the displaced cell.
+
+`TrustRegion` limits the Euclidean step norm. `RestrictedAtomicStep` limits the largest atom displacement and uses that same quantity when updating its radius. `MaxInternalStep` limits weighted internal coordinates. The restricted atomic step (RAS) refuses an internal-coordinate packing.
+
+An order-1 Cartesian search takes that atomic step if it diagonalizes the Hessian.
+Its Euclidean radius must also be above one distance unit.
+That step's ceiling is `max(delta, 0.1)`.
+The last section of this page shows how a smaller search takes it in place of the radius.
+The alpha search follows the derivative of the partitioned rational function optimization step.
+The uphill and downhill blocks are therefore not a uniform scale of the full step.
+Rho grows and shrinks the atomic ceiling.
+The stored Euclidean radius stays where `delta * n_free` put it.
+The first finite-difference diagonalization may accept a negative root past the uphill mode once its residual is under `gamma` and its curvature is below one.
+A later diagonalization keeps the relative residual.
+A free block larger than 128 is diagonalized with faer's self-adjoint eigensolver.
+A block of 128 or fewer stays on cyclic Jacobi.
+
+`update_h_ms` applies a simultaneous multi-secant Hessian update. `update_hessian_cols` applies individual updates in column order. `HessUpdate::TsBfgs` supports an indefinite Hessian. The retained Sella trajectories are checked by `tests/sella_gold.rs`.
+
+`SamdSession::new` uses Euclidean dynamics. `on` and `with_chart` retain a geometry for every step; `step_on` selects a geometry for one step. The velocity-Verlet displacement, transported velocity and stochastic rescaling remain in its tangent space.
+
+`force_match_hessian` fits pair contributions from Buckingham, Morse, Lennard-Jones and harmonic bond terms. `EigenDevice::Dlpk` observes the size, disable and allocation-failure policy. The available eigensolver, QR and projection implementations use the host fallback; selecting that policy does not imply GPU acceleration.
+
+
+# Take the Ritz pairs from the symmetrized products
+
+Use `symmetrized_ritz` to make a Cartesian `SellaSaddleSession` take its Ritz pairs as Sella does.
+On noisy gradients this can shorten its diagonalizations.
+The session diagonalizes its free Hessian by Rayleigh-Ritz on one-sided finite-difference Hessian-vector products.
+Gradients from a self-consistent field (SCF) carry noise, so those products are not exactly symmetric.
+The residual test reads the products symmetrized as Sella's `symmetrize_Y` does with `symm=2`.
+By default the Ritz pairs come from the mean of `V^T AV` and its transpose instead.
+That mean differs from the symmetrized products inside the subspace.
+Each residual therefore keeps a part in the subspace.
+The subspace can then grow to the free dimension before the residual test passes.
+Sella's `rayleigh_ritz` takes its Ritz pairs from those symmetrized products, and `symmetrized_ritz` does the same here.
+
+Turn it on in the config, or on a live session before its next diagonalization:
+
+```rust
+let config = SellaSaddleConfig::default().with_symmetrized_ritz(true);
+let mut session = SellaSaddleSession::new(config, x, masses)?;
+// or, on a session that already exists
+session.set_symmetrized_ritz(true);
+```
+
+From minor 24, a C host sets the option through the application binary interface (ABI).
+
+```c
+if (rgsaddle_sella_saddle_set_symmetrized_ritz(session, 1) != RGSADDLE_OK) {
+  /* NULL session, or a value other than 0 and 1 */
+}
+```
+
+With exact symmetric products the two choices agree up to rounding.
+The default is off and steps as before, bit for bit.
+`tests/sella_symmetrized_ritz.rs` pins that walk and the shorter first diagonalization with the option on.
+
+A 2025 study compared two saddle searches on 500 molecular reactions.
+Its dimer search used Gaussian process regression in Cartesian coordinates, while Sella used internal coordinates.
+Both searches needed similar numbers of electronic structure calculations.
+That study is Goswami, Masterov, Kamath, Peña-Torres and Jónsson.
+Its paper is J. Chem. Theory Comput. 21, 7935 (2025), digital object identifier (DOI) 10.1021/acs.jctc.5c00866.
+This session takes the partitioned rational function optimization (P-RFO) step of Baker.
+That paper is J. Comput. Chem. 7, 385 (1986), https://doi.org/10.1002/jcc.540070402.
+Hermes, Sargsyan, Najm and Zádor describe Sella's iterative diagonalization and its `symm=2` products.
+Their paper is J. Chem. Theory Comput. 18, 6974 (2022), https://doi.org/10.1021/acs.jctc.2c00395.
+
+The option helps most where gradients are noisy.
+The Baker transition-state set is the 25 starts of Baker and Chan.
+Their paper is J. Comput. Chem. 17, 888 (1996), `doi:10.1002/(SICI)1096-987X(199605)17:7<888::AID-JCC12>3.0.CO;2-7`.
+The runs below take tblite GFN2-xTB gradients in Cartesian coordinates.
+GFN2-xTB is version 2 of the geometry, frequency, noncovalent, extended tight binding method.
+Each search stops at a Euclidean gradient norm of 0.05 eV/Å and has a cap of 400 evaluations.
+In these runs the atom ceiling of the next section is off.
+With this option off too, the session reached a saddle of index one from 19 starts in 1450 evaluations in all.
+The index is the count of significant imaginary frequencies that xtb 6.6.1 reports at the final geometry.
+A frequency is significant past 5 cm-1.
+With this option on, the session reached such a saddle from 21 starts in 907 evaluations.
+Sella 2.6.0 in Cartesian coordinates did so from 22 starts in 770 evaluations.
+The option adds the starts `07_bicyclobutane` and `22_hconhoh`.
+One start got slower: `09_parentdieslalder` took 225 evaluations in place of 146.
+
+
+# Keep or drop the atom ceiling in a small Cartesian search
+
+Sella defaults to the restricted atomic step in a Cartesian search.
+The step bounds the largest move of any one atom by `delta0`, 0.1 Angstrom, whatever the size of the system.
+That is `RestrictedAtomicStep` in `sella/optimize/restricted_step.py` of Sella 2.6.0.
+`sella/optimize/optimize.py` sets its radius to `delta0` without the free-dimension factor that its Euclidean trust region takes.
+`SellaSaddleSession` starts a Euclidean trust radius at `delta * n_free` instead.
+Above one distance unit an atom ceiling sits under that radius, as the start of this page says.
+At ten free coordinates or fewer, with the default `delta` of 0.1, the radius alone would let one atom take most of it.
+The Baker set has a formyl chloride (HCOCl) start, `15_hocl`, with four atoms and six free coordinates.
+There the radius starts at 0.6 Angstrom.
+Without the ceiling the first two steps move one atom 0.45 Angstrom and 0.44 Angstrom.
+The tblite self-consistent field (SCF) then fails to converge.
+
+`small_system_atom_ceiling`, on by default, makes such a search take Sella's restricted atomic step from its first step.
+The step is the partitioned rational function optimization (P-RFO) step at unit alpha when no atom moves past the ceiling.
+Otherwise it is the step at the alpha whose largest atom move equals the ceiling.
+The ceiling starts at `max(delta, 0.1)` and never passes the starting Euclidean radius.
+So a host `delta` small enough to keep `delta * n_free` under 0.1 is not loosened.
+On the saddle schedule the trust ratio grows and shrinks the ceiling.
+Sella does the same with its atomic radius.
+`SellaSaddleReport::delta` reports the ceiling.
+The option changes nothing with `eig: false` or under another `RestrictedKind`.
+It also changes nothing in internal or cell coordinates, or above ten free coordinates at the default `delta`.
+
+The ceiling costs steps where large steps would have been safe.
+That happens on a smooth surface whose saddle is tenths of an Angstrom away.
+On the exact quadratic of `tests/sella_atom_ceiling.rs`, four atoms start far from its saddle.
+There the search takes 15 steps with the ceiling and 9 without it.
+The ceiling grows by at most a factor of 1.15 a step.
+To keep the Euclidean radius alone, turn the ceiling off in the config or on a live session.
+A live session takes the change from its next step.
+
+```rust
+let config = SellaSaddleConfig::default().with_small_system_atom_ceiling(false);
+let mut session = SellaSaddleSession::new(config, x, masses)?;
+// or, on a session that already exists
+session.set_small_system_atom_ceiling(false);
+```
+
+Through the C ABI, from minor 25, where 1 is the default:
+
+```c
+if (rgsaddle_sella_saddle_set_small_system_atom_ceiling(session, 0) != RGSADDLE_OK) {
+  /* NULL session, or a value other than 0 and 1 */
+}
+```
+
+A C host on an older header gets the ceiling too, since the create entry starts from the Rust defaults.
+Such a host reaches the setter only through the minor 25 symbol.
+
+Hermes, Sargsyan, Najm and Zador introduced Sella in 2019.
+That paper is J. Chem. Theory Comput. 15, 6536 (2019), https://doi.org/10.1021/acs.jctc.9b00869.
+Their 2022 paper above describes Sella as a package.
+The radius convention above is read from the Sella 2.6.0 source.
+The Baker runs of this section use the same surface, stop and count as the previous section.
+The ceiling changes the nine starts with five atoms or fewer and no other.
+With symmetrized Ritz pairs off, the session reached a saddle of index one from 20 starts in 1367 evaluations.
+Without the ceiling it reached 19 in 1450.
+`15_hocl` converges in 24 evaluations, where the self-consistent field failed after 22.
+`01_hcn`, `04_ch3o` and `25_hcnh2` take 13, 13 and 29 evaluations in place of 15, 59 and 41.
+`19_hnccs` still stops at index two, after 37 in place of 62.
+No converged start takes more evaluations.
+With both options on, the session reached such a saddle from 22 starts in 861 evaluations.
+Those are the starts Sella 2.6.0 reaches in Cartesian coordinates.
+`tests/sella_atom_ceiling.rs` checks that every atom move stays under the ceiling from the first step.
+It checks that the ceiling never passes the starting radius and that the search still reaches the saddle.
+It also checks that a twelve-coordinate search and a search with `eig: false` step the same with the option on or off.
+A last case confirms that the default takes the ceiling.
+
+
+# Let the session build its own internals
+
+Use `SellaSaddleSession::on_auto_internal` or `SellaMinSession::on_auto_internal` when you have atomic numbers and a geometry but no list of bonds, angles and dihedrals.
+`InternalPes::auto` is the same chart without a session.
+
+```rust
+let topology = TopologyConfig::default();
+let mut session = SellaSaddleSession::on_auto_internal(
+    config, x, masses, &elements, None, &topology,
+)?;
+session.set_update(HessUpdate::TsBfgs);
+while !session.step(&surface)?.at_saddle {}
+println!("rebuilt {} times", session.topology_restarts());
+```
+
+`InternalTopology::from_geometry` does the construction alone and returns the `Constraints`, the real and dummy atom map, the dummy pins and a `TopologyCheck`.
+It follows section 2.1 of Hermes, Sargsyan, Najm and Zador, J. Chem. Theory Comput. 18, 6974 (2022), https://doi.org/10.1021/acs.jctc.2c00395, and the Sella 2.6.0 source:
+
+-   Two atoms are bonded under 1.25 times the sum of their Cordero radii (Dalton Trans. 2008, 2832, digital object identifier (DOI) 10.1039/B801115J).
+    Fragments that stay apart are welded by growing that factor 5 % on pairs between fragments.
+-   Two bonds that share an atom make an angle. Two angles that chain through a shared edge make a proper dihedral.
+-   A bend within 15 degrees of 0 or 180 is left out. A vertex with three or more bonds takes the improper dihedral `a-b-d-c` with `d` the nearest other bonded atom.
+    A vertex with two bonds takes a dummy atom 1 length unit away along the cross product of its arms, pinned by one bond and two right angles, and the improper `a-b-x-c`.
+-   Singular values of the Wilson matrix under one millionth count as zero.
+
+A cell makes every one of these periodic: `Some(&cell)` finds bonds across the boundary, stores a lattice image on each primitive, and measures them on the positions you pass without wrapping.
+A bond network that wraps the cell leaves only translations free, and the check expects that.
+`CellInternalPes` keeps the primitives you give it. A periodic chart's lattice follows the living cell, and a Niggli reduction retargets that chart's images onto the reduced basis.
+
+`TopologyCheck` compares the rank of the Wilson matrix with what the rigid quotient leaves, `3N - 6` (`3N - 5` on a line, `3N - 3` on a wrapped network), and measures how far the internals are from invariant under rigid motion.
+`TopologyConfig::require_complete`, on by default, refuses a chart that falls short.
+A dummy atom adds its pins: at an exactly linear geometry the two right-angle pins are not both first-order handles, so CO2 has a pinned rank of 3 against 4 real degrees of freedom, and the check knows it.
+
+Two things are this crate's own.
+A centre with three neighbours and no torsion through it folds the bond and angle chart when it goes planar, as ammonia does.
+Its three bends come within `planar_tol` (15 degrees) of a full turn, and the build adds the improper dihedral then.
+Sella 2.6 adds an improper at every such centre, so NH3 and CH4 have one and two more dihedrals there than here; the other 13 molecules of `tests/fixtures/sella_topology.txt` match it in bonds, angles, dihedrals and dummies.
+The second is that the dummy atoms follow the real atoms along their pins.
+The step and the gradient live on the real atoms, and the Jacobian the chart uses is `B_r + B_d D` with `D = -J_d^+ J_r`.
+
+The chart is rebuilt at the accepted geometry, before the next gradient is read, when:
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">Reason</th>
+<th scope="col" class="org-left">Trigger</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>SingularJacobian</code></td>
+<td class="org-left">the Wilson matrix is short of rank, or a value cannot be evaluated</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>NearLinearBend</code></td>
+<td class="org-left">a bend in the chart enters the window, or a replaced bend leaves it</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>NearPlanar</code></td>
+<td class="org-left">a centre with no improper comes within <code>planar_tol</code> of planar</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>BackTransform</code></td>
+<td class="org-left">a back-transformation does not converge, or the dummy atoms cannot be put back on their pins, even with the step halved five times</td>
+</tr>
+</tbody>
+</table>
+
+The Hessian crosses a rebuild as `H_x = J_old^T H_q J_old` on the real atoms, read back as `(J_new^+)^T H_x J_new^+`. The Sella guess curvature goes on `ker(J_new^T)`. Cartesian directions the new chart spans and the old one does not get zero curvature.
+It is reseeded from the guess when the old Jacobian cannot be evaluated.
+The trust radius restarts at `delta * n_int` and the pair-update history is cleared.
+`InternalPes::stale_reason` and `rebuild_if_stale` let a host drive the same rule by hand.
+A chart you build with `InternalPes::new` or `VocnFound` is never rebuilt, so those stay the override: `is_auto()` is false and `rebuild_topology` refuses.
+
+A TS search in internals needs `HessUpdate::TsBfgs`; a plain BFGS update cannot learn the negative curvature.
+`tests/auto_internals.rs` finds the same first-order saddle with an automatic and a hand-written chart on ethane, hydrogen peroxide, methanol, methanethiol and ammonia (energies within 1e-6, RMSD under 1e-3, one negative finite-difference mode), through the linear window of an OCO bend with a rebuild and a dummy, and across the boundary of a 10 length-unit cell.

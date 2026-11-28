@@ -1,0 +1,54 @@
+`LandscapeSession` builds a pathway map downward from one certified critical point. The parent is a saddle of index k, either the position and unstable block of a converged `IndexKSession` or a point `saddle_index` certifies. The search pushes a Euclidean step of length `LandscapeConfig::push` (`DEFAULT_LANDSCAPE_PUSH`, 0.1) along each unit unstable eigenvector, both ways, and follows index-(k-1) minimum-mode dynamics until that leg converges. The point is certified again. A new critical point is stored only when its index is one less than the parent, and the search repeats on it. Any other index is `SaddleError::Solver`. A repeated point, closer than `LandscapeConfig::duplicate_distance` (`DEFAULT_DUPLICATE_DISTANCE`, 1e-3), adds an edge and is not searched again. Index 0 is a minimum: that leg is an rgmin solve on the true gradient, the same stepper `RelaxConfig` uses, not a reflected force.
+
+The index-k leg is `IndexKSession`. It reflects the force in the k lowest modes once their curvatures are negative, the dimer translation of Goswami, Gunde, and Jónsson, Front. Chem. 14, 1807063 (2026), https://doi.org/10.3389/fchem.2026.1807063, Equation 3, applied to the block, which is the high-index saddle dynamics of Yin, Zhang, and Zhang, SIAM J. Sci. Comput. 41, A3576 (2019), https://doi.org/10.1137/19M1253356. Each child leg inherits `LandscapeConfig::certificate.negative_tol` (defaulting to `NEGATIVE_CURVATURE_TOL`, 1e-3, or set for both through `LandscapeConfig::with_negative_tol`), so leg convergence and certification always agree on which curvatures count as negative. The pathway itself is the construction of Yin, Wang, Chen, Zhang, and Zhang, Phys. Rev. Lett. 124, 090601 (2020), https://doi.org/10.1103/PhysRevLett.124.090601: critical points whose indices differ by one are joined by the unstable direction that was pushed. The certificate is the block Lanczos saddle index of Goswami, Masterov, Kamath, Peña-Torres, and Jónsson, J. Chem. Theory Comput. 21, 7935 (2025), https://doi.org/10.1021/acs.jctc.5c00866. Each child copy of `LandscapeConfig::search` clears `saddle_check` and `artn` before the index-k leg. `artn` is the ART nouveau activation. `IndexKSession::new` already clears `saddle_check` on the one-mode session. `LandscapeSession::new` still rejects an invalid `saddle_check`, an invalid `artn`, and an invalid `escape`. `LandscapeConfig::certificate` certifies every accepted point after `escape` is set to none.
+
+`PathwayMap::nodes` starts with the parent. A `CriticalPoint` holds the coordinates, the energy, the saddle index, the lowest curvatures, the unstable modes (shape `(n, index)`, lowest curvature first), and the force evaluations spent accepting it. A `LandscapeEdge` records the parent, the child, the column of the parent's unstable block, the sign of the push, and the evaluations of that leg. `PathwayMap::evaluations` counts every `PointSurface::eval`. An analytic `PointSurface::hessian_vector` is not a force evaluation. The parent's `evaluations` plus the sum of the edge evaluations equals the map total: a later arrival at a stored node is charged to the edge only.
+
+The push has to leave the neighbourhood in which the perturbed curvature is still among the k-1 lowest, or the index-(k-1) dynamics return to the parent and the search returns `SaddleError::Solver`. On the separable well of `tests/saddle_index.rs`, that crossing along the most negative mode is at `1/sqrt(6)`, so a push of 0.5 is past it and a push of 0.1 is not. `LandscapeConfig::max_nodes` (`DEFAULT_LANDSCAPE_MAX_NODES`, 64, including the parent) and `LandscapeConfig::max_evaluations` (`DEFAULT_LANDSCAPE_MAX_EVALUATIONS`, 100000) are hard stops. Reaching either is `SaddleError::LandscapeBound` with `LandscapeBoundKind::Nodes` or `LandscapeBoundKind::Evaluations`, the accepted node count, and the evaluations already performed. The partial pathway is not returned. `LandscapeConfig::max_steps` (`DEFAULT_LANDSCAPE_MAX_STEPS`, 2000) caps one saddle leg and one minimum; exhausting it is `SaddleError::Solver`, not a shorter map. `LandscapeConfig::force_gate` is the infinity norm by default. The parent, each index-k leg, and each minimum measure the force with that one gate. A minimum compares it with `RelaxConfig::force_tol`. A saddle leg and the parent compare it with `MinModeConfig::force_tol`. `LandscapeConfig::cell` is a `Cell` or none. With a cell the duplicate test is the Euclidean norm of `Cell::minimum_image`, and the coordinate length must be a multiple of three.
+
+`LandscapeConfig` is non-exhaustive. Start from `LandscapeConfig::default` and chain `with_duplicate_distance`, `with_push`, `with_max_nodes`, `with_max_evaluations`, `with_max_steps`, `with_search`, `with_relax`, `with_certificate`, `with_negative_tol`, `with_force_gate`, and `with_cell`.
+
+From C, ABI minor 69 adds `rgsaddle_landscape_config_default`, `rgsaddle_landscape_create`, `rgsaddle_landscape_run`, `rgsaddle_landscape_node`, `rgsaddle_landscape_modes`, `rgsaddle_landscape_edge`, and `rgsaddle_landscape_free`. The coordinate length is `3 * n_atoms`. A null Hessian callback estimates the action from the surface. A supplied callback is a `rgsaddle_hessian_at_fn` and receives the geometry and the vector. `RGSADDLE_LANDSCAPE_BOUND` is the limit, and the report's `bound` is 1 for nodes or 2 for evaluations. Node and edge queries then return `RGSADDLE_NO_EVALUATION` because no pathway was stored. The C++ owner is `rgsaddle::Landscape` in `include/rgsaddle/session.hpp`, and its constructor requires ABI 1.69. Python exposes `Landscape`, `PathwayMap`, `CriticalPoint`, and `LandscapeEdge`. `Landscape.run` takes the same one-image callback as `saddle_index`. A limit raises `ValueError` in Python and `std::runtime_error` from `rgsaddle::Landscape::run`, and returns no map.
+
+The runnable Rust example is the doctest on `LandscapeSession`. `cargo test --doc landscape` runs it.
+
+
+# A two-dimensional surface
+
+The Müller-Brown potential (Müller and Brown, Theoretica Chimica Acta 53, 75 (1979), https://doi.org/10.1007/BF00547608) is a surface of two coordinates. It has no index-2 point in the window used by `tests/simplified_string.rs`. The downward maps start at the two published index-1 saddles. `PointSurface` has length 2. The C and Python sessions stay on a multiple of three because the ABI packs atoms; the Rust session does not.
+
+With an analytic Hessian action, push 0.2, force tolerance 1e-6, duplicate distance 0.05, and per-atom minimizer cap 0.05, the map from S1 at (-0.822001558733, 0.624312802815) stored that saddle and the minima A and C. The parent cost 1 force evaluation, A cost 131, and C cost 87, 219 in all. The map from S2 at (0.212486582001, 0.292988325107) stored that saddle and the minima C and B. The parent cost 1, C cost 114, and B cost 86, 201 in all. The two maps together called the surface 420 times. Positions matched the published stationary points to 1e-2 and energies to 1e-3, with the indices 1 and 0.
+
+The same search on the separable well of `tests/landscape.rs`, three coordinates and an analytic action, push 0.5 and force tolerance 1e-8, stored 9 nodes and 12 edges in 865 force evaluations. The origin cost 1. The index-1 saddles at `(+-1, 0, 0)` cost 7 each to discover, the index-1 saddles at `(0, +-1/sqrt(2), 0)` cost 43 each, and each of the four minima cost 79. The other 448 evaluations are later edges that arrive at a node already stored. Direction 0 at the origin, the most negative curvature, connects to the saddles on the x axis. Each minimum has two parents.
+
+```rust
+use ndarray::array;
+use rgsaddle::{IndexKConfig, LandscapeConfig, LandscapeSession, MinModeConfig, RelaxConfig};
+
+let search = MinModeConfig::default()
+    .with_force_tol(1.0e-6)
+    .with_max_move(0.05)
+    .with_saddle_check(None);
+let config = LandscapeConfig::default()
+    .with_push(0.2)
+    .with_duplicate_distance(5.0e-2)
+    .with_search(IndexKConfig::new(1, search))
+    .with_relax(
+        RelaxConfig::default()
+            .with_force_tol(1.0e-6)
+            .with_max_atom_move(0.05)
+            .with_initial_step(0.02),
+    );
+let session = LandscapeSession::new(
+    config,
+    array![-0.822_001_558_733, 0.624_312_802_815],
+    None,
+)?;
+let map = session.run(&surface)?;
+assert_eq!(map.nodes[0].index, 1);
+assert_eq!(map.nodes.len(), 3);
+assert_eq!(map.edges.len(), 2);
+# Ok::<(), rgsaddle::SaddleError>(())
+```
+
+`surface` is the `PointSurface` in `tests/landscape.rs`. That test also checks the node and evaluation limits and the minimum-image duplicate test on a periodic cell.

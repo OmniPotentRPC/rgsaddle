@@ -1,0 +1,81 @@
+The package is a nanobind extension, `rgsaddle._core`, with a pure Python layer. `import rgsaddle` does not import ASE. Install ASE only when you construct `rgsaddle.ase.SurfaceAdapter`:
+
+```sh
+pip install .
+pip install 'rgsaddle[ase]'
+```
+
+Wheels are cp310, cp311, cp312-abi3 (CPython 3.12 through 3.15 with the GIL), cp314t and cp315t. There is no musllinux wheel and no cp313t wheel.
+
+
+# Enum controls
+
+Eight `IntEnum` classes keep the names and values of the previous module: `ForceGate`, `HessUpdate`, `IrcKind`, `MinModeKind`, `EigenDevice`, `ExpandKind`, `CellChart`, `RestrictedKind`. An unknown ordinal raises `ValueError`. `MinModeKind` contains dimer and Lanczos; `RGSADDLE_MINMODE_LOBPCG` belongs to the index-k C ABI and has no Python session. `rgsaddle.__version__` is the package version.
+
+```python
+import rgsaddle
+assert rgsaddle.ForceGate.MAX_FORCE_ON_ATOM == 2
+assert rgsaddle.ForceGate(2) is rgsaddle.ForceGate.MAX_FORCE_ON_ATOM
+```
+
+
+# Status codes
+
+`raise_status(code)` maps `rgsaddle_status_t`. `RGSADDLE_OK` returns true. `RGSADDLE_SHAPE` and `RGSADDLE_INVALID_PARAMETER` raise `ValueError`. `RGSADDLE_NON_FINITE` raises `NumericalError`, a subclass of `ArithmeticError`. `RGSADDLE_SURFACE_FAILED` raises `RuntimeError`. It does not re-raise a stored calculator exception. Every other code, including `RGSADDLE_NOT_EQUILIBRATED` and `RGSADDLE_INSUFFICIENT_EFFECTIVE_SAMPLES`, raises `RuntimeError`. The exception message is the thread-local text when that text is non-empty, and the status name otherwise. `raise_status` clears that text. `last_error()` is reserved for the C ABI last-error text. It returns an empty string unless an error text was set. Convergence of a stepping run is a report, not a status code. The geodesic interpolation is the exception, and its `RGSADDLE_NOT_CONVERGED` raises `RuntimeError` like any other remaining code.
+
+
+# Surface adapter
+
+`SurfaceAdapter(images, allow_shared_calculator=False)` checks the image list, then evaluates C ABI request rows `(ids, x) -> (energies, gradients)`.
+
+-   Image ids are the list positions at construction.
+-   `x` has shape `(rows, 3 * n_atoms)`, float64, C contiguous.
+-   Positions are written with `set_positions(..., apply_constraint=False)`, so the row stays on the geometry the caller passed.
+-   The gradient is minus `Atoms.get_forces()`, which applies constraints the way ASE does.
+-   `raw_forces` keeps `get_forces(apply_constraint=False)` for those rows, in request order. The assignment happens while the call still holds the in-use claim.
+-   Two images may share one calculator object only when `allow_shared_calculator` is true. The same check runs again at `__call__`, `owners`, and `reentrant`, using `atoms.calc` identity.
+-   `owners(ids)` is the calculator identity of each row, as `uint64`. `reentrant(ids)` is `uint8`, 1 when that calculator sets `reentrant` true. A caller uses those arrays to group rows. The adapter does not start threads.
+
+`__call__(ids, x)` evaluates the given rows on the calling thread, in the given order.
+
+A calculator exception, including `KeyboardInterrupt`, propagates out of `__call__`. It is not wrapped. A second call on the same adapter, while the first call still holds it, raises `RuntimeError` with the text `SurfaceAdapter is in use by another thread`.
+
+`connect(surface, left, right, force_tol=0.001, max_calls=250000, quench_nodes=True)` runs the double-ended search to completion. `surface(x)` receives one image with shape `(1, 3N)` and returns `(energy, gradient)`, energy shape `(1,)` and gradient shape `(1, 3N)`, the same callback as `Stencil.step`. `left` and `right` are length `3N`. The GIL is released for the search and taken again inside the callback. A calculator exception propagates. `ConnectReport` holds `position`, `energy`, `force_norm`, `kind` (`s`, `u`, or `f`), `hessian_index`, and `evaluations`. The evaluation count includes finite differences that decide a step or an index. The Lanczos acceptance estimates the next curvature with two actions and does not build a dense Hessian. The COMPASS fallback does, and that Hessian is counted.
+
+`lineb_solve(surface, positions, atom_masses, energy, opt_tol, perp_tol, molecular=False, max_steps=1000, beads=0, ...)` runs a fixed-energy LI-NEB path to completion and optionally the harmonic quantum TST rate (`howto/lineb`). `positions` is `(n_images, 3N)`. `atom_masses` holds one positive mass per atom: with `molecular=False` each mass expands to three coordinates, and with `molecular=True` the free molecule is quaternion-aligned. `surface(x)` is the same one-image callback as `connect`. The GIL is released around `rgsaddle_lineb_solve` and taken again inside the trampoline. A calculator exception propagates unchanged. `beads=0` skips the rate and leaves `log_rate_over_reactant` as NaN. An unconverged search raises with the existing non-success C status. `LinebResult` holds `positions`, `action`, both half periods and temperatures, `log_rate_over_reactant`, `iterations`, and the `optimizer_calls`, `measure_calls`, `dynamics_calls`, and `rate_calls` tallies.
+
+`rgsaddle.ase.NEB`, `AutoNEB`, `SimplifiedString`, `GrowingString`, `MinModeAtoms`, and `Sella` are the ASE-shaped calls. `AutoNEB` runs `autoneb_run`, and its `run()` returns an `AutoNEBReport` (`status`, `max_force`, `ci_index`, `surface_rows`, `n_images`, `iteration`, `positions`, `images`): a `status` of 0 means the last stage spent its steps before it met the force stop. `NEB`, `SimplifiedString`, and `GrowingString` read `FixAtoms` from the images into the band's fixed-atom mask: those atoms get zero force rows, `interpolate` leaves them on the first image, and every image must fix the same atoms. `NEB.interpolate` takes `method` `linear` or `idpp` and `mic`. `idpp` calls `idpp_path`. `DyNEB` freezes images that are already under `fmax`; `NEB` does not, unless `dynamic_relaxation=True` is passed and the `FutureWarning` is accepted. `DimerControl` and `MinModeTranslate` are the dimer parameter object and the optimizer that takes one `MinMode.step`. `SimplifiedString` runs the simplified string method of E, Ren, and Vanden-Eijnden with `'not-a-knot'` (or `'spline'`) or `'linear'` equal-arc-length reparametrization and an optional climbing image (`run(fmax, steps)` drives `rgsaddle.Band` under an ASE `Optimizer` subclass so `logfile`, `trajectory`, and attached observers run per step). `GrowingString` runs the growing string method of Peters, Heyden, Bell, and Chakraborty from the endpoint images, handing off to `StringSession` once the fragments join. The migration page says where `NEB` follows ASE and where the endpoint-slope climb, the `aseneb` name, and the plain `eb` projection do not. `NEBOptimizer` drives that band with ASE's ODE12r step or a fixed step (`howto/neb-optimizer`). IRC stays on the Rust and C sessions.
+
+`_core.halve_raised_energy(previous, trial, step)` returns `(raised, new_step)`. A trial more than 1e-4 above `previous` halves `step`. `_core.trust_update(radius, predicted, actual, step_norm, sigma_inc, sigma_dec, rho_inc, rho_dec, delta_min)` is the Sella radius after those energy changes. A prediction below 1e-14 in absolute value returns `radius`. Neither call evaluates a surface.
+
+`rgsaddle.Band` is the stepping band and simplified-string session: `Band(positions, ..., string=True, reparametrization="not-a-knot")` takes a batched surface callback receiving `(rows, 3N)` and returning `(energies, gradients)`, with `step`, `run`, `positions`, `set_positions`, `evaluation`, `set_string`, `set_fixed_atoms`, `saddle_index`, `set_saddle_check`, `restart`, and `reset`. `rgsaddle.GrowingString(reactant, product, n_images=11, frontier_tol=0.2, ...)` steps the growing string and hands off to `StringSession` upon join, with `step`, `run`, `n_images`, `nodes_added`, `joined`, `positions`, `ids`, `set_fixed_atoms`, and `saddle_index`. `Band.set_free_end(enabled, side="last", target_energy=None, max_cuts=2, cut_force=0.0, energy_tol=0.001, stability=2, window_offset=1, cubic=True)` enables the free-end adaptive NEB of Zhang, Zhang, Ye, and Zheng on an existing band (ABI minor 45; a host checks the loaded minor before calling it). `Band.set_refine(enabled=True, threshold=0.0, memory=20)` and `Band.is_refining` install the per-step L-BFGS refine stepper (ABI minor 60). A threshold of 0 selects 0.5, in the host's force units, and `enabled=False` clears it. `Band.target_energy_residual` and `Band.free_end_cuts` report the level-set residual and how many local windows were removed. `Band.evaluation` returns the energies, gradients, and projected interior forces at the positions the last step reported. The worked example is `tests/free_end_neb.rs`. `_core.project_band` projects an evaluated band (including `projection="string"` for the unprojected potential force with optional climbing reflection). `_core.MinMode` and `_core.SellaSaddle` are the point sessions those classes drive; their surface callback receives one image shaped `(1, 3N)` and returns `(energy, gradient)`.
+
+`_core.MinMode` translates with L-BFGS, unlike the FIRE default of Rust's `MinModeConfig` and `rgsaddle_minmode_create` when its method field is zero.
+
+The low-level Python session is intentionally smaller than the C and Rust sessions.
+It does not expose reset, an explicit mode setter, the torque window, HiGHS, force-gate selection, or kappa controls.
+Use the Rust session or the corresponding `rgsaddle_minmode_*` C entry points when a host needs those controls.
+
+
+# Saddle index
+
+A converged `_core.MinMode` step certifies the saddle index of its point, as in `howto/minmode`: `SessionReport.saddle_index` is the index on that step and -1 on the others.
+`MinMode.saddle_index()` returns a `SaddleIndex` with `certified`, `index`, `converged`, the ascending `curvatures`, `evaluations`, and the session's `total_evaluations` and `escapes`.
+`MinMode.set_saddle_check(enabled=True, escape_attempts=0, escape_push=0.1, lowest=4, max_actions=100, dr=1e-3, residual_tol=1e-2, negative_tol=1e-3)` replaces the check; `enabled=False` turns it off, and a positive `escape_attempts` pushes a point of index two or more off its extra negative modes and searches again.
+`rgsaddle.saddle_index(surface, x, gradient=None, mode=None, fixed=None, ...)` certifies one point through the same callback, with an optional gradient at `x`, seed mode and `uint8` fixed-atom mask.
+Both Python calls keep the C defaults that are not keyword arguments: block size 2, forward differences, and the library's deterministic seed.
+`rgsaddle.ase.saddle_index(atoms, mode=None, ...)` certifies ASE atoms on their calculator with `FixAtoms` as the mask and leaves them where they were, and `rgsaddle.ase.NEB.saddle_index()` certifies the climbing image of a band that climbs, seeded with its tangent.
+An index above 1 at a converged climbing image says the band stopped on a saddle of higher index, as a band whose start shares a symmetry with the surface can.
+
+The index-k step has no Python session name. It is `rgsaddle_indexk_step` in the C ABI and `rgsaddle::IndexK` in the C++ header.
+
+`Landscape` searches downward from a critical point of length `3N`. `modes` is shape `(3N, k)` or omitted. The opening controls are `push` (0.1), `duplicate_distance` (0.001), `max_nodes` (64), `max_evaluations` (100000), `max_steps` (2000), and `force_tol` and `relax_force_tol` (0.001). `Landscape.run` takes the surface callback and an optional `hessian`. It returns a `PathwayMap` whose `nodes` are `CriticalPoint` values and whose `edges` are `LandscapeEdge` values. `hessian` matches `rgsaddle_hessian_at_fn`: it receives the geometry and the vector. Omit it and the search estimates the action from the surface. A node has `position`, `energy`, `index`, `curvatures`, and `evaluations`. An edge has `parent`, `child`, `direction`, `sign`, and `evaluations`. The map's `evaluations` counts every force evaluation. A node or evaluation limit raises `ValueError` and returns no pathway. The surface callback is the one-image `(1, 3N)` callback of `saddle_index`.
+
+
+# Thread safety
+
+Immutable values, such as the enum members, are shared freely. `SurfaceAdapter` is a mutable session. Each call claims an atomic flag for the whole call and drops it when the call returns, including when the calculator raises. `raw_forces` is assigned before that drop. Do not call the adapter again from inside its own calculator.
+
+The adapter does not start threads. The caller passes request rows and the adapter evaluates them on that caller's thread. A Python exception raised by the calculator propagates on that thread. It does not unwind through the Rust static library. `PyErr_CheckSignals` runs on that thread.
+
+There is no global mutable state. The last-error string is thread-local. Arrays are float64 and C contiguous. Wrong dtype or order is `TypeError`. Wrong shape is `ValueError` that names the argument and both shapes. Outputs are new arrays. `-0.0`, NaN and subnormals pass through. Sub-interpreters are unsupported.

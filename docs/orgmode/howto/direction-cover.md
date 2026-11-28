@@ -1,0 +1,214 @@
+`DirectionCover` decides where the saddle searches out of one minimum start, and in which order. It is written for adaptive kinetic Monte Carlo, where every visited minimum needs its low saddles and a measure of how much of the search space has been tried (Xu and Henkelman, J. Chem. Phys. 129, 114104 (2008), https://doi.org/10.1063/1.2976010). It supplies the starts and the order only. Each start runs as one `ArtSession`, the phased ART nouveau of `howto/art`, so the push, perpendicular relaxation, Lanczos climb, index-1 certificate and both quenches are the ones documented there.
+
+Nothing here builds a Hessian. The inputs are the minimum, an optional per-atom active mask, a `u64` seed, a `DirectionCoverConfig` and a `CoverBudget`. Bad input returns `SaddleError`; nothing is clamped or replaced.
+
+
+# Run a budget of arms
+
+Build the chooser on the surface and the relaxed minimum, then spend a budget. A budget sets `max_arms`, `max_force_calls`, or both; an empty budget is refused.
+
+```rust
+use ndarray::{Array1, ArrayView1, array};
+use rgsaddle::{
+    ArmOutcome, ArtConfig, CoverBudget, DirectionCover, DirectionCoverConfig, MinModeConfig,
+    MinModeKind, PointSurface, SaddleError,
+};
+
+struct DoubleWell;
+
+impl PointSurface for DoubleWell {
+    fn eval(&self, x: ArrayView1<f64>) -> Result<(f64, Array1<f64>), SaddleError> {
+        let (px, py, pz) = (x[0], x[1], x[2]);
+        let e = (px * px - 1.0).powi(2) + 0.25 * (py * py + pz * pz);
+        Ok((e, array![4.0 * px * (px * px - 1.0), 0.5 * py, 0.5 * pz]))
+    }
+}
+
+fn main() -> Result<(), SaddleError> {
+    let mode = MinModeConfig::default()
+        .with_kind(MinModeKind::Lanczos)
+        .with_saddle_check(None)
+        .with_force_tol(0.02)
+        .with_max_move(0.1)
+        .with_krylov_dim(4)
+        .with_max_rotations(6);
+    let art = ArtConfig::default()
+        .with_mode(mode)
+        .with_push_length(0.5)
+        .with_push_step(0.3)
+        .with_max_pushes(12)
+        .with_max_climbs(25)
+        .with_push_over(0.25);
+    let config = DirectionCoverConfig::default().with_art(art);
+    let mut cover = DirectionCover::new(&DoubleWell, array![-1.0, 0.0, 0.0], None, 7, config)?;
+    let report = cover.run(&DoubleWell, CoverBudget::default().with_max_arms(12))?;
+    assert_eq!(report.saddles.len(), 1);
+    assert!(report
+        .records
+        .iter()
+        .any(|r| r.outcome == ArmOutcome::DuplicateSaddle(0)));
+    Ok(())
+}
+```
+
+The same example is the doctest on `DirectionCover`. Arms whose push points away from the barrier end as `NonConverged` (ART spent its pushes without negative curvature). Once one product is known the picker turns to the untried directions next to it.
+
+
+# Drive the arms from the host
+
+`run` is the loop `suggest_batch`, `run_arm` for each pick on rayon's pool, then `record` in pick order. A host that schedules its own workers can split it:
+
+1.  `suggest` or `suggest_batch(k)` returns `ArmSuggestion` values: the `ArmId` (centre atom and cover point), its score, and the policy that produced it.
+2.  `seed(arm)` is the `ArtSeed` for that arm, if the host runs ART itself; `run_arm(surface, arm)` runs it and returns an `ArmTrial`.
+3.  `record(trial)` files the verdict. A host that runs another climb builds the trial with `ArmTrial::connected`, `returned`, `failed` or `non_converged`.
+4.  `set_prefactor(arm, ν)` attaches a prefactor the host computed later.
+5.  `coverage()` is the readout.
+
+Recording the same arm twice is an error. The picker is a function of the recorded trials, so a host that records in a fixed order gets the same picks whatever its thread count.
+
+
+# Confine the search to a region
+
+Pass `Some(&active)` with one `bool` per atom. Only active atoms are centres, and only they move in their own seeds: the ART mask is one on the centre and on each kicked neighbour, zero elsewhere. Neighbour kicks reach atoms within `kick_radius` of the centre, inactive ones included, so set the radius to zero to keep every push on the active atoms alone. A mask of the wrong length is `SaddleError::Shape`; a mask with no active atom is `SaddleError::Invalid`.
+
+
+# Reference
+
+
+## Cover
+
+Every active atom carries the same cover: `cover_points` signed unit vectors on its own sphere (64 by default, at least 4). A direction and its opposite are separate arms. The points are spread by the geodesic repulsion of Plasencia Gutiérrez, Argáez and Jónsson (J. Chem. Theory Comput. 13, 125 (2017), https://doi.org/10.1021/acs.jctc.5b01216), relaxed for `cover_sweeps` Gauss-Seidel sweeps from a start drawn from the seed, then ordered farthest point first. `sphere_cover(n, sweeps, seed)` returns that set.
+
+An arm's seed is its cover vector on the centre plus, when `kick_radius` is positive, independent Gaussian components of standard deviation `kick_width` on every atom within the radius. Pedersen, Hafstein and Jónsson (SIAM J. Sci. Comput. 33, 633 (2011), https://doi.org/10.1137/100792743) show that this centre, radius and width set which saddles a minimum-mode search reaches and how often. Distances use the minimum image when `cell` is set; ART itself runs on open coordinates.
+
+
+## Arm verdicts
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left"><code>ArtStatus</code></th>
+<th scope="col" class="org-left"><code>ArmOutcome</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>Connected</code></td>
+<td class="org-left"><code>NewSaddle</code>, or <code>DuplicateSaddle(id)</code> for a saddle already recorded</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>Reverted</code></td>
+<td class="org-left"><code>ReturnedToStart</code>: both quenches came back</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>Irreversible</code></td>
+<td class="org-left"><code>Failed(ArmFailure::Disconnected)</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>NotIndexOne</code></td>
+<td class="org-left"><code>Failed(ArmFailure::NotIndexOne)</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>NotDownhill</code></td>
+<td class="org-left"><code>Failed(ArmFailure::NotDownhill)</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>LostCurvature</code></td>
+<td class="org-left"><code>Failed(ArmFailure::LostCurvature)</code>: curvature recovery was exhausted</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>Exhausted</code></td>
+<td class="org-left"><code>NonConverged</code></td>
+</tr>
+
+<tr>
+<td class="org-left"><code>SaddleError::ArtIndexOneLost</code></td>
+<td class="org-left"><code>Failed(ArmFailure::IndexOneLost { ... })</code>: mode recovery was exhausted</td>
+</tr>
+
+<tr>
+<td class="org-left">an error from the session</td>
+<td class="org-left"><code>Failed(ArmFailure::Error(message))</code></td>
+</tr>
+</tbody>
+</table>
+
+During a climb, consecutive lowest modes must retain an absolute overlap of `ArtConfig::mode_overlap_tol` (1/√2 by default) and negative curvature. If the estimate loses either condition, ART first measures the carried mode's Rayleigh curvature directly. A still-negative carried mode continues the climb. Otherwise ART restarts from its last accepted index-1 point with a halved translation cap, at most `index_one_recovery_attempts` times (6 by default). When the restarts are spent and the rejected curvature is finite and non-negative, the surface has no unstable mode there: the event finishes as `ArtStatus::LostCurvature`, which `DirectionCover` records as `ArmFailure::LostCurvature`. When the rejected curvature is still negative, the mode switched rather than vanished, and ART returns the typed `SaddleError::ArtIndexOneLost`. A rejected curvature that is not finite returns that same error. `DirectionCover` preserves its attempts, curvature, and overlap in `ArmFailure::IndexOneLost`; it does not turn the failure into a soft-mode result.
+
+Two saddles are one when their energies differ by less than `saddle_energy_tol` and their per-atom RMSD is below `saddle_rmsd_tol`. Product minima use `minimum_energy_tol` and `minimum_rmsd_tol` the same way. The RMSD is per atom and Cartesian, under the minimum image when `cell` is set; it does not match permuted identical atoms, so symmetry copies of one saddle on different atoms count as different saddles.
+
+
+## Pick policies
+
+<table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+
+
+<colgroup>
+<col  class="org-left" />
+
+<col  class="org-left" />
+</colgroup>
+<thead>
+<tr>
+<th scope="col" class="org-left">Policy</th>
+<th scope="col" class="org-left">Score of an untried arm</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="org-left"><code>Gap</code> (default)</td>
+<td class="org-left">angle to the nearest tried direction on the same centre, times the distinct states of the start and the three nearest tried</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>ExpectedImprovement</code></td>
+<td class="org-left">expected improvement on the barrier from a Gaussian process on the centre's sphere, times the gap over π</td>
+</tr>
+
+<tr>
+<td class="org-left"><code>Auto</code></td>
+<td class="org-left"><code>ExpectedImprovement</code> once two different barriers are known, <code>Gap</code> before</td>
+</tr>
+</tbody>
+</table>
+
+The states of a gap are the start together with the products of its three nearest tried directions, and the start always counts. A hole whose nearest arms reached products A and B scores three times its angle, one that reached only A scores twice its angle, and one whose edges all came back or failed scores its angle. Failed, non-converged and still pending arms add no state, and a centre with nothing tried scores π. So a hole bounded by arms that led to different minima is tried before one whose edges all came back. The expected improvement is that of Jones, Schonlau and Welch (J. Global Optim. 13, 455 (1998), https://doi.org/10.1023/A:1008306431147) with the Gaussian kernel `exp(-‖u - v‖²/2ℓ²)` of the chordal distance between the unit directions `u` and `v`, length scale `length_scale` (0.6, which is in radians for small angles), the mean and variance of all known barriers, and target `best barrier - ei_margin`. The chordal kernel is the Gaussian of three-dimensional space restricted to the sphere, so its matrix on distinct directions is positive definite for every positive `length_scale`; a Gaussian of the geodesic angle is not (Feragen, Lauze and Hauberg, CVPR 2015). The matrix carries a nugget of 1e-8 times the barrier variance on its diagonal, which keeps the Cholesky factorization in double precision valid for fewer than 9000 tried directions on a centre (Demmel's condition, Higham, Accuracy and Stability of Numerical Algorithms, Theorem 10.7). A pivot that is still not positive returns `SaddleError::Singular`; it is never clamped. `ExpectedImprovement` alone refuses to score before two different barriers are known. Ties go to the centre with fewer tried arms, then the lower atom, then the lower cover point, so the first pass touches every centre once. `batch` arms (1 by default) are picked greedily, each scored as if the earlier picks of the batch were already tried.
+
+
+## Coverage readout
+
+`CoverageReport` has:
+
+-   `subspace_dim`: three times the number of active atoms
+-   `covering_radius`: the largest, over centres, of the exact covering radius of that centre's tried signed directions on the sphere (`covering_radius_s2`); π before any arm
+-   `atoms`: per centre, the tried count, the covering radius and the distinct states among the start and the products reached, so one before any product
+-   `records`: one `ArmRecord` per arm, in record order, with the direction, outcome, saddle and product ids, barrier, optional prefactor and force calls
+-   `saddles`, `products`: the distinct saddles with their hit counts, and the distinct product minima
+-   `discovery`: distinct saddles after each arm; `saddle_draws` and `frequency_counts` are the connected draws and the number of saddles seen once, twice, and so on, for a Good-Turing (Good, Biometrika 40, 237 (1953), https://doi.org/10.1093/biomet/40.3-4.237) or capture-recapture estimate of what is left
+-   `force_calls`: the total over all arms
+-   `next`: the next suggestion and its score, or `None` when every arm is tried
+
+
+## Determinism
+
+Every random draw comes from the `u64` seed. A batch is chosen before it runs, its arms run on rayon's pool, and their trials are recorded in pick order, so the records are the same at one thread and at four; `tests/direction_cover.rs` checks that bitwise.
+
+
+## Force-call history
+
+`ArtSession` stores at most the most recent `ArtConfig::force_call_window` force calls with their positions (64 by default). `force_call_count()` and `ArtOutcome::force_call_count` retain the total even after old positions leave the window. Set the window to zero when only counts are needed. Thus the position-history memory of each arm is bounded by the configured window times the Cartesian dimension rather than by all calls spent.
+
+Quick timing observations belong in `NOTES.md`, not in this reference.
