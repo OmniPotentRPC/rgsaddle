@@ -53,6 +53,8 @@ impl ElasticConstants {
             .fold(0.0_f64, |largest, value| largest.max(value.abs()))
             .max(1.0);
         let tolerance = 64.0 * f64::EPSILON * scale;
+        // Each index addresses several positions of the tensor at once.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..3 {
             for j in 0..3 {
                 for k in 0..3 {

@@ -1475,8 +1475,9 @@ fn invert6(matrix: &[[f64; 6]; 6]) -> Result<[[f64; 6]; 6], SaddleError> {
                 continue;
             }
             let factor = a[row][col];
-            for j in 0..12 {
-                a[row][j] -= factor * a[col][j];
+            let pivot_row = a[col];
+            for (target, held) in a[row].iter_mut().zip(&pivot_row) {
+                *target -= factor * held;
             }
         }
     }

@@ -234,6 +234,8 @@ fn dipole_matches_the_strain_derivative_and_is_symmetric() {
     let volume = det(cell).abs();
     let dipole = ElasticDipole::from_stress(volume, defect_stress, bulk_stress).unwrap();
     let tensor = dipole.tensor();
+    // Both indices address the tensor and its transpose.
+    #[allow(clippy::needless_range_loop)]
     for i in 0..3 {
         for j in 0..3 {
             assert!(

@@ -1701,8 +1701,8 @@ fn pair_distances(atoms: &[[f64; 3]]) -> Vec<f64> {
     for i in 0..atoms.len() {
         for j in (i + 1)..atoms.len() {
             let mut square = 0.0;
-            for axis in 0..3 {
-                let delta = atoms[i][axis] - atoms[j][axis];
+            for (a, b) in atoms[i].iter().zip(&atoms[j]) {
+                let delta = a - b;
                 square += delta * delta;
             }
             distances.push(square.sqrt());

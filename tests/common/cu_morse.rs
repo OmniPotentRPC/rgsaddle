@@ -27,6 +27,8 @@ impl CuMorse {
                     if i == 0 && j == 0 && k == 0 {
                         continue;
                     }
+                    // The axis addresses all three lattice vectors at once.
+                    #[allow(clippy::needless_range_loop)]
                     for axis in 0..3 {
                         positions.push(
                             i as f64 * primitive[0][axis]

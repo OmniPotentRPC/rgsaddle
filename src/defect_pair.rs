@@ -2648,8 +2648,9 @@ fn solve_linear(mut matrix: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Result<Vec<f64>
                 continue;
             }
             let factor = matrix[row][col];
-            for col2 in col..n {
-                matrix[row][col2] -= factor * matrix[col][col2];
+            let pivot_row = matrix[col].clone();
+            for (target, held) in matrix[row].iter_mut().zip(&pivot_row).skip(col) {
+                *target -= factor * held;
             }
             rhs[row] -= factor * rhs[col];
         }

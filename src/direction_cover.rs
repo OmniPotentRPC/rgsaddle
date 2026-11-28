@@ -1082,8 +1082,8 @@ impl DirectionCover {
             let mut best: Option<(ArmSuggestion, usize)> = None;
             for (slot, &atom) in self.centres.iter().enumerate() {
                 let load = tried[slot].len();
-                for point in 0..self.cover.len() {
-                    if done[slot][point] {
+                for (point, &taken) in done[slot].iter().enumerate().take(self.cover.len()) {
+                    if taken {
                         continue;
                     }
                     let gap = self.gap_score(&tried[slot], point);
