@@ -98,6 +98,7 @@ while report.status != BandStatus::Converged {
    howto/c-abi
    howto/meson
    howto/python
+   howto/neb-optimizer
    howto/migrate
    howto/stencil
    howto/formal

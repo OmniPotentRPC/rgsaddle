@@ -12,6 +12,7 @@ raw force.
 
 from __future__ import annotations
 
+import threading
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -608,11 +609,13 @@ class NEB:
     ``get_positions`` and ``get_forces`` are the interior images only,
     shape ``((n_images - 2) * n_atoms, 3)``. ``get_potential_energy`` is
     the highest interior energy. ``ase.optimize`` drives the band through
-    ``__ase_optimizable__``.
+    ``__ase_optimizable__``. ``NEBOptimizer`` drives it with the adaptive
+    ODE12r step or a fixed step.
 
     ``climb=True`` does not climb an interior image when a higher
     endpoint slopes down into the band. ASE's ``NEB`` climbs the highest
-    image on every call, including that slope.
+    image on every call, including that slope. With no climbing image the
+    residual keeps every interior image.
 
     ``remove_rotation_and_translation=True`` aligns each free, non-periodic
     image to the previous one with ASE's rigid fit, and otherwise removes
@@ -691,6 +694,7 @@ class NEB:
         self.imax: int | None = None
         self.ci: int | None = None
         self._real_forces: Float64 | None = None
+        self._residuals: list[float] | None = None
 
     @property
     def natoms(self) -> int:
@@ -895,6 +899,9 @@ class NEB:
         self.energies = np.asarray(energies, dtype=np.float64).reshape(-1)
         interior = self.energies[1:-1]
         if interior.size:
+            # First maximum, the image ``project_band`` climbs. ASE's
+            # ``imax`` is ``1 + np.argsort(interior)[-1]``. On an exact
+            # tie those indices differ.
             self.imax = 1 + int(np.argmax(interior))
             self.emax = float(interior[self.imax - 1])
         else:
@@ -904,14 +911,47 @@ class NEB:
         raw = self._adapter_for().raw_forces
         if raw is not None:
             self._real_forces = np.asarray(raw, dtype=np.float64).reshape(count, natoms, 3)
-        return np.ascontiguousarray(forces[1:-1].reshape(-1, 3), dtype=np.float64)
+        interior = np.ascontiguousarray(forces[1:-1].reshape(-1, 3), dtype=np.float64)
+        self._remember_residual(interior)
+        return interior
+
+    def _remember_residual(self, interior: Float64) -> None:
+        """Store one infinity norm per interior image.
+
+        Omit the climbing image only when ``ci`` is set. With ``climb``
+        set and no chosen image, every interior norm stays, the same
+        residual as ``climb=False``.
+        """
+        natoms = len(self.images[0]) if self.images else 0
+        blocks = np.asarray(interior, dtype=np.float64).reshape(-1, natoms, 3)
+        values: list[float] = []
+        for offset, imgforce in enumerate(blocks):
+            if self.ci is not None and self.ci == offset + 1:
+                continue
+            # Flatten first. On a (natoms, 3) array the infinity norm is the
+            # matrix norm, the largest per-atom L1, not the largest component.
+            flat = np.asarray(imgforce, dtype=np.float64).reshape(-1)
+            values.append(float(np.linalg.norm(flat, ord=np.inf)))
+        self._residuals = values
 
     def get_residual(self) -> float:
-        """Largest per-atom force on the interior images."""
-        forces = self.get_forces().reshape(-1, 3)
-        if forces.size == 0:
-            return 0.0
-        return float(np.max(np.linalg.norm(forces, axis=1)))
+        """Largest absolute component of the projected interior force.
+
+        ``get_forces`` stores one infinity norm per interior image and
+        this returns their maximum. The climbing image is omitted only
+        when one was chosen (``ci`` is not ``None``). A call before
+        ``get_forces`` raises ``RuntimeError``. One interior image that
+        does climb leaves the stored list empty, and the maximum raises
+        ``ValueError``.
+
+        The omitted image is the first interior maximum (``np.argmax``),
+        the image ``project_band`` climbs. ASE omits
+        ``1 + np.argsort(interior)[-1]``. On an exact energy tie those
+        indices differ.
+        """
+        if self._residuals is None:
+            raise RuntimeError("get_residual() called before get_forces()")
+        return float(np.max(np.asarray(self._residuals, dtype=np.float64)))
 
     def iterimages(self) -> Any:
         for index, atoms in enumerate(self.images):
@@ -1069,6 +1109,215 @@ class SingleCalculatorNEB(NEB):
         )
         kwargs["allow_shared_calculator"] = True
         super().__init__(images, *args, **kwargs)
+
+
+_NEB_OPTIMIZER_TYPE_LOCK = threading.Lock()
+
+
+def _neb_optimizer_type() -> type:
+    """Optimizer subclass created on the first ``NEBOptimizer`` call.
+
+    Importing this module does not import ASE. The instance type adds
+    ASE's ``Optimizer`` to the MRO so logfile, trajectory, and observers
+    are the ones ASE's ``NEBOptimizer`` uses. Creation and publication
+    of that class sit under ``_NEB_OPTIMIZER_TYPE_LOCK``.
+    """
+    cached = getattr(_neb_optimizer_type, "cls", None)
+    if cached is not None:
+        return cast(type, cached)
+    with _NEB_OPTIMIZER_TYPE_LOCK:
+        cached = getattr(_neb_optimizer_type, "cls", None)
+        if cached is not None:
+            return cast(type, cached)
+        from ase.optimize.optimize import Optimizer
+
+        # ``type`` keeps ``Optimizer`` on the MRO without a class statement.
+        # ``log`` and ``run`` follow ASE's NEB optimizer, so they are not
+        # substitutable for ``Optimizer.log`` and ``Dynamics.run``. The
+        # published methods stay the ones defined on ``NEBOptimizer``.
+        bound = type(
+            "NEBOptimizer",
+            (NEBOptimizer, Optimizer),
+            {
+                "__doc__": NEBOptimizer.__doc__,
+                "__module__": __name__,
+            },
+        )
+        bound.__qualname__ = "NEBOptimizer"
+        _neb_optimizer_type.cls = bound  # type: ignore[attr-defined]
+        return bound
+
+
+class NEBOptimizer:
+    """Adaptive ODE solver, or a fixed step, for an :class:`NEB` band.
+
+    The constructor and ``run`` follow ``ase.mep.neb.NEBOptimizer``.
+    ``method='ODE'`` (the default) integrates the band force with the
+    adaptive ODE12r stepper of Makri, Ortner, and Kermode, J. Chem. Phys.
+    150, 094109 (2019). ``method='static'`` adds ``alpha`` times the
+    band force. ``method='krylov'`` is accepted and ``run`` raises
+    ``ValueError``. The constructor stores the lowercase name. ``run``
+    does not lowercase its ``method`` argument: ``run(method='ode')``
+    selects the ODE solver and ``run(method='ODE')`` raises
+    ``ValueError`` whose text is ``unknown method:`` plus the stored name.
+
+    The stop is ``neb.get_residual``, the largest absolute component of
+    the projected force on the interior images. The climbing image is
+    omitted only when one was chosen. The static loop returns true when
+    that residual is at or under ``fmax`` and false when ``steps`` is
+    spent. The ODE solver returns false only when it raises
+    ``OptimizerConvergenceError``.
+    An ODE run that uses its step budget without converging still
+    returns true, as ASE's wrapper does. ``logfile``, ``trajectory``,
+    ``append_trajectory``, ``master``, and ``restart`` are ASE's
+    optimizer arguments. An existing ``restart`` file raises
+    ``NotImplementedError``.
+    """
+
+    nsteps: int
+    max_steps: int
+    logfile: Any
+    neb: Any
+    method: str
+    alpha: Any
+    verbose: Any
+    rtol: Any
+    C1: Any
+    C2: Any
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> NEBOptimizer:
+        if cls is NEBOptimizer:
+            return cast(NEBOptimizer, object.__new__(_neb_optimizer_type()))
+        return object.__new__(cls)
+
+    def __init__(
+        self,
+        neb: NEB,
+        restart: Any = None,
+        logfile: Any = "-",
+        trajectory: Any = None,
+        master: Any = None,
+        append_trajectory: bool = False,
+        method: str = "ODE",
+        alpha: Any = 0.01,
+        verbose: Any = 0,
+        rtol: Any = 0.1,
+        C1: Any = 1e-2,
+        C2: Any = 2.0,
+    ) -> None:
+        from ase.optimize.optimize import Optimizer
+
+        self.nsteps = 0
+        self.max_steps = 0
+        self.logfile = None
+        # ``Optimizer`` annotates this parameter as ``Atoms``. ASE's own
+        # NEB optimizer passes the band, which is what this call stores.
+        band: Any = neb
+        Optimizer.__init__(
+            cast(Any, self),
+            atoms=band,
+            restart=restart,
+            logfile=logfile,
+            trajectory=trajectory,
+            master=master,
+            append_trajectory=append_trajectory,
+        )
+        self.neb = neb
+        stored = method.lower()
+        choices = ["ode", "static", "krylov"]
+        if stored not in choices:
+            raise ValueError(f"method must be one of {choices}")
+        self.method = stored
+        self.alpha = alpha
+        self.verbose = verbose
+        self.rtol = rtol
+        self.C1 = C1
+        self.C2 = C2
+
+    def force_function(self, x: Float64) -> Float64:
+        positions = np.asarray(x, dtype=np.float64).reshape((self.neb.nimages - 2) * self.neb.natoms, 3)
+        self.neb.set_positions(positions)
+        return np.asarray(self.neb.get_forces(), dtype=np.float64).reshape(-1)
+
+    def get_residual(self, forces: Any = None, positions: Any = None) -> float:
+        return float(self.neb.get_residual())
+
+    def log(self) -> None:
+        import time
+
+        residual = self.get_residual()
+        now = time.localtime()
+        if self.logfile is not None:
+            name = f"{self.__class__.__name__}[{self.method}]"
+            if self.nsteps == 0:
+                header = (" " * len(name), "Step", "Time", "fmax")
+                self.logfile.write("%s  %4s %8s %12s\n" % header)
+            row = (name, self.nsteps, now[3], now[4], now[5], residual)
+            self.logfile.write("%s:  %3d %02d:%02d:%02d %12.4f\n" % row)
+
+    def callback(self, positions: Any, forces: Any = None) -> None:
+        self.log()
+        self.call_observers()
+        self.nsteps += 1
+
+    def call_observers(self) -> None:
+        from ase.optimize.optimize import Dynamics
+
+        # ASE leaves ``call_observers`` unannotated. The name gives the call a type.
+        notify: Callable[..., Any] = Dynamics.call_observers
+        notify(self)
+
+    def run_ode(self, fmax: float) -> bool:
+        from ase.optimize.ode import ode12r
+        from ase.optimize.sciopt import OptimizerConvergenceError
+
+        # ASE leaves ``ode12r`` unannotated. The name gives the call a type.
+        integrate: Callable[..., Any] = ode12r
+        try:
+            integrate(
+                self.force_function,
+                np.asarray(self.neb.get_positions(), dtype=np.float64).reshape(-1),
+                fmax=fmax,
+                rtol=self.rtol,
+                C1=self.C1,
+                C2=self.C2,
+                steps=self.max_steps,
+                verbose=self.verbose,
+                callback=self.callback,
+                residual=self.get_residual,
+            )
+        except OptimizerConvergenceError:
+            return False
+        return True
+
+    def run_static(self, fmax: float) -> bool:
+        positions = np.asarray(self.neb.get_positions(), dtype=np.float64).reshape(-1)
+        for _ in range(self.max_steps):
+            forces = self.force_function(positions)
+            if self.neb.get_residual() <= fmax:
+                return True
+            positions += self.alpha * forces
+            self.callback(positions)
+        return False
+
+    def run(self, fmax: float = 0.05, steps: int = 100_000_000, method: str | None = None) -> bool:
+        """Step the band and return whether the solver reports success.
+
+        ``steps`` is the iteration budget. The default is ASE's
+        ``DEFAULT_MAX_STEPS`` (100000000). ``method`` selects ``ode`` or
+        ``static`` and is not lowercased. Omitted, it is the name stored
+        by the constructor. The static loop returns false when the budget
+        is spent. The ODE path returns false only on
+        ``OptimizerConvergenceError``.
+        """
+        self.max_steps = steps
+        if method is None:
+            method = self.method
+        if method == "ode":
+            return self.run_ode(fmax)
+        if method == "static":
+            return self.run_static(fmax)
+        raise ValueError(f"unknown method: {self.method}")
 
 
 def _kabsch(target: Float64, moving: Float64) -> Float64:
