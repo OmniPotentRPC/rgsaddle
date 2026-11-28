@@ -37,6 +37,13 @@ pub enum PathInitializer {
     Linear,
     /// Image dependent pair potential interpolation.
     Idpp(IdppConfig),
+    /// Sequential IDPP with the force-gated growth of the paper,
+    /// [`sidpp_path`].
+    Sidpp(SidppConfig),
+    /// Sequential IDPP with the alternating growth of eOn and GPRidge,
+    /// [`sidpp_alternating_path`]. The inverse-distance pair targets
+    /// are the `inverse_distance` setting of the config.
+    SidppAlternating(SidppAlternatingConfig),
     /// TRICS refinement of a configured seed path.
     Trics(TricsStartConfig),
 }
@@ -81,6 +88,21 @@ pub fn initialize_path(
     match initializer {
         PathInitializer::Linear => linear_path(reactant, product, n_images, cell),
         PathInitializer::Idpp(config) => idpp_path(reactant, product, n_images, cell, config),
+        PathInitializer::Sidpp(config) => sidpp_path(reactant, product, n_images, cell, config),
+        PathInitializer::SidppAlternating(config) => {
+            if config.inverse_distance {
+                sidpp_alternating_inverse_distance_path(
+                    reactant,
+                    product,
+                    n_images,
+                    cell,
+                    &[],
+                    config,
+                )
+            } else {
+                sidpp_alternating_path(reactant, product, n_images, cell, &[], config)
+            }
+        }
         PathInitializer::Trics(config) => {
             if cell.is_some() {
                 return Err(SaddleError::Invalid(
@@ -1338,7 +1360,7 @@ fn band_force(
     fixed: &[bool],
 ) -> Result<(f64, Array1<f64>), SaddleError> {
     let dof = reactant.len();
-    if dof == 0 || y.len() % dof != 0 {
+    if dof == 0 || !y.len().is_multiple_of(dof) {
         return Err(SaddleError::Shape(
             "sequential IDPP interior does not match the endpoints".into(),
         ));

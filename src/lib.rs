@@ -185,8 +185,8 @@ pub use geodesic::{
     MorsePairChart, geodesic_interpolate, geodesic_lengths, geodesic_path,
 };
 pub use idpp::{
-    IdppConfig, PathInitializer, SidppAlternatingConfig, SidppConfig, TricsSeed,
-    TricsStartConfig, idpp_path, idpp_path_fixed, initialize_path, linear_path,
+    IdppConfig, PathInitializer, SidppAlternatingConfig, SidppConfig, TricsSeed, TricsStartConfig,
+    idpp_path, idpp_path_fixed, initialize_path, linear_path,
     sidpp_alternating_inverse_distance_path, sidpp_alternating_path, sidpp_path,
 };
 pub use indexk::{

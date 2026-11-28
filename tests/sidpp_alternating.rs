@@ -3,8 +3,8 @@
 use ndarray::{Array1, Array2, ArrayView1, array};
 use rgsaddle::mic::{self, Cell};
 use rgsaddle::{
-    IdppConfig, SaddleError, SidppAlternatingConfig, sidpp_alternating_inverse_distance_path, idpp_path,
-    idpp_path_fixed, linear_path, sidpp_alternating_path,
+    IdppConfig, SaddleError, SidppAlternatingConfig, idpp_path, idpp_path_fixed, linear_path,
+    sidpp_alternating_inverse_distance_path, sidpp_alternating_path,
 };
 
 fn pair_distance(pos: ArrayView1<f64>, i: usize, j: usize) -> f64 {
@@ -161,7 +161,8 @@ fn fixed_atom_that_moves_is_rejected_and_a_short_mask_is_a_shape_error() {
     assert!(matches!(err, SaddleError::Invalid(_)), "{err}");
     let mut bad = reactant.clone();
     bad[3] = f64::NAN;
-    let err = sidpp_alternating_path(bad.view(), product.view(), 3, None, &[], &fast()).unwrap_err();
+    let err =
+        sidpp_alternating_path(bad.view(), product.view(), 3, None, &[], &fast()).unwrap_err();
     assert!(matches!(err, SaddleError::NonFinite(_)), "{err}");
 }
 
@@ -272,9 +273,17 @@ fn permutation_and_rigid_motion_leave_the_path_equivariant() {
     let reactant = array![0.1, -0.2, 0.3, 1.2, 0.4, -0.1, 0.2, 1.0, 0.5];
     let product = array![0.4, 0.2, -0.3, 0.2, 1.3, 0.4, 1.1, 0.1, -0.2];
     let config = fast();
-    let seq = sidpp_alternating_path(reactant.view(), product.view(), 4, None, &[], &config).unwrap();
-    let geo =
-        sidpp_alternating_inverse_distance_path(reactant.view(), product.view(), 4, None, &[], &config).unwrap();
+    let seq =
+        sidpp_alternating_path(reactant.view(), product.view(), 4, None, &[], &config).unwrap();
+    let geo = sidpp_alternating_inverse_distance_path(
+        reactant.view(),
+        product.view(),
+        4,
+        None,
+        &[],
+        &config,
+    )
+    .unwrap();
     let swap = |pos: &Array1<f64>| {
         let mut out = pos.clone();
         for c in 0..3 {
@@ -295,9 +304,15 @@ fn permutation_and_rigid_motion_leave_the_path_equivariant() {
     let product_s = swap(&product);
     let seq_s =
         sidpp_alternating_path(reactant_s.view(), product_s.view(), 4, None, &[], &config).unwrap();
-    let geo_s =
-        sidpp_alternating_inverse_distance_path(reactant_s.view(), product_s.view(), 4, None, &[], &config)
-            .unwrap();
+    let geo_s = sidpp_alternating_inverse_distance_path(
+        reactant_s.view(),
+        product_s.view(),
+        4,
+        None,
+        &[],
+        &config,
+    )
+    .unwrap();
     let seq_gap = max_diff(&seq_s, &swap_path(&seq));
     let geo_gap = max_diff(&geo_s, &swap_path(&geo));
     assert!(seq_gap < 1e-6, "sequential permutation {seq_gap}");
@@ -400,8 +415,15 @@ fn inverse_distance_pull_is_not_the_linear_target() {
     let config = SidppAlternatingConfig::default();
     let seq =
         sidpp_alternating_path(reactant.view(), product.view(), 5, None, &fixed, &config).unwrap();
-    let geo = sidpp_alternating_inverse_distance_path(reactant.view(), product.view(), 5, None, &fixed, &config)
-        .unwrap();
+    let geo = sidpp_alternating_inverse_distance_path(
+        reactant.view(),
+        product.view(),
+        5,
+        None,
+        &fixed,
+        &config,
+    )
+    .unwrap();
     endpoints_match(&seq, &reactant, &product);
     endpoints_match(&geo, &reactant, &product);
     frozen_row(&seq, 0, &[0.0, 0.0, 0.0]);
